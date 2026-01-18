@@ -799,7 +799,7 @@ static pg_connection_t* pool_get_connection(const char *db_path) {
                     snprintf(schema_cmd, sizeof(schema_cmd), "SET search_path TO %s, public", cfg->schema);
                     PGresult *res = PQexec(conn->conn, schema_cmd);
                     PQclear(res);
-                    res = PQexec(conn->conn, "SET statement_timeout = '10s'");
+                    res = PQexec(conn->conn, "SET statement_timeout = '60s'");
                     PQclear(res);
 
                     LOG_DEBUG("Pool: reusing reset connection in slot %d", i);
@@ -984,7 +984,7 @@ int pg_pool_check_connection_health(pg_connection_t *conn) {
                     snprintf(schema_cmd, sizeof(schema_cmd), "SET search_path TO %s, public", cfg->schema);
                     PGresult *res = PQexec(conn->conn, schema_cmd);
                     PQclear(res);
-                    res = PQexec(conn->conn, "SET statement_timeout = '10s'");
+                    res = PQexec(conn->conn, "SET statement_timeout = '60s'");
                     PQclear(res);
 
                     LOG_INFO("Pool: connection reset successful for slot %d", i);
