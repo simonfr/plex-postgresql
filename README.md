@@ -7,31 +7,31 @@
 
 A shim library that intercepts Plex's SQLite calls and redirects them to PostgreSQL. Zero Plex modifications required.
 
-## 🎉 Latest Release: v0.9.2
+## 🎉 Latest Release: v0.9.7
 
-**Critical bug fix:** Timeline 500 errors during playback statistics recording.
+**Bug fix:** playQueues 500 errors resolved.
 
-- ✅ **Fixed:** Timeline endpoint HTTP 500 errors (playback tracking)
-- ✅ **Fixed:** `last_insert_rowid()` with mismatched database handles
-- ✅ **Fixed:** Empty statistics_media row prevention maintained
-- ✅ **New:** Comprehensive Linux installation documentation
+- ✅ **Fixed:** playQueues HTTP 500 errors (fallback to SQLite for edge cases)
+- ✅ **Fixed:** Consistent 60s statement_timeout after connection reset
+- ✅ **Improved:** Count query detection cached at prepare time for better performance
+- ✅ **Refactored:** Platform code now shares common modules (36% code reduction)
 
-[📥 Download v0.9.2](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.2) | [📋 Full Release Notes](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.2)
+[📥 Download v0.9.7](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.7) | [📋 Full Release Notes](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.7)
 
-**Available for:** macOS ARM64 (224KB) • Linux x86_64 (264KB) • Linux ARM64 (257KB) • Docker (multi-arch)
+**Available for:** macOS ARM64 • Linux x86_64 • Linux ARM64 • Docker (multi-arch)
 
 ### Quick Install
 
 **macOS:**
 ```bash
-curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.2/db_interpose_pg.dylib \
+curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.7/db_interpose_pg.dylib \
   -o /usr/local/lib/db_interpose_pg.dylib
 # Then configure DYLD_INSERT_LIBRARIES in Plex launchd plist
 ```
 
 **Linux (x86_64):**
 ```bash
-sudo curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.2/db_interpose_pg_linux_x86_64.so \
+sudo curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.7/db_interpose_pg_linux_x86_64.so \
   -o /usr/local/lib/db_interpose_pg.so
 # Then configure LD_PRELOAD in systemd service
 ```
@@ -120,24 +120,29 @@ make benchmark
 
 For rclone/Real-Debrid setups with Kometa/PMM, **SQLite becomes unusable** during library scans. PostgreSQL handles it without issues.
 
-## What's New in v0.9.2
+## What's New in v0.9.7
 
-### Critical Bug Fix: Timeline 500 Error
+### Bug Fix: playQueues 500 Error
 
-**Problem:** `/:/timeline` endpoint returned HTTP 500 errors during playback statistics recording with `Got exception from request handler: std::exception`.
+**Problem:** `/playQueues` endpoint returned HTTP 500 errors for certain edge cases.
 
-**Root Cause:** Plex calls `sqlite3_last_insert_rowid()` with a different database handle than the one used for INSERT operations. The shim's connection lookup returned NULL, causing `last_insert_rowid()` to return 0, which triggered exceptions in Plex.
+**Root Cause:** Some queries resulted in PostgreSQL statements without bound parameters (paramless pg_stmt), which caused issues during execution.
 
-**Solution:** Enhanced `last_insert_rowid()` with fallback connection lookup using `pg_find_any_library_connection()` when exact handle match fails. Additionally, sequence advancement now occurs BEFORE skipping empty statistics_media INSERTs to ensure valid rowid values.
+**Solution:** Fallback to SQLite for these edge cases, ensuring all playQueues requests succeed.
 
-**Impact:**
-- ✅ Timeline requests return HTTP 200 (was 500)
-- ✅ Playback statistics correctly recorded
-- ✅ Empty statistics_media rows still prevented (no 310M row accumulation)
-- ✅ Multiple consecutive timeline requests succeed
-- ✅ No SQLITE_MISUSE errors
+### Performance Improvements
 
-**Technical Details:** See [v0.9.2 Release Notes](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.2) for complete details and installation instructions.
+- **Count query detection** cached at prepare time (was: per-step)
+- **Consistent statement_timeout** (60s) after connection reset
+
+### Code Quality
+
+- **36% code reduction** through platform code refactoring
+- Shared common module (`db_interpose_common.c`) for macOS and Linux
+- Platform-specific backtrace implementations abstracted via `platform_print_backtrace()`
+- Common signal handler and exception logging
+
+**See also:** [v0.9.2 Release Notes](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.2) for timeline 500 fix details.
 
 ### Easy Installation
 
@@ -177,7 +182,7 @@ docker-compose logs -f plex
 
 **What happens:**
 - ✅ PostgreSQL schema auto-created (empty)
-- ✅ v0.9.2 fixes active (timeline errors fixed)
+- ✅ v0.9.7 fixes active (playQueues + timeline errors fixed)
 - ✅ Multi-arch support (x86_64 + ARM64)
 - ✅ All directories pre-created (Plug-ins, Metadata, Cache)
 - ✅ No crashes, stable operation
@@ -250,11 +255,11 @@ volumes:
 
 ### Option 1: Pre-compiled Binary (Recommended)
 
-**Latest Release:** [v0.9.2](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.2) - Fixes timeline 500 errors
+**Latest Release:** [v0.9.7](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.7) - Fixes playQueues + timeline errors
 
 ```bash
 # Download the shim
-curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.2/db_interpose_pg.dylib \
+curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.7/db_interpose_pg.dylib \
   -o /usr/local/lib/db_interpose_pg.dylib
 
 # Configure Plex environment
@@ -342,7 +347,7 @@ pkill -x "Plex Media Server" 2>/dev/null
 
 ### Option 1: Pre-compiled Binary (Recommended)
 
-**Latest Release:** [v0.9.2](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.2) - Fixes timeline 500 errors
+**Latest Release:** [v0.9.7](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.7) - Fixes playQueues + timeline errors
 
 **Available architectures:**
 - ✅ x86_64 (Intel/AMD 64-bit)
@@ -366,14 +371,14 @@ sudo -u postgres psql -d plex -c "CREATE SCHEMA IF NOT EXISTS plex; ALTER SCHEMA
 
 **For x86_64 (Intel/AMD):**
 ```bash
-sudo curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.2/db_interpose_pg_linux_x86_64.so \
+sudo curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.7/db_interpose_pg_linux_x86_64.so \
   -o /usr/local/lib/db_interpose_pg.so
 sudo chmod 644 /usr/local/lib/db_interpose_pg.so
 ```
 
 **For ARM64 (aarch64):**
 ```bash
-sudo curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.2/db_interpose_pg_linux_arm64.so \
+sudo curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.7/db_interpose_pg_linux_arm64.so \
   -o /usr/local/lib/db_interpose_pg.so
 sudo chmod 644 /usr/local/lib/db_interpose_pg.so
 ```
@@ -416,7 +421,7 @@ sudo journalctl -u plexmediaserver -n 100 | grep -i postgres
 
 # Expected output:
 # "PostgreSQL connection established to localhost:5432/plex"
-# "PostgreSQL shim initialized (v0.9.2)"
+# "PostgreSQL shim initialized (v0.9.7)"
 
 # Verify shim is loaded
 sudo cat /proc/$(pgrep -f "Plex Media Server")/maps | grep db_interpose_pg
@@ -523,17 +528,21 @@ The shim intercepts all `sqlite3_*` calls, translates SQL syntax (placeholders, 
 
 ### Architecture
 
-The codebase uses a modular architecture with platform-specific cores:
+The codebase uses a modular architecture with platform-specific cores and shared common code:
 
 ```
 src/
-├── db_interpose_core.c        # macOS: DYLD_INTERPOSE + fishhook
-├── db_interpose_core_linux.c  # Linux: LD_PRELOAD + dlsym(RTLD_NEXT)
+├── db_interpose_common.c      # Shared: function pointers, exception handling, fork handlers
+├── db_interpose_common.h      # Common declarations
+├── db_interpose_core.c        # macOS: fishhook + execinfo.h backtrace (368 lines)
+├── db_interpose_core_linux.c  # Linux: LD_PRELOAD + /proc/maps backtrace (646 lines)
 ├── db_interpose_*.c           # Shared: open, exec, prepare, bind, step, column, metadata
 ├── sql_translator.c           # SQLite → PostgreSQL SQL translation
 ├── sql_tr_*.c                 # Translation modules: functions, types, quotes, etc.
 └── pg_*.c                     # PostgreSQL client, connection pool, statement cache
 ```
+
+**Code sharing:** Platform-specific code reduced by 36% (2889 → 1844 lines) through extraction of common modules.
 
 ### Key Features
 
