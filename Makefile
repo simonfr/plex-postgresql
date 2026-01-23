@@ -39,7 +39,7 @@ SQL_TR_OBJS = src/sql_translator.o src/sql_tr_helpers.o src/sql_tr_placeholders.
 PG_MODULES = src/pg_config.o src/pg_logging.o src/pg_client.o src/pg_statement.o src/pg_query_cache.o
 
 # DB Interpose modules - shared between Mac and Linux
-DB_INTERPOSE_SHARED = src/db_interpose_open.o src/db_interpose_exec.o \
+DB_INTERPOSE_SHARED = src/db_interpose_common.o src/db_interpose_open.o src/db_interpose_exec.o \
                       src/db_interpose_prepare.o src/db_interpose_bind.o src/db_interpose_step.o \
                       src/db_interpose_column.o src/db_interpose_metadata.o
 
@@ -78,7 +78,7 @@ macos: clean
 		obj=$$(echo $$src | sed 's/\.c$$/.o/'); \
 		$(CC) -c -fPIC -o $$obj $$src $(CFLAGS); \
 	done
-	$(CC) -c -O2 -Iinclude -o src/fishhook.o src/fishhook.c
+	$(CC) -c -O2 -Iinclude -Isrc -o src/fishhook.o src/fishhook.c
 	clang -dynamiclib -undefined dynamic_lookup -o db_interpose_pg.dylib $(OBJECTS) \
 		-I/opt/homebrew/opt/postgresql@15/include -Iinclude -Isrc \
 		-L/opt/homebrew/opt/postgresql@15/lib -lpq
@@ -140,10 +140,13 @@ src/fishhook.o: src/fishhook.c include/fishhook.h
 	$(CC) -c -O2 -Iinclude -o $@ $<
 
 # DB Interpose module compilation rules
-src/db_interpose_core.o: src/db_interpose_core.c src/db_interpose.h
+src/db_interpose_common.o: src/db_interpose_common.c src/db_interpose.h src/db_interpose_common.h
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
-src/db_interpose_core_linux.o: src/db_interpose_core_linux.c src/db_interpose.h
+src/db_interpose_core.o: src/db_interpose_core.c src/db_interpose.h src/db_interpose_common.h
+	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
+
+src/db_interpose_core_linux.o: src/db_interpose_core_linux.c src/db_interpose.h src/db_interpose_common.h
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
 src/db_interpose_open.o: src/db_interpose_open.c src/db_interpose.h
@@ -469,6 +472,7 @@ RELEASE_DIR = release
 VERSION = $(shell cat VERSION 2>/dev/null || echo "dev")
 
 # Architecture-specific builds (macOS only)
+# Note: db_interpose_common.c is already included in DB_INTERPOSE_SHARED
 release-arm64: clean
 	@echo "Building arm64..."
 	@for src in $(SQL_TR_OBJS:.o=.c) $(PG_MODULES:.o=.c) $(DB_INTERPOSE_SHARED:.o=.c) src/db_interpose_core.c src/fishhook.c; do \
