@@ -53,6 +53,7 @@ RUN ARCH=$(uname -m) && \
         -std=c11 -D_XOPEN_SOURCE=700 $ARCH_FLAGS \
         -o db_interpose_pg.so \
         src/db_interpose_core_linux.c \
+        src/db_interpose_common.c \
         src/db_interpose_open.c src/db_interpose_exec.c \
         src/db_interpose_prepare.c src/db_interpose_bind.c \
         src/db_interpose_step.c src/db_interpose_column.c \
