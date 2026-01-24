@@ -134,4 +134,13 @@ RUN mkdir -p /etc/s6-overlay/s6-rc.d/init-plex-postgresql && \
     echo "/usr/local/lib/plex-postgresql/docker-entrypoint.sh" > /etc/s6-overlay/s6-rc.d/init-plex-postgresql/up && \
     chmod +x /etc/s6-overlay/s6-rc.d/init-plex-postgresql/up && \
     mkdir -p /etc/s6-overlay/s6-rc.d/user/contents.d && \
-    touch /etc/s6-overlay/s6-rc.d/user/contents.d/init-plex-postgresql
+    touch /etc/s6-overlay/s6-rc.d/user/contents.d/init-plex-postgresql && \
+    mkdir -p /etc/s6-overlay/s6-rc.d/svc-plex/dependencies.d && \
+    touch /etc/s6-overlay/s6-rc.d/svc-plex/dependencies.d/init-plex-postgresql
+
+# Modify Plex run script at BUILD TIME to inject LD_PRELOAD
+# This must be done at build time because s6-rc compiles services before oneshots run
+# We use a heredoc approach via a temp file since sed multiline is tricky in Dockerfile
+RUN SHIM_INJECT='# PostgreSQL shim injection\nexport LD_LIBRARY_PATH="/usr/local/lib/plex-postgresql:/usr/lib/plexmediaserver/lib:$LD_LIBRARY_PATH"\nexport LD_PRELOAD="/usr/local/lib/plex-postgresql/db_interpose_pg.so"\n# Locale settings for boost::locale\nexport LANG="en_US.UTF-8"\nexport LC_ALL="en_US.UTF-8"\nexport CHARSET="UTF-8"' && \
+    sed -i "2i\\${SHIM_INJECT}" /etc/s6-overlay/s6-rc.d/svc-plex/run && \
+    cat /etc/s6-overlay/s6-rc.d/svc-plex/run

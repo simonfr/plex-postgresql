@@ -186,35 +186,22 @@ setup_locale() {
     echo "Locale setup complete"
 }
 
-# Modify s6 run script to inject LD_PRELOAD and locale settings
-setup_plex_shim() {
+# Verify PostgreSQL shim configuration
+# Note: The shim is now injected at Docker build time via Dockerfile
+# This function just verifies the configuration is in place
+verify_plex_shim() {
     local shim_path="/usr/local/lib/plex-postgresql/db_interpose_pg.so"
     local s6_run="/etc/s6-overlay/s6-rc.d/svc-plex/run"
 
-    if [ -f "$shim_path" ] && [ -f "$s6_run" ]; then
-        # Check if we've already modified it
-        if ! grep -q "LD_PRELOAD=" "$s6_run"; then
-            echo "Modifying s6 run script to inject PostgreSQL shim..."
-
-            # Insert LD_PRELOAD, LD_LIBRARY_PATH, and locale exports after the shebang line
-            # LC_ALL and CHARSET are required for boost::locale to work correctly
-            # CHARSET is used by glibc's nl_langinfo fallback
-            sed -i '2i\
-# PostgreSQL shim injection\
-export LD_LIBRARY_PATH="/usr/local/lib/plex-postgresql:/usr/lib/plexmediaserver/lib:$LD_LIBRARY_PATH"\
-export LD_PRELOAD="/usr/local/lib/plex-postgresql/db_interpose_pg.so"\
-# Locale settings for boost::locale (prevents invalid_charset_error)\
-export LANG="en_US.UTF-8"\
-export LC_ALL="en_US.UTF-8"\
-export CHARSET="UTF-8"' "$s6_run"
-
-            echo "s6 run script modified for PostgreSQL shim"
-            cat "$s6_run"
+    if [ -f "$shim_path" ]; then
+        echo "PostgreSQL shim library found: $shim_path"
+        if grep -q "LD_PRELOAD=" "$s6_run" 2>/dev/null; then
+            echo "Plex run script configured for PostgreSQL shim (set at build time)"
         else
-            echo "s6 run script already configured for PostgreSQL shim"
+            echo "WARNING: Plex run script missing LD_PRELOAD - shim may not load!"
         fi
     else
-        echo "Warning: shim or s6 run script not found"
+        echo "Warning: PostgreSQL shim library not found at $shim_path"
     fi
 }
 
@@ -235,7 +222,7 @@ if [ -n "$PLEX_PG_HOST" ]; then
     init_plex_directories
     init_sqlite_schema
     setup_locale
-    setup_plex_shim
+    verify_plex_shim
     
     # Final permission fix - ensure Plex can write to its directories
     # This must be done after all directories are created
