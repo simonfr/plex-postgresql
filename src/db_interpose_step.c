@@ -13,6 +13,14 @@
 // ============================================================================
 
 int my_sqlite3_step(sqlite3_stmt *pStmt) {
+    // CRITICAL FIX v0.9.3: If we're inside resolve_column_tables, skip shim entirely
+    // This prevents: resolve_column_tables → PQexec → (Plex hook) → my_sqlite3_step → recursion
+    // Flag declared in db_interpose.h, defined in db_interpose_common.c
+    if (in_resolve_tables) {
+        // Pass through to original SQLite - no PostgreSQL involved
+        return orig_sqlite3_step ? orig_sqlite3_step(pStmt) : SQLITE_ERROR;
+    }
+    
     pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
     
     // CRITICAL FIX v0.9.0: Set in_step flag to prevent concurrent bind
@@ -301,6 +309,11 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
         pg_connection_t *thread_conn = pg_get_thread_connection(pg_stmt->conn->db_path);
         if (thread_conn && thread_conn->is_pg_active && thread_conn->conn) {
             exec_conn = thread_conn;
+            // CRITICAL FIX: Touch connection IMMEDIATELY after obtaining it
+            // This prevents pool PHASE 0 from marking our slot as FREE while
+            // we're still setting up the query. Fixes race condition that caused
+            // PQstatus SIGSEGV when another thread reset our connection.
+            pg_pool_touch_connection(exec_conn);
         } else if (thread_conn) {
             LOG_ERROR("STEP: thread_conn not usable (is_pg_active=%d, conn=%p)",
                      thread_conn->is_pg_active, (void*)thread_conn->conn);
@@ -407,12 +420,12 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                 pthread_t current = pthread_self();
                 pg_stmt->executing_thread = current;
 
-                // Validate connection before use to prevent crash
-                if (!exec_conn || !exec_conn->conn || PQstatus(exec_conn->conn) != CONNECTION_OK) {
-                    LOG_ERROR("STEP SELECT: Invalid connection (exec_conn=%p, conn=%p, status=%d)",
+                // CRITICAL FIX v0.9.4: Lock connection BEFORE status check to prevent TOCTOU race
+                // Another thread could PQfinish() between the check and use, causing SIGSEGV
+                if (!exec_conn || !exec_conn->conn) {
+                    LOG_ERROR("STEP SELECT: NULL connection (exec_conn=%p, conn=%p)",
                              (void*)exec_conn,
-                             exec_conn ? (void*)exec_conn->conn : NULL,
-                             exec_conn && exec_conn->conn ? (int)PQstatus(exec_conn->conn) : -1);
+                             exec_conn ? (void*)exec_conn->conn : NULL);
                     pthread_mutex_unlock(&pg_stmt->mutex);
                     return SQLITE_ERROR;
                 }
@@ -420,12 +433,11 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                 // CRITICAL: Touch connection to prevent pool from releasing it during long queries
                 pg_pool_touch_connection(exec_conn);
 
-                // CRITICAL: Lock connection mutex for ENTIRE query lifecycle
-                // This prevents protocol desync - PQprepare and PQexecPrepared must be atomic
+                // CRITICAL: Lock connection mutex BEFORE checking status (TOCTOU fix)
+                // This prevents protocol desync and prevents other threads from freeing conn
                 pthread_mutex_lock(&exec_conn->mutex);
 
-                // CRITICAL: Check connection status before query
-                // If connection is in a bad state, reset it
+                // Now check connection status while holding the lock
                 ConnStatusType conn_status = PQstatus(exec_conn->conn);
                 if (conn_status != CONNECTION_OK) {
                     LOG_ERROR("STEP READ: Connection bad (status=%d), resetting...", (int)conn_status);
@@ -652,9 +664,9 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                 }
             }
 
-            // Validate connection before use to prevent crash
-            if (!exec_conn || !exec_conn->conn || PQstatus(exec_conn->conn) != CONNECTION_OK) {
-                LOG_ERROR("STEP: Invalid connection, reconnecting...");
+            // CRITICAL FIX v0.9.4: Check NULL but DON'T call PQstatus yet (TOCTOU fix)
+            if (!exec_conn || !exec_conn->conn) {
+                LOG_ERROR("STEP: NULL connection");
                 pg_stmt->write_executed = 1;
                 pthread_mutex_unlock(&pg_stmt->mutex);
                 return SQLITE_ERROR;
@@ -663,8 +675,20 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
             // CRITICAL: Touch connection to prevent pool from releasing it during query
             pg_pool_touch_connection(exec_conn);
 
-            // CRITICAL: Lock connection mutex to ensure atomic query execution
+            // CRITICAL: Lock connection mutex BEFORE using conn (TOCTOU fix)
             pthread_mutex_lock(&exec_conn->mutex);
+
+            // Now safe to check connection status while holding lock
+            if (PQstatus(exec_conn->conn) != CONNECTION_OK) {
+                LOG_ERROR("STEP: Connection bad, resetting...");
+                PQreset(exec_conn->conn);
+                if (PQstatus(exec_conn->conn) != CONNECTION_OK) {
+                    pthread_mutex_unlock(&exec_conn->mutex);
+                    pg_stmt->write_executed = 1;
+                    pthread_mutex_unlock(&pg_stmt->mutex);
+                    return SQLITE_ERROR;
+                }
+            }
 
             // CRITICAL: Ensure connection is in blocking mode and consume any pending data
             PQsetnonblocking(exec_conn->conn, 0);
