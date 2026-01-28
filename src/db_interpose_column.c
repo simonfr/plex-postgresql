@@ -10,6 +10,11 @@
 #include <stdatomic.h>
 #include <sys/time.h>
 
+// CRITICAL FIX v0.9.3: Thread-local flag to prevent recursion in resolve_column_tables
+// When resolve_column_tables calls PQexec(), it can trigger Plex's SQLite hooks
+// which call back into our shim → infinite recursion → stack overflow
+// Declared in db_interpose.h, defined in db_interpose_common.c
+
 // ============================================================================
 // SQLite Declared Type Lookup Cache
 // ============================================================================
@@ -322,7 +327,26 @@ static const char* lookup_sqlite_decltype(pg_connection_t *pg_conn, const char *
 // IMPORTANT: Must be called after query execution when result is available.
 // Must NOT be called while holding pg_stmt->mutex if it needs to query PG.
 
+// Helper: Auto-clear recursion flag on function exit
+static inline void resolve_tables_cleanup(int *dummy) {
+    (void)dummy;
+    in_resolve_tables = 0;
+}
+
 void resolve_column_tables(pg_stmt_t *pg_stmt, pg_connection_t *pg_conn) {
+    // CRITICAL FIX v0.9.3: Prevent recursion crash
+    // Set flag BEFORE any PQexec calls to block shim re-entry
+    if (in_resolve_tables) {
+        LOG_DEBUG("RESOLVE_TABLES: Recursion detected, aborting");
+        if (pg_stmt) pg_stmt->col_tables_resolved = 1;
+        return;
+    }
+    in_resolve_tables = 1;
+    
+    // Auto-clear flag on ANY function exit (GCC/Clang cleanup attribute)
+    int cleanup_guard __attribute__((cleanup(resolve_tables_cleanup))) = 0;
+    (void)cleanup_guard;
+    
     if (!pg_stmt || !pg_stmt->result || pg_stmt->col_tables_resolved) {
         return;
     }

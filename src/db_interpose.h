@@ -90,6 +90,7 @@ typedef struct {
 // Recursion prevention
 extern __thread int in_interpose_call;
 extern __thread int prepare_v2_depth;
+extern __thread int in_resolve_tables;  // Prevent recursion in resolve_column_tables
 
 // SQLite library handle for dlsym fallback
 extern void *sqlite_handle;

@@ -23,6 +23,7 @@
 // Recursion prevention
 __thread int in_interpose_call = 0;
 __thread int prepare_v2_depth = 0;
+__thread int in_resolve_tables = 0;  // Prevent recursion in resolve_column_tables
 
 // SQLite library handle for dlsym fallback
 void *sqlite_handle = NULL;

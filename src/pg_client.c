@@ -707,18 +707,31 @@ static pg_connection_t* pool_get_connection(const char *db_path) {
     }
 
     // =========================================================================
-    // PHASE 0: Cleanup stale READY connections (idle > POOL_IDLE_TIMEOUT)
-    // Release slots that haven't been used - the owning thread is likely gone
-    // Phase 2 will reset these connections when claimed
-    // CRITICAL: Timeout must be long enough for slow queries and Plex processing
+    // PHASE 0: Cleanup zombie READY connections from dead threads
+    // FIX v0.9.3: Use pthread_kill(thread, 0) to check thread liveness
+    //
+    // Problem solved:
+    // - When threads crash/exit without cleanup, their READY slots become zombies
+    // - Old code had race condition: could steal live thread's connection
+    // - New code: Only reclaims slots from DEAD threads (pthread_kill fails)
     // =========================================================================
     for (int i = 0; i < configured_pool_size; i++) {
         pool_slot_state_t state = atomic_load(&library_pool[i].state);
         if (state == SLOT_READY && (now - library_pool[i].last_used) > POOL_IDLE_TIMEOUT) {
-            // Mark as FREE so Phase 2 can claim and reset it
+            // Check if owner thread still exists
+            pthread_t owner = library_pool[i].owner_thread;
+            int thread_exists = (pthread_kill(owner, 0) == 0);
+
+            if (thread_exists) {
+                // Thread is alive - DON'T touch its connection!
+                // It might be in a long query or slow processing
+                continue;
+            }
+
+            // Thread is dead → safe to reclaim zombie connection
             pool_slot_state_t expected = SLOT_READY;
             if (atomic_compare_exchange_strong(&library_pool[i].state, &expected, SLOT_FREE)) {
-                LOG_INFO("Pool: released stale slot %d (idle %lds)",
+                LOG_INFO("Pool PHASE 0: Freed zombie slot %d (owner thread dead, idle %ld sec)",
                         i, (long)(now - library_pool[i].last_used));
             }
         }
