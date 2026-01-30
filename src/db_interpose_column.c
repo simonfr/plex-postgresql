@@ -333,13 +333,13 @@ static inline void resolve_tables_cleanup(int *dummy) {
     in_resolve_tables = 0;
 }
 
-void resolve_column_tables(pg_stmt_t *pg_stmt, pg_connection_t *pg_conn) {
+int resolve_column_tables(pg_stmt_t *pg_stmt, pg_connection_t *pg_conn) {
     // CRITICAL FIX v0.9.3: Prevent recursion crash
     // Set flag BEFORE any PQexec calls to block shim re-entry
     if (in_resolve_tables) {
         LOG_DEBUG("RESOLVE_TABLES: Recursion detected, aborting");
         if (pg_stmt) pg_stmt->col_tables_resolved = 1;
-        return;
+        return -1;
     }
     in_resolve_tables = 1;
     
@@ -348,13 +348,13 @@ void resolve_column_tables(pg_stmt_t *pg_stmt, pg_connection_t *pg_conn) {
     (void)cleanup_guard;
     
     if (!pg_stmt || !pg_stmt->result || pg_stmt->col_tables_resolved) {
-        return;
+        return 0;  // Already resolved or nothing to resolve - success/skip
     }
 
     int num_cols = pg_stmt->num_cols;
     if (num_cols <= 0 || num_cols > MAX_PARAMS) {
         pg_stmt->col_tables_resolved = 1;
-        return;
+        return 0;  // No columns or too many - skip, not an error
     }
 
     // Collect unique table OIDs that need name resolution
@@ -382,7 +382,7 @@ void resolve_column_tables(pg_stmt_t *pg_stmt, pg_connection_t *pg_conn) {
 
     if (num_unique_tables == 0) {
         pg_stmt->col_tables_resolved = 1;
-        return;
+        return 0;  // No tables to resolve - success/skip
     }
 
     // Build query to get table names for all OIDs in one round-trip
@@ -402,7 +402,7 @@ void resolve_column_tables(pg_stmt_t *pg_stmt, pg_connection_t *pg_conn) {
     if (!pg_conn || !pg_conn->conn) {
         LOG_DEBUG("RESOLVE_TABLES: No connection available");
         pg_stmt->col_tables_resolved = 1;
-        return;
+        return -1;
     }
 
     pthread_mutex_lock(&pg_conn->mutex);
@@ -414,7 +414,7 @@ void resolve_column_tables(pg_stmt_t *pg_stmt, pg_connection_t *pg_conn) {
                   res ? PQerrorMessage(pg_conn->conn) : "NULL result");
         if (res) PQclear(res);
         pg_stmt->col_tables_resolved = 1;
-        return;
+        return -1;
     }
 
     // Build OID -> name map
@@ -450,6 +450,7 @@ void resolve_column_tables(pg_stmt_t *pg_stmt, pg_connection_t *pg_conn) {
     pg_stmt->col_tables_resolved = 1;
     LOG_INFO("RESOLVE_TABLES: Resolved %d columns from %d unique tables",
              num_cols, num_unique_tables);
+    return 0;
 }
 
 // ============================================================================
@@ -557,13 +558,17 @@ static int ensure_pg_result_for_metadata(pg_stmt_t *pg_stmt) {
         return 0;  // Can't execute - missing query or connection
     }
 
+    // v0.9.4.5: Only execute on PostgreSQL for library.db
+    // Non-library databases (blobs.db, etc.) should use SQLite fallback
+    if (!is_library_db_path(pg_stmt->conn->db_path)) {
+        return 0;  // Not library DB - let caller fall back to SQLite
+    }
+
     // Get the connection to use (thread-local for library DB)
     pg_connection_t *exec_conn = pg_stmt->conn;
-    if (is_library_db_path(pg_stmt->conn->db_path)) {
-        pg_connection_t *thread_conn = pg_get_thread_connection(pg_stmt->conn->db_path);
-        if (thread_conn && thread_conn->is_pg_active && thread_conn->conn) {
-            exec_conn = thread_conn;
-        }
+    pg_connection_t *thread_conn = pg_get_thread_connection(pg_stmt->conn->db_path);
+    if (thread_conn && thread_conn->is_pg_active && thread_conn->conn) {
+        exec_conn = thread_conn;
     }
 
     LOG_INFO("METADATA_EXEC: Executing query for column metadata access: %.100s", pg_stmt->pg_sql);
@@ -601,7 +606,9 @@ static int ensure_pg_result_for_metadata(pg_stmt_t *pg_stmt) {
 
         // Resolve source table names for bare column lookup in decltype
         // This enables proper type lookups for queries without AS aliases
-        resolve_column_tables(pg_stmt, exec_conn);
+        if (resolve_column_tables(pg_stmt, exec_conn) < 0) {
+            LOG_ERROR("Failed to resolve column tables");
+        }
 
         // v0.8.9 FIX: Mark this result as from metadata-only execution
         // If bind() is called later, we need to re-execute with bound params

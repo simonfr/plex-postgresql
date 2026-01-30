@@ -216,9 +216,13 @@ pg_fake_value_t* pg_check_fake_value(sqlite3_value *pVal) {
     return NULL;
 }
 
-// Helper to check if path is library.db
+// Helper to check if path is a Plex library database (library.db OR blobs.db)
+// v0.9.5: Include blobs.db for full PostgreSQL migration
 int is_library_db_path(const char *path) {
-    return path && strstr(path, "com.plexapp.plugins.library.db") != NULL;
+    if (!path) return 0;
+    // Match both library.db and library.blobs.db
+    return strstr(path, "com.plexapp.plugins.library.db") != NULL ||
+           strstr(path, "com.plexapp.plugins.library.blobs.db") != NULL;
 }
 
 // Simple string replace helper

@@ -272,4 +272,63 @@ migrate_sqlite_to_pg() {
 
     local pg_total=$(psql -t -c "SELECT COUNT(*) FROM $schema.metadata_items;" 2>/dev/null | tr -d ' ')
     echo "  Total items in PostgreSQL: $pg_total"
+
+    # =========================================================================
+    # Migrate blobs.db (separate database with binary thumbnail data)
+    # =========================================================================
+    local blobs_db="${SQLITE_DB%.db}.blobs.db"
+    if [[ -f "$blobs_db" ]]; then
+        echo ""
+        echo "Migrating blobs.db (thumbnails/artwork)..."
+
+        local blob_count=$(sqlite3 "$blobs_db" "SELECT COUNT(*) FROM blobs;" 2>/dev/null || echo "0")
+
+        if [[ "$blob_count" -gt 0 ]]; then
+            echo "  Found $blob_count blobs to migrate"
+
+            # Export metadata (without blob column) via CSV
+            sqlite3 -csv "$blobs_db" "SELECT id, linked_type, linked_id, linked_guid, created_at, blob_type FROM blobs;" > /tmp/blobs_meta.csv 2>/dev/null
+
+            # Import metadata
+            psql -q -c "TRUNCATE $schema.blobs CASCADE;" 2>/dev/null || true
+            psql -q -c "\\copy $schema.blobs(id, linked_type, linked_id, linked_guid, created_at, blob_type) FROM '/tmp/blobs_meta.csv' CSV" 2>/dev/null || true
+
+            # Migrate blob data using hex encoding (CSV corrupts binary data)
+            local batch=100
+            local offset=0
+            local blob_migrated=0
+
+            while true; do
+                # Export batch as SQL UPDATE statements with hex-encoded blobs
+                sqlite3 "$blobs_db" "SELECT 'UPDATE $schema.blobs SET blob = decode(''' || hex(blob) || ''', ''hex'') WHERE id = ' || id || ';' FROM blobs WHERE blob IS NOT NULL LIMIT $batch OFFSET $offset;" > /tmp/blob_batch.sql 2>/dev/null
+
+                # Check if batch is empty
+                if [[ ! -s /tmp/blob_batch.sql ]]; then
+                    break
+                fi
+
+                # Execute batch
+                psql -f /tmp/blob_batch.sql -q 2>/dev/null || true
+
+                offset=$((offset + batch))
+                blob_migrated=$((blob_migrated + batch))
+                if [[ $blob_migrated -le $blob_count ]]; then
+                    printf "    Progress: %d / %d\r" "$blob_migrated" "$blob_count"
+                fi
+            done
+            echo ""
+
+            # Update sequence
+            psql -q -c "SELECT setval('$schema.blobs_id_seq', COALESCE((SELECT MAX(id) FROM $schema.blobs), 1));" 2>/dev/null || true
+
+            # Verify
+            local pg_blob_count=$(psql -t -c "SELECT COUNT(*) FROM $schema.blobs;" 2>/dev/null | tr -d ' ')
+            echo -e "  ${GREEN}Done: $pg_blob_count blobs in PostgreSQL${NC}"
+
+            # Cleanup
+            rm -f /tmp/blobs_meta.csv /tmp/blob_batch.sql
+        else
+            echo "  No blobs to migrate"
+        fi
+    fi
 }

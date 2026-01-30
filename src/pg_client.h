@@ -27,6 +27,10 @@ pg_connection_t* pg_find_any_library_connection(void);
 // Thread-local connection (one PG connection per thread for library.db)
 pg_connection_t* pg_get_thread_connection(const char *db_path);
 
+// v0.9.4.4: Validate that a connection pointer is still in the pool
+// Returns 1 if valid, 0 if not found (connection was freed/reallocated)
+int pg_pool_validate_connection(pg_connection_t *conn);
+
 // Update last_used timestamp to prevent pool slot from being released
 // CRITICAL: Call during long-running operations to keep connection alive
 void pg_pool_touch_connection(pg_connection_t *conn);

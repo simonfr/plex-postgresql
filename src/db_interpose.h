@@ -312,7 +312,8 @@ EXPORT int my_sqlite3_data_count(sqlite3_stmt *pStmt);
 
 // Resolve source table names for bare column lookup in decltype
 // Call after query execution to enable proper type lookups for queries without AS aliases
-void resolve_column_tables(pg_stmt_t *pg_stmt, pg_connection_t *pg_conn);
+// Returns 0 on success, -1 on error (non-critical - only affects metadata)
+int resolve_column_tables(pg_stmt_t *pg_stmt, pg_connection_t *pg_conn);
 
 // ============================================================================
 // Value Functions (db_interpose_column.c)

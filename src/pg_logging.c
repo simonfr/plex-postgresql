@@ -19,7 +19,7 @@
 
 static FILE *log_file = NULL;
 static pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
-static int current_log_level = PG_LOG_INFO;
+static int current_log_level = PG_LOG_ERROR;  // CRITICAL: Reduced from INFO to prevent mutex contention deadlock
 static volatile int logging_initialized = 0;
 static pthread_once_t logging_init_once = PTHREAD_ONCE_INIT;
 

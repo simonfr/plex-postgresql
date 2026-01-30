@@ -471,6 +471,8 @@ pg_connection_t* pg_find_any_library_connection(void) {
 // ============================================================================
 
 // Fast suffix check - avoids full strstr scan
+// NOTE: This is ONLY for pool management - only library.db uses the pool
+// For query routing (including blobs.db), use is_library_db_path() from db_interpose_common.c
 static int is_library_db(const char *path) {
     if (!path) return 0;
     static const char suffix[] = "com.plexapp.plugins.library.db";
@@ -948,6 +950,40 @@ static pg_connection_t* pool_get_connection(const char *db_path) {
 // Public function for getting thread connection (now uses pool)
 pg_connection_t* pg_get_thread_connection(const char *db_path) {
     return pool_get_connection(db_path);
+}
+
+// v0.9.4.4: Validate that a connection pointer is still valid
+// Returns 1 if valid, 0 if not found (connection was freed/reallocated)
+// This helps detect stale connection pointers before dereferencing them
+int pg_pool_validate_connection(pg_connection_t *conn) {
+    if (!conn) {
+        return 0;
+    }
+
+    // Check if connection is in the library pool
+    int pool_non_null = 0;
+    for (int i = 0; i < configured_pool_size; i++) {
+        if (library_pool[i].conn) pool_non_null++;
+        if (library_pool[i].conn == conn) {
+            // Found in pool - connection is still valid
+            return 1;
+        }
+    }
+
+    // Check if connection is in the general connections array
+    int conn_non_null = 0;
+    for (int i = 0; i < MAX_CONNECTIONS; i++) {
+        if (connections[i]) conn_non_null++;
+        if (connections[i] == conn) {
+            // Found in connections array - connection is still valid
+            return 1;
+        }
+    }
+
+    // Not found anywhere - connection was freed or never registered
+    LOG_ERROR("VALIDATE_FAIL: conn=%p NOT FOUND! (pool has %d non-null, connections has %d non-null)",
+              (void*)conn, pool_non_null, conn_non_null);
+    return 0;
 }
 
 // Update last_used timestamp for a connection to prevent premature pool release

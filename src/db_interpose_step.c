@@ -6,6 +6,7 @@
  */
 
 #include "db_interpose.h"
+#include "db_interpose_common.h"  // For platform_print_backtrace
 #include "pg_query_cache.h"
 
 // ============================================================================
@@ -41,7 +42,10 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
         pg_connection_t *pg_conn = pg_find_connection(db);
         if (!pg_conn) pg_conn = pg_find_any_library_connection();
 
-        if (pg_conn && pg_conn->is_pg_active && pg_conn->conn) {
+        // v0.9.4.6: Only handle cached statements for library.db
+        // Non-library databases should use SQLite directly
+        if (pg_conn && pg_conn->is_pg_active && pg_conn->conn &&
+            is_library_db_path(pg_conn->db_path)) {
             char *expanded_sql = sqlite3_expanded_sql(pStmt);
             const char *sql = expanded_sql ? expanded_sql : sqlite3_sql(pStmt);
 
@@ -98,6 +102,16 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
 
                     // CRITICAL: Lock connection mutex to prevent concurrent libpq access
                     pthread_mutex_lock(&cached_exec_conn->mutex);
+
+                    // TOCTOU FIX v0.9.4.2: Re-check conn after acquiring lock
+                    if (!cached_exec_conn->conn) {
+                        LOG_ERROR("CACHED EXEC: conn became NULL after lock (TOCTOU race)");
+                        pthread_mutex_unlock(&cached_exec_conn->mutex);
+                        if (insert_sql) free(insert_sql);
+                        sql_translation_free(&trans);
+                        if (expanded_sql) sqlite3_free(expanded_sql);
+                        return SQLITE_ERROR;
+                    }
 
                     // Drain any pending results before executing
                     PQsetnonblocking(cached_exec_conn->conn, 0);
@@ -230,6 +244,15 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                             // CRITICAL: Lock connection mutex to prevent concurrent libpq access
                             pthread_mutex_lock(&cached_read_conn->mutex);
 
+                            // TOCTOU FIX v0.9.4.2: Re-check conn after acquiring lock
+                            if (!cached_read_conn->conn) {
+                                LOG_ERROR("CACHED READ: conn became NULL after lock (TOCTOU race)");
+                                pthread_mutex_unlock(&cached_read_conn->mutex);
+                                sql_translation_free(&trans);
+                                if (expanded_sql) sqlite3_free(expanded_sql);
+                                return SQLITE_ERROR;
+                            }
+
                             // Drain any pending results before executing
                             PQsetnonblocking(cached_read_conn->conn, 0);
                             while (PQisBusy(cached_read_conn->conn)) {
@@ -274,7 +297,11 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                                 new_stmt->result_conn = cached_read_conn;
 
                                 // Resolve source table names for bare column lookup in decltype
-                                resolve_column_tables(new_stmt, cached_read_conn);
+                                if (resolve_column_tables(new_stmt, cached_read_conn) < 0) {
+                                    LOG_ERROR("Failed to resolve column tables, cleaning up");
+                                    // Don't fail the query - just log warning
+                                    // Table resolution is for metadata only, not critical
+                                }
 
                                 // Verbose result logging disabled for performance
                                 sql_translation_free(&trans);
@@ -304,21 +331,30 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
     // Execute prepared statement on PostgreSQL
     // IMPORTANT: Use thread-local connection, not the one stored at prepare time
     // This ensures INSERT and SELECT on the same thread use the same connection
-    pg_connection_t *exec_conn = pg_stmt ? pg_stmt->conn : NULL;
-    if (pg_stmt && is_library_db_path(pg_stmt->conn ? pg_stmt->conn->db_path : NULL)) {
-        pg_connection_t *thread_conn = pg_get_thread_connection(pg_stmt->conn->db_path);
-        if (thread_conn && thread_conn->is_pg_active && thread_conn->conn) {
-            exec_conn = thread_conn;
-            // CRITICAL FIX: Touch connection IMMEDIATELY after obtaining it
-            // This prevents pool PHASE 0 from marking our slot as FREE while
-            // we're still setting up the query. Fixes race condition that caused
-            // PQstatus SIGSEGV when another thread reset our connection.
-            pg_pool_touch_connection(exec_conn);
-        } else if (thread_conn) {
-            LOG_ERROR("STEP: thread_conn not usable (is_pg_active=%d, conn=%p)",
-                     thread_conn->is_pg_active, (void*)thread_conn->conn);
-        } else {
-            LOG_ERROR("STEP: pg_get_thread_connection returned NULL");
+    // v0.9.4.5: Get connection from statement's db handle, not stored conn
+    // This fixes the bug where stmt_conn was from wrong database (blobs.db vs library.db)
+    pg_connection_t *exec_conn = NULL;
+
+    if (pg_stmt && pg_stmt->shadow_stmt) {
+        // Get the actual database handle from the statement
+        sqlite3 *db = sqlite3_db_handle(pg_stmt->shadow_stmt);
+        pg_connection_t *handle_conn = pg_find_connection(db);
+
+        if (handle_conn && handle_conn->is_pg_active && is_library_db_path(handle_conn->db_path)) {
+            // v0.9.5: Check if this is library.db (uses pool) or blobs.db (uses direct connection)
+            // library.db has conn=NULL (pool-only), blobs.db has conn=PGconn* (direct)
+            if (handle_conn->conn) {
+                // Direct connection (blobs.db) - use it directly
+                exec_conn = handle_conn;
+            } else {
+                // Pool connection (library.db) - get thread-local pool connection
+                pg_connection_t *thread_conn = pg_get_thread_connection(handle_conn->db_path);
+                if (thread_conn && thread_conn->is_pg_active && thread_conn->conn) {
+                    exec_conn = thread_conn;
+                    // CRITICAL FIX: Touch connection IMMEDIATELY after obtaining it
+                    pg_pool_touch_connection(exec_conn);
+                }
+            }
         }
     }
 
@@ -437,17 +473,38 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                 // This prevents protocol desync and prevents other threads from freeing conn
                 pthread_mutex_lock(&exec_conn->mutex);
 
+                // TOCTOU FIX v0.9.4.2: Re-check conn after acquiring lock
+                // Another thread may have freed/corrupted conn between initial check and lock
+                if (!exec_conn->conn) {
+                    LOG_ERROR("STEP SELECT: conn became NULL after lock (TOCTOU race)");
+                    pthread_mutex_unlock(&exec_conn->mutex);
+                    pthread_mutex_unlock(&pg_stmt->mutex);
+                    return SQLITE_ERROR;
+                }
+
                 // Now check connection status while holding the lock
                 ConnStatusType conn_status = PQstatus(exec_conn->conn);
                 if (conn_status != CONNECTION_OK) {
-                    LOG_ERROR("STEP READ: Connection bad (status=%d), resetting...", (int)conn_status);
+                    // Enhanced diagnostics for CONNECTION_BAD (v0.9.4.3)
+                    const char *pg_err = PQerrorMessage(exec_conn->conn);
+                    LOG_ERROR("=== CONNECTION_BAD DIAGNOSTIC (READ) ===");
+                    LOG_ERROR("  Status: %d, Thread: %p", (int)conn_status, (void*)pthread_self());
+                    LOG_ERROR("  Connection: %p, PGconn: %p", (void*)exec_conn, (void*)exec_conn->conn);
+                    LOG_ERROR("  PG Error: %s", pg_err ? pg_err : "(null)");
+                    LOG_ERROR("  SQL: %.100s", pg_stmt->sql ? pg_stmt->sql : "(null)");
+                    platform_print_backtrace("CONNECTION_BAD in STEP READ", 1);
+                    LOG_ERROR("=== END DIAGNOSTIC ===");
+                    LOG_ERROR("STEP READ: Attempting PQreset...");
                     PQreset(exec_conn->conn);
                     if (PQstatus(exec_conn->conn) != CONNECTION_OK) {
-                        LOG_ERROR("STEP READ: Reset failed, connection lost");
+                        const char *reset_err = PQerrorMessage(exec_conn->conn);
+                        LOG_ERROR("STEP READ: Reset FAILED - connection unrecoverable");
+                        LOG_ERROR("  Post-reset error: %s", reset_err ? reset_err : "(null)");
                         pthread_mutex_unlock(&exec_conn->mutex);
                         pthread_mutex_unlock(&pg_stmt->mutex);
                         return SQLITE_ERROR;
                     }
+                    LOG_ERROR("STEP READ: PQreset succeeded, connection recovered");
                     // Re-apply settings after reset
                     pg_conn_config_t *cfg = pg_config_get();
                     if (cfg) {
@@ -544,7 +601,9 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                     pg_stmt->result_conn = exec_conn;  // Track which connection owns this result
 
                     // Resolve source table names for bare column lookup in decltype
-                    resolve_column_tables(pg_stmt, exec_conn);
+                    if (resolve_column_tables(pg_stmt, exec_conn) < 0) {
+                        LOG_ERROR("Failed to resolve column tables, cleaning up");
+                    }
 
                     // v0.8.9: Clear metadata-only flag now that we have a real result
                     pg_stmt->metadata_only_result = 0;
@@ -649,8 +708,11 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                     // CRITICAL FIX v0.9.4: Check NULL then lock BEFORE PQstatus (TOCTOU fix)
                     if (exec_conn && exec_conn->conn) {
                         pthread_mutex_lock(&exec_conn->mutex);
-                        // Now safe to check status while holding lock
-                        if (PQstatus(exec_conn->conn) == CONNECTION_OK) {
+                        // TOCTOU FIX v0.9.4.2: Re-check conn after acquiring lock
+                        if (!exec_conn->conn) {
+                            LOG_ERROR("SKIP SEQ: conn became NULL after lock (TOCTOU race)");
+                            pthread_mutex_unlock(&exec_conn->mutex);
+                        } else if (PQstatus(exec_conn->conn) == CONNECTION_OK) {
                             PGresult *seq_res = PQexec(exec_conn->conn,
                                 "SELECT nextval('plex.statistics_media_id_seq')");
                             if (PQresultStatus(seq_res) == PGRES_TUPLES_OK && PQntuples(seq_res) > 0) {
@@ -682,16 +744,39 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
             // CRITICAL: Lock connection mutex BEFORE using conn (TOCTOU fix)
             pthread_mutex_lock(&exec_conn->mutex);
 
+            // TOCTOU FIX v0.9.4.2: Re-check conn after acquiring lock
+            if (!exec_conn->conn) {
+                LOG_ERROR("STEP WRITE: conn became NULL after lock (TOCTOU race)");
+                pthread_mutex_unlock(&exec_conn->mutex);
+                pg_stmt->write_executed = 1;
+                pthread_mutex_unlock(&pg_stmt->mutex);
+                return SQLITE_ERROR;
+            }
+
             // Now safe to check connection status while holding lock
-            if (PQstatus(exec_conn->conn) != CONNECTION_OK) {
-                LOG_ERROR("STEP: Connection bad, resetting...");
+            ConnStatusType write_conn_status = PQstatus(exec_conn->conn);
+            if (write_conn_status != CONNECTION_OK) {
+                // Enhanced diagnostics for CONNECTION_BAD (v0.9.4.3)
+                const char *pg_err = PQerrorMessage(exec_conn->conn);
+                LOG_ERROR("=== CONNECTION_BAD DIAGNOSTIC (WRITE) ===");
+                LOG_ERROR("  Status: %d, Thread: %p", (int)write_conn_status, (void*)pthread_self());
+                LOG_ERROR("  Connection: %p, PGconn: %p", (void*)exec_conn, (void*)exec_conn->conn);
+                LOG_ERROR("  PG Error: %s", pg_err ? pg_err : "(null)");
+                LOG_ERROR("  SQL: %.100s", pg_stmt->sql ? pg_stmt->sql : "(null)");
+                platform_print_backtrace("CONNECTION_BAD in STEP WRITE", 1);
+                LOG_ERROR("=== END DIAGNOSTIC ===");
+                LOG_ERROR("STEP WRITE: Attempting PQreset...");
                 PQreset(exec_conn->conn);
                 if (PQstatus(exec_conn->conn) != CONNECTION_OK) {
+                    const char *reset_err = PQerrorMessage(exec_conn->conn);
+                    LOG_ERROR("STEP WRITE: Reset FAILED - connection unrecoverable");
+                    LOG_ERROR("  Post-reset error: %s", reset_err ? reset_err : "(null)");
                     pthread_mutex_unlock(&exec_conn->mutex);
                     pg_stmt->write_executed = 1;
                     pthread_mutex_unlock(&pg_stmt->mutex);
                     return SQLITE_ERROR;
                 }
+                LOG_ERROR("STEP WRITE: PQreset succeeded, connection recovered");
             }
 
             // CRITICAL: Ensure connection is in blocking mode and consume any pending data
@@ -800,10 +885,8 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
     }
     }
 
-    // RACE_DEBUG: Log before final fallback
+    // Fallback to SQLite for non-PostgreSQL statements
     int final_rc = orig_sqlite3_step ? orig_sqlite3_step(pStmt) : SQLITE_ERROR;
-    LOG_ERROR("[RACE_DEBUG] STEP_END thread=%p stmt=%p rc=%d reason=fallback", 
-              (void*)pthread_self(), (void*)pStmt, final_rc);
     return final_rc;
 }
 

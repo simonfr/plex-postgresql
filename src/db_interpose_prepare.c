@@ -398,7 +398,9 @@ int my_sqlite3_prepare_v2_internal(sqlite3 *db, const char *zSql, int nByte,
                  (long)stack_remaining);
         
         pg_connection_t *pg_conn = pg_find_connection(db);
-        if (pg_conn && pg_conn->is_pg_active && pg_conn->conn) {
+        // v0.9.4.6: Only use PG path for library.db
+        if (pg_conn && pg_conn->is_pg_active && pg_conn->conn &&
+            is_library_db_path(pg_conn->db_path)) {
             // Prepare minimal SQLite statement, route to PostgreSQL
             int rc;
             if (real_sqlite3_prepare_v2) {
@@ -448,8 +450,10 @@ int my_sqlite3_prepare_v2_internal(sqlite3 *db, const char *zSql, int nByte,
         // For PostgreSQL-destined read queries, use a minimal SQLite query
         // to get a valid statement handle, then route execution to PostgreSQL
         pg_connection_t *pg_conn_check = pg_find_connection(db);
+        // v0.9.4.6: Only use PG path for library.db
         int is_pg_read = pg_conn_check && pg_conn_check->is_pg_active &&
-                         pg_conn_check->conn && zSql && is_read_operation(zSql);
+                         pg_conn_check->conn && zSql && is_read_operation(zSql) &&
+                         is_library_db_path(pg_conn_check->db_path);
 
         if (is_pg_read) {
             LOG_INFO("STACK LOW (%ld bytes) but using PG path for: %.100s",
@@ -650,7 +654,12 @@ int my_sqlite3_prepare_v2_internal(sqlite3 *db, const char *zSql, int nByte,
         return rc;
     }
 
-    if (pg_conn && pg_conn->conn && pg_conn->is_pg_active && (is_write || is_read)) {
+    // v0.9.4.6: Only create pg_stmt for library.db
+    // Non-library databases (blobs.db, etc.) should use SQLite directly.
+    // Without this check, blobs.db queries get pg_stmt with is_pg != 0,
+    // but no PostgreSQL result, causing column functions to fail.
+    if (pg_conn && pg_conn->conn && pg_conn->is_pg_active && (is_write || is_read) &&
+        is_library_db_path(pg_conn->db_path)) {
         pg_stmt_t *pg_stmt = pg_stmt_create(pg_conn, zSql, *ppStmt);
         if (pg_stmt) {
             if (should_skip_sql(zSql)) {
