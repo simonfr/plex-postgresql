@@ -221,10 +221,10 @@ ifeq ($(UNAME_S),Darwin)
 	PLEX_PG_USER=$${PLEX_PG_USER:-plex} \
 	PLEX_PG_PASSWORD=$${PLEX_PG_PASSWORD:-plex} \
 	PLEX_PG_SCHEMA=$${PLEX_PG_SCHEMA:-plex} \
-	ENV_PG_LOG_LEVEL=$${ENV_PG_LOG_LEVEL:-DEBUG} \
-	ENV_PG_LOG_FILE=$${ENV_PG_LOG_FILE:-/tmp/plex_redirect_pg.log} \
-	"$(PLEX_BIN)" >> $${ENV_PG_LOG_FILE:-/tmp/plex_redirect_pg.log} 2>&1 &
-	@echo "Plex started. Log: $(ENV_PG_LOG_FILE)"
+	PLEX_PG_LOG_LEVEL=$${PLEX_PG_LOG_LEVEL:-ERROR} \
+	PLEX_PG_LOG_FILE=$${PLEX_PG_LOG_FILE:-/tmp/plex_redirect_pg.log} \
+	"$(PLEX_BIN)" >> $${PLEX_PG_LOG_FILE:-/tmp/plex_redirect_pg.log} 2>&1 &
+	@echo "Plex started. Log: /tmp/plex_redirect_pg.log"
 else
 	@echo "Run target only supported on macOS"
 endif

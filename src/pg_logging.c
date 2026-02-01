@@ -33,7 +33,7 @@ static pthread_once_t logging_init_once = PTHREAD_ONCE_INIT;
 #define THROTTLE_SUMMARY_INTERVAL 10    // Log summary every N seconds when throttled
 
 // Log rotation settings
-#define DEFAULT_LOG_MAX_SIZE (100 * 1024 * 1024)  // 100MB for debugging
+#define DEFAULT_LOG_MAX_SIZE (10 * 1024 * 1024)  // 10MB default
 #define ROTATION_CHECK_INTERVAL 100              // Check size every N log messages
 
 static size_t log_max_size = DEFAULT_LOG_MAX_SIZE;
