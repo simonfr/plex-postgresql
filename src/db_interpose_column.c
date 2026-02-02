@@ -835,9 +835,16 @@ int my_sqlite3_column_type(sqlite3_stmt *pStmt, int idx) {
             if (idx >= 0 && idx < cached->num_cols && row >= 0 && row < cached->num_rows) {
                 cached_row_t *crow = &cached->rows[row];
                 if (crow->is_null[idx]) {
-                    LOG_DEBUG("COLUMN_TYPE_VERBOSE: idx=%d row=%d -> SQLITE_NULL (cached, is_null=true)", idx, row);
+                    // WORKAROUND: SOCI throws "Null value not allowed" when column_type returns SQLITE_NULL
+                    // for columns bound to non-nullable C++ types. Instead of returning SQLITE_NULL,
+                    // return the declared column type so SOCI will call column_int/text/etc which 
+                    // return 0/"" for NULL values (matching SQLite behavior).
+                    Oid oid = cached->col_types[idx];
+                    int declared_type = pg_oid_to_sqlite_type(oid);
+                    LOG_DEBUG("COLUMN_TYPE_VERBOSE: idx=%d row=%d -> %s (cached, is_null=true, returning declared type instead of NULL)", 
+                              idx, row, sqlite_type_name(declared_type));
                     pthread_mutex_unlock(&pg_stmt->mutex);
-                    return SQLITE_NULL;
+                    return declared_type;
                 }
                 // Use cached column type OID to determine SQLite type
                 Oid oid = cached->col_types[idx];
@@ -874,7 +881,14 @@ int my_sqlite3_column_type(sqlite3_stmt *pStmt, int idx) {
         const char *col_name = PQfname(pg_stmt->result, idx);
         // Update exception context
         last_column_being_accessed = col_name;
-        int result = is_null ? SQLITE_NULL : pg_oid_to_sqlite_type(oid);
+        // WORKAROUND: Always return declared type instead of SQLITE_NULL
+        // SOCI throws "Null value not allowed" for SQLITE_NULL on non-nullable bindings
+        // The column_int/text/etc functions return 0/"" for NULL (matching SQLite)
+        int result = pg_oid_to_sqlite_type(oid);
+        if (is_null) {
+            LOG_DEBUG("COLUMN_TYPE: idx=%d col='%s' is NULL, returning declared type %s instead of SQLITE_NULL",
+                      idx, col_name ? col_name : "?", sqlite_type_name(result));
+        }
         
         // ENHANCED LOGGING: Include decltype for comparison
         const char *col_decltype = NULL;
