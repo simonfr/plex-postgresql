@@ -250,6 +250,139 @@ CREATE AGGREGATE plex.group_concat(text) (
 );
 
 
+--
+-- Name: fix_orphan_season_on_episode_insert(); Type: FUNCTION; Schema: plex; Owner: -
+-- Description: When an episode is inserted, check if its parent season is an orphan
+--              and fix it by finding the matching show based on file path.
+--
+
+CREATE FUNCTION plex.fix_orphan_season_on_episode_insert() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    season_parent_id INTEGER;
+    episode_file TEXT;
+    show_name TEXT;
+    found_show_id INTEGER;
+    season_library_id INTEGER;
+BEGIN
+    IF NEW.metadata_type != 4 OR NEW.parent_id IS NULL THEN
+        RETURN NEW;
+    END IF;
+    
+    SELECT parent_id, library_section_id 
+    INTO season_parent_id, season_library_id
+    FROM plex.metadata_items 
+    WHERE id = NEW.parent_id AND metadata_type = 3;
+    
+    IF season_parent_id IS NOT NULL THEN
+        RETURN NEW;
+    END IF;
+    
+    SELECT mp.file INTO episode_file
+    FROM plex.media_items med
+    JOIN plex.media_parts mp ON mp.media_item_id = med.id
+    WHERE med.metadata_item_id = NEW.id
+    LIMIT 1;
+    
+    IF episode_file IS NULL THEN
+        RETURN NEW;
+    END IF;
+    
+    show_name := TRIM((regexp_match(episode_file, '/([^/]+)\s*\(\d{4}\)'))[1]);
+    
+    IF show_name IS NULL THEN
+        RETURN NEW;
+    END IF;
+    
+    SELECT id INTO found_show_id
+    FROM plex.metadata_items
+    WHERE metadata_type = 2
+      AND library_section_id = season_library_id
+      AND title ILIKE show_name
+    LIMIT 1;
+    
+    IF found_show_id IS NOT NULL THEN
+        UPDATE plex.metadata_items 
+        SET parent_id = found_show_id 
+        WHERE id = NEW.parent_id AND parent_id IS NULL;
+        
+        RAISE NOTICE 'Fixed orphan season % -> show %', NEW.parent_id, found_show_id;
+    END IF;
+    
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: fix_orphan_season_on_media_part_insert(); Type: FUNCTION; Schema: plex; Owner: -
+-- Description: When a media_part (file) is inserted, check if the episode's parent season
+--              is an orphan and fix it by finding the matching show based on file path.
+--
+
+CREATE FUNCTION plex.fix_orphan_season_on_media_part_insert() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    episode_id INTEGER;
+    season_id INTEGER;
+    season_parent_id INTEGER;
+    season_library_id INTEGER;
+    show_name TEXT;
+    found_show_id INTEGER;
+BEGIN
+    SELECT med.metadata_item_id INTO episode_id
+    FROM plex.media_items med
+    WHERE med.id = NEW.media_item_id;
+    
+    IF episode_id IS NULL THEN
+        RETURN NEW;
+    END IF;
+    
+    SELECT mi.parent_id INTO season_id
+    FROM plex.metadata_items mi
+    WHERE mi.id = episode_id AND mi.metadata_type = 4;
+    
+    IF season_id IS NULL THEN
+        RETURN NEW;
+    END IF;
+    
+    SELECT parent_id, library_section_id 
+    INTO season_parent_id, season_library_id
+    FROM plex.metadata_items 
+    WHERE id = season_id AND metadata_type = 3;
+    
+    IF season_parent_id IS NOT NULL THEN
+        RETURN NEW;
+    END IF;
+    
+    show_name := TRIM((regexp_match(NEW.file, '/([^/]+)\s*\(\d{4}\)'))[1]);
+    
+    IF show_name IS NULL THEN
+        RETURN NEW;
+    END IF;
+    
+    SELECT id INTO found_show_id
+    FROM plex.metadata_items
+    WHERE metadata_type = 2
+      AND library_section_id = season_library_id
+      AND title ILIKE show_name
+    LIMIT 1;
+    
+    IF found_show_id IS NOT NULL THEN
+        UPDATE plex.metadata_items 
+        SET parent_id = found_show_id 
+        WHERE id = season_id AND parent_id IS NULL;
+        
+        RAISE NOTICE 'Fixed orphan season % -> show %', season_id, found_show_id;
+    END IF;
+    
+    RETURN NEW;
+END;
+$$;
+
+
 SET default_tablespace = '';
 
 SET default_table_access_method = heap;
@@ -3857,6 +3990,22 @@ $$;
 --
 
 CREATE TRIGGER check_cross_section_parent BEFORE INSERT OR UPDATE OF parent_id, library_section_id ON plex.metadata_items FOR EACH ROW WHEN (NEW.parent_id IS NOT NULL) EXECUTE FUNCTION plex.prevent_cross_section_parent();
+
+
+--
+-- Name: metadata_items trg_fix_orphan_season; Type: TRIGGER; Schema: plex; Owner: -
+-- Description: Fix orphan seasons when episodes are inserted
+--
+
+CREATE TRIGGER trg_fix_orphan_season AFTER INSERT ON plex.metadata_items FOR EACH ROW EXECUTE FUNCTION plex.fix_orphan_season_on_episode_insert();
+
+
+--
+-- Name: media_parts trg_fix_orphan_season_media; Type: TRIGGER; Schema: plex; Owner: -
+-- Description: Fix orphan seasons when media files are inserted
+--
+
+CREATE TRIGGER trg_fix_orphan_season_media AFTER INSERT ON plex.media_parts FOR EACH ROW EXECUTE FUNCTION plex.fix_orphan_season_on_media_part_insert();
 
 
 --

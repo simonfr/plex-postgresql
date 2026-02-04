@@ -633,10 +633,26 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
             // Handle real PGresult
             if (pg_stmt->result) {
                 LOG_DEBUG("PG_RESULT: current_row=%d num_rows=%d", pg_stmt->current_row, pg_stmt->num_rows);
+                
+                // STEP TRACE: Log iteration for media_items/media_streams queries
+                // This helps debug MDE file analysis issues
+                if (pg_stmt->sql && (strstr(pg_stmt->sql, "media_items") || strstr(pg_stmt->sql, "media_streams"))) {
+                    LOG_INFO("STEP_TRACE: media query row=%d/%d stmt=%p sql=%.80s",
+                             pg_stmt->current_row, pg_stmt->num_rows, (void*)pStmt,
+                             pg_stmt->sql ? pg_stmt->sql : "?");
+                }
+                
                 if (pg_stmt->current_row >= pg_stmt->num_rows) {
                     // CRITICAL FIX: Free PGresult immediately when done
                     // Prevents memory accumulation when Plex doesn't call reset()
                     LOG_DEBUG("DONE_PENDING: calling PQclear result=%p", (void*)pg_stmt->result);
+                    
+                    // STEP TRACE: Log when done iterating media queries
+                    if (pg_stmt->sql && (strstr(pg_stmt->sql, "media_items") || strstr(pg_stmt->sql, "media_streams"))) {
+                        LOG_INFO("STEP_DONE: media query complete total_rows=%d stmt=%p",
+                                 pg_stmt->num_rows, (void*)pStmt);
+                    }
+                    
                     PQclear(pg_stmt->result);
                     LOG_DEBUG("DONE_PENDING: PQclear complete");
                     pg_stmt->result = NULL;
@@ -647,6 +663,13 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                     return SQLITE_DONE;
                 }
                 pthread_mutex_unlock(&pg_stmt->mutex);
+                
+                // STEP TRACE: Log ROW return for media queries
+                if (pg_stmt->sql && (strstr(pg_stmt->sql, "media_items") || strstr(pg_stmt->sql, "media_streams"))) {
+                    LOG_INFO("STEP_ROW: media query returning row=%d/%d stmt=%p",
+                             pg_stmt->current_row, pg_stmt->num_rows, (void*)pStmt);
+                }
+                
                 LOG_DEBUG("RETURNING SQLITE_ROW for stmt=%p pg_stmt=%p thread=%p sql=%.50s",
                           (void*)pStmt, (void*)pg_stmt, (void*)pthread_self(), pg_stmt->sql ? pg_stmt->sql : "NULL");
                 // NOTE: Removed fflush(NULL) - it caused deadlock with log mutex and was root cause of kernel panic

@@ -835,16 +835,13 @@ int my_sqlite3_column_type(sqlite3_stmt *pStmt, int idx) {
             if (idx >= 0 && idx < cached->num_cols && row >= 0 && row < cached->num_rows) {
                 cached_row_t *crow = &cached->rows[row];
                 if (crow->is_null[idx]) {
-                    // WORKAROUND: SOCI throws "Null value not allowed" when column_type returns SQLITE_NULL
-                    // for columns bound to non-nullable C++ types. Instead of returning SQLITE_NULL,
-                    // return the declared column type so SOCI will call column_int/text/etc which 
-                    // return 0/"" for NULL values (matching SQLite behavior).
-                    Oid oid = cached->col_types[idx];
-                    int declared_type = pg_oid_to_sqlite_type(oid);
-                    LOG_DEBUG("COLUMN_TYPE_VERBOSE: idx=%d row=%d -> %s (cached, is_null=true, returning declared type instead of NULL)", 
-                              idx, row, sqlite_type_name(declared_type));
+                    // Return SQLITE_NULL for NULL values.
+                    // SOCI's load_rowset() handles this correctly by setting isNull_=true.
+                    // SOCI's post_fetch() may throw "Null value not allowed" but Plex catches this.
+                    LOG_DEBUG("COLUMN_TYPE_VERBOSE: idx=%d row=%d -> SQLITE_NULL (cached, is_null=true)", 
+                              idx, row);
                     pthread_mutex_unlock(&pg_stmt->mutex);
-                    return declared_type;
+                    return SQLITE_NULL;
                 }
                 // Use cached column type OID to determine SQLite type
                 Oid oid = cached->col_types[idx];
@@ -881,14 +878,14 @@ int my_sqlite3_column_type(sqlite3_stmt *pStmt, int idx) {
         const char *col_name = PQfname(pg_stmt->result, idx);
         // Update exception context
         last_column_being_accessed = col_name;
-        // WORKAROUND: Always return declared type instead of SQLITE_NULL
-        // SOCI throws "Null value not allowed" for SQLITE_NULL on non-nullable bindings
-        // The column_int/text/etc functions return 0/"" for NULL (matching SQLite)
-        int result = pg_oid_to_sqlite_type(oid);
+        // Return SQLITE_NULL for NULL values.
         if (is_null) {
-            LOG_DEBUG("COLUMN_TYPE: idx=%d col='%s' is NULL, returning declared type %s instead of SQLITE_NULL",
-                      idx, col_name ? col_name : "?", sqlite_type_name(result));
+            LOG_DEBUG("COLUMN_TYPE: idx=%d col='%s' is NULL, returning SQLITE_NULL",
+                      idx, col_name ? col_name : "?");
+            pthread_mutex_unlock(&pg_stmt->mutex);
+            return SQLITE_NULL;
         }
+        int result = pg_oid_to_sqlite_type(oid);
         
         // ENHANCED LOGGING: Include decltype for comparison
         const char *col_decltype = NULL;
@@ -1216,6 +1213,13 @@ const unsigned char* my_sqlite3_column_text(sqlite3_stmt *pStmt, int idx) {
     
     pg_stmt_t *pg_stmt = pg_find_any_stmt(pStmt);
     
+    // DEBUG: Log when pg_stmt is not found or not PG
+    if (!pg_stmt) {
+        LOG_ERROR("COLUMN_TEXT_NO_STMT: pStmt=%p idx=%d - statement not in registry!", (void*)pStmt, idx);
+    } else if (!pg_stmt->is_pg) {
+        LOG_DEBUG("COLUMN_TEXT_NOT_PG: pStmt=%p idx=%d is_pg=false, using SQLite fallback", (void*)pStmt, idx);
+    }
+    
     // PERFORMANCE FIX: Use cached flag instead of expensive strstr() on every column access
     // Handle all PostgreSQL statements
     if (pg_stmt && pg_stmt->is_pg) {
@@ -1240,9 +1244,10 @@ const unsigned char* my_sqlite3_column_text(sqlite3_stmt *pStmt, int idx) {
                 }
             }
             if (!source_value) {
-                LOG_DEBUG("COLUMN_TEXT_CACHE_NULL: returning NULL (SQLite behavior)");
+                // Return NULL for NULL columns - SQLite behavior
+                LOG_DEBUG("COLUMN_TEXT_CACHE_NULL: idx=%d row=%d returning NULL", idx, row);
                 pthread_mutex_unlock(&pg_stmt->mutex);
-                return NULL;  // SQLite returns NULL for NULL columns
+                return NULL;
             }
         } else {
             // Non-cached path - get from PGresult
@@ -1275,9 +1280,9 @@ const unsigned char* my_sqlite3_column_text(sqlite3_stmt *pStmt, int idx) {
             }
 
             if (PQgetisnull(pg_stmt->result, row, idx)) {
-                LOG_DEBUG("COLUMN_TEXT: value is NULL, returning NULL (SQLite behavior)");
+                // Return NULL for NULL columns - SQLite behavior
                 pthread_mutex_unlock(&pg_stmt->mutex);
-                return NULL;  // SQLite returns NULL for NULL columns
+                return NULL;
             }
 
             source_value = PQgetvalue(pg_stmt->result, row, idx);

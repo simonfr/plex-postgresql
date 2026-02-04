@@ -231,6 +231,7 @@ void pg_query_cache_store(pg_stmt_t *stmt, void *result_ptr) {
 
     int num_rows = PQntuples(result);
     int num_cols = PQnfields(result);
+    LOG_DEBUG("CACHE_STORE: rows=%d cols=%d max=%d", num_rows, num_cols, QUERY_CACHE_MAX_ROWS);
 
     // Don't cache huge results
     if (num_rows > QUERY_CACHE_MAX_ROWS) {
@@ -239,7 +240,10 @@ void pg_query_cache_store(pg_stmt_t *stmt, void *result_ptr) {
     }
 
     // Don't cache empty results (usually not worth it)
-    if (num_rows == 0) return;
+    if (num_rows == 0) {
+        LOG_DEBUG("QUERY_CACHE SKIP: empty result");
+        return;
+    }
 
     query_cache_t *cache = get_thread_cache();
     if (!cache) return;
