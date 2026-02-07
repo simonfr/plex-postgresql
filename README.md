@@ -151,15 +151,35 @@ For rclone/Real-Debrid setups with Kometa/PMM, **SQLite becomes unusable** durin
 - **use-after-free crash**: Fixed statistics_bandwidth duplicate spam causing crashes
 - **Docker reliability**: LD_PRELOAD now injected at build time for s6-overlay
 
-### Migration Updates
+### Migration & Maintenance
 
-Migration scripts now include blob data:
 ```bash
-./scripts/migrate_sqlite_to_pg.sh  # Migrates library.db + blobs.db
+./scripts/migrate_sqlite_to_pg.sh   # SQLite → PostgreSQL
+./scripts/migrate_pg_to_sqlite.sh   # PostgreSQL → SQLite (beta)
+./scripts/doctor.sh                  # Check and fix schema + data
 ```
 
-- Blobs migrated via hex encoding (no Python/psycopg2 required)
-- Tested with 4,344 blobs (~233 MB)
+**doctor.sh** checks your database for missing triggers, functions, and tables that may have been added since your initial migration, and fixes them automatically. It also detects and repairs bad data (self-referential parents, cross-section parents, orphan seasons). Data changes require confirmation unless you pass `--fix`.
+
+```
+$ ./scripts/doctor.sh
+=== plex-postgresql doctor ===
+
+Tables:
+  maintenance_control                        OK
+Functions:
+  prevent_self_referential_parent()          OK
+  maybe_cleanup_statistics()                 MISSING → FIXED
+Triggers:
+  trg_clean_statistics_resources             MISSING → FIXED
+Data:
+  self-referential parent_id                 OK
+  orphan seasons (no parent)                 2 rows
+  Fix them? [y/N]: y
+  fixing orphan seasons... 2 rows
+```
+
+Flags: `--check` (only report, don't fix anything), `--fix` (fix everything without asking).
 
 ### Easy Installation
 
