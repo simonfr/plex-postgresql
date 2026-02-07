@@ -53,7 +53,11 @@ endif
 DB_INTERPOSE_OBJS = $(DB_INTERPOSE_CORE) $(DB_INTERPOSE_SHARED)
 
 # All objects (macOS includes fishhook, Linux doesn't)
-OBJECTS = $(SQL_TR_OBJS) $(PG_MODULES) $(DB_INTERPOSE_OBJS) src/fishhook.o
+ifeq ($(UNAME_S),Darwin)
+    OBJECTS = $(SQL_TR_OBJS) $(PG_MODULES) $(DB_INTERPOSE_OBJS) src/fishhook.o
+else
+    OBJECTS = $(SQL_TR_OBJS) $(PG_MODULES) $(DB_INTERPOSE_OBJS)
+endif
 LINUX_OBJECTS = $(SQL_TR_OBJS) $(PG_MODULES) $(DB_INTERPOSE_SHARED) src/db_interpose_core_linux.o
 
 .PHONY: all clean install test macos linux run stop unit-test test-recursion test-crash test-params test-logging test-soci test-fork test-fts test-buffer test-reaper
