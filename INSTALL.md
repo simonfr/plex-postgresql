@@ -6,6 +6,12 @@ Complete installation instructions for all platforms.
 
 ## 📦 Choose Your Platform
 
+**Latest Release:** [v0.9.16](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.16)
+
+Release assets are zip-only:
+- `plex-postgresql-v0.9.16-macos.zip`
+- `plex-postgresql-v0.9.16-linux.zip`
+
 - **[Docker](#docker-all-platforms)** - Easiest, works everywhere (Linux/macOS/Windows)
 - **[macOS](#macos-native)** - Native installation for Apple Silicon
 - **[Linux](#linux-native)** - Native installation for production servers
@@ -47,7 +53,7 @@ docker-compose logs -f plex
 **What happens:**
 - ✅ PostgreSQL 15 + Plex Media Server start automatically
 - ✅ Empty PostgreSQL schema created
-- ✅ v0.8.12 fix active (no std::bad_cast crashes)
+- ✅ Latest shim fixes active
 - ✅ Multi-arch support (works on x86_64 and ARM64)
 - ✅ All required directories pre-created
 
@@ -182,9 +188,9 @@ docker-compose ps
 - PostgreSQL 15.x
 - Homebrew (for PostgreSQL)
 
-### Option 1: Pre-compiled Binary (Recommended)
+### Option 1: Pre-compiled ZIP (Recommended)
 
-**Latest Release:** [v0.8.12](https://github.com/cgnl/plex-postgresql/releases/tag/v0.8.12)
+**Latest Release:** [v0.9.16](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.16)
 
 **1. Setup PostgreSQL**
 
@@ -202,39 +208,29 @@ psql -d plex -c "ALTER USER plex PASSWORD 'plex';"
 **2. Download and Install**
 
 ```bash
-# Download latest release
-curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.8.12/plex-postgresql-v0.8.12-macos-arm64.tar.gz -o plex-pg.tar.gz
+# Download latest macOS zip
+curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.16/plex-postgresql-v0.9.16-macos.zip -o /tmp/plex-pg-macos.zip
 
 # Extract
-tar -xzf plex-pg.tar.gz
-cd v0.8.12
+mkdir -p /tmp/plex-pg-macos
+cd /tmp/plex-pg-macos
+unzip /tmp/plex-pg-macos.zip
 
-# Run interactive installer
-./install.sh
+# Stop Plex and install wrappers
+pkill -f "Plex Media Server" 2>/dev/null || true
+./scripts/install_wrappers.sh
 ```
 
-**What the installer does:**
-- ✅ Validates architecture (ARM64 only)
-- ✅ Checks Plex and PostgreSQL are installed
-- ✅ **Automatically backs up original Plex binary**
-- ✅ Migrates SQLite → PostgreSQL (if database exists)
-- ✅ Installs shim to `~/.plex-postgresql/`
-- ✅ Creates wrapper scripts (start/stop/uninstall)
-- ✅ Provides next steps
+**What this setup does:**
+- ✅ Uses pre-built `db_interpose_pg.dylib`
+- ✅ Backs up server/scanner binaries before patching
+- ✅ Installs wrapper/patch flow for Server + Scanner
+- ✅ Initializes/syncs migration state
 
 **3. Start Plex**
 
-The installer creates convenient scripts:
-
 ```bash
-# Start Plex with PostgreSQL
-~/.plex-postgresql/start_plex.sh
-
-# Stop Plex
-~/.plex-postgresql/stop_plex.sh
-
-# Uninstall (restores original Plex)
-~/.plex-postgresql/uninstall_plex_pg.sh
+open "/Applications/Plex Media Server.app"
 ```
 
 ### Option 2: Build from Source
@@ -248,8 +244,9 @@ git clone https://github.com/cgnl/plex-postgresql.git
 cd plex-postgresql
 make
 
-# Run installer
-./install.sh
+# Stop Plex and install wrappers
+pkill -f "Plex Media Server" 2>/dev/null || true
+./scripts/install_wrappers.sh
 ```
 
 ### Configuration
@@ -300,9 +297,9 @@ curl -s http://localhost:32400/library/sections | head -10
 - PostgreSQL 15.x
 - Root access (sudo)
 
-### Option 1: Pre-compiled Binary (Recommended)
+### Option 1: Pre-compiled ZIP (Recommended)
 
-**Latest Release:** [v0.8.12](https://github.com/cgnl/plex-postgresql/releases/tag/v0.8.12)
+**Latest Release:** [v0.9.16](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.16)
 
 **Available architectures:**
 - ✅ x86_64 (Intel/AMD 64-bit) - `db_interpose_pg-linux-x86_64.so`
@@ -329,17 +326,24 @@ sudo -u postgres psql -c "ALTER USER plex PASSWORD 'yourpassword';"
 **2. Download and Install**
 
 ```bash
-# Download latest release
-curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.8.12/plex-postgresql-v0.8.12-linux.tar.gz -o plex-pg.tar.gz
+# Download latest Linux zip
+curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.16/plex-postgresql-v0.9.16-linux.zip -o /tmp/plex-pg-linux.zip
 
 # Extract
-tar -xzf plex-pg.tar.gz
-cd v0.8.12
+mkdir -p /tmp/plex-pg-linux
+cd /tmp/plex-pg-linux
+unzip /tmp/plex-pg-linux.zip
 
-# Stop Plex
+# Install shim binary
+sudo mkdir -p /usr/local/lib/plex-postgresql
+if [ "$(uname -m)" = "x86_64" ]; then
+  sudo install -m 755 db_interpose_pg-linux-x86_64.so /usr/local/lib/plex-postgresql/db_interpose_pg.so
+else
+  sudo install -m 755 db_interpose_pg-linux-aarch64.so /usr/local/lib/plex-postgresql/db_interpose_pg.so
+fi
+
+# Stop Plex and install wrappers
 sudo systemctl stop plexmediaserver
-
-# Run installer (requires root)
 sudo ./scripts/install_wrappers_linux.sh
 ```
 
@@ -497,7 +501,7 @@ docker-compose logs plex --tail 50
 
 ### TV Shows Return HTTP 500
 
-This is what v0.8.12 fixes! Verify fix is active:
+Latest builds include this fix. Verify it is active:
 
 ```bash
 # Check logs for this message:
@@ -507,7 +511,7 @@ grep "DECLTYPE_AGGREGATE" /tmp/plex_redirect_pg.log
 # DECLTYPE_AGGREGATE: col='max' OID=20 (BIGINT) -> returning TEXT to avoid SOCI bad_cast bug
 ```
 
-If not present, ensure you're running v0.8.12:
+If not present, ensure you're running a current release:
 ```bash
 ls -la ~/.plex-postgresql/db_interpose_pg.dylib  # macOS
 ls -la /usr/local/lib/plex-postgresql/db_interpose_pg.so  # Linux

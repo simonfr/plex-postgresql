@@ -1,3 +1,57 @@
+# Release Notes - v0.9.16
+
+**Release Date:** February 8, 2026
+
+This release focuses on wrapper reliability, release automation, and consistent zip-based distribution.
+
+## Highlights
+
+### macOS Wrapper Reliability
+
+- Removed hardcoded machine-specific paths from generated server wrapper.
+- Wrapper now uses install-time shim placeholders and sane user-home defaults.
+- SQLite shadow `schema_migrations` is now synced from PostgreSQL during wrapper init.
+
+### Scanner Backup/Restore Fix
+
+- Installer now preserves `Plex Media Scanner.original` before patching.
+- Uninstaller now restores scanner when backup exists.
+- If backup is missing, uninstaller prints a clear warning instead of silently claiming full restore.
+
+### CI/CD Improvements
+
+- Added PR/main CI workflow: `.github/workflows/ci.yml`
+  - `bash -n` validation for scripts
+  - Linux amd64 builder smoke check
+- Added tag-driven macOS release workflow: `.github/workflows/release-macos-artifacts.yml`
+- Updated Linux release workflow: `.github/workflows/release-linux-artifacts.yml`
+  - Packages and uploads Linux zip bundle automatically
+
+### Release Assets
+
+- Zip-only release assets are now the standard format:
+  - `plex-postgresql-vX.Y.Z-macos.zip`
+  - `plex-postgresql-vX.Y.Z-linux.zip`
+
+## Upgrade Notes
+
+1. Re-run `scripts/install_wrappers.sh` on macOS to refresh wrapper/scanner behavior.
+2. If scanner was patched in older versions without a `.original` backup, reinstall Plex once to reset scanner binary baseline.
+3. Prefer zip assets from GitHub Releases for installs/upgrades.
+
+## Files Changed (v0.9.16 scope)
+
+- `scripts/install_wrappers.sh`
+- `scripts/uninstall_wrappers.sh`
+- `.github/workflows/ci.yml`
+- `.github/workflows/release-linux-artifacts.yml`
+- `.github/workflows/release-macos-artifacts.yml`
+- `README.md`
+- `CHANGELOG.md`
+- `VERSION`
+
+---
+
 # Release Notes - v0.8.13
 
 **Release Date:** January 13, 2026
