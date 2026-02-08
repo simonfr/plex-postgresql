@@ -20,7 +20,13 @@ WORKDIR /build
 RUN curl -L https://ftp.postgresql.org/pub/source/v15.10/postgresql-15.10.tar.gz | tar xz
 RUN cd postgresql-15.10 && \
     # Configure WITHOUT OpenSSL to avoid ENGINE symbol conflicts
-    CFLAGS='-O0 -mno-sse4.2' ac_cv_func_getaddrinfo=yes ./configure --prefix=/usr/local/pgsql \
+    ARCH=$(uname -m) && \
+    if [ "$ARCH" = "x86_64" ]; then \
+      PG_CFLAGS='-O0 -mno-sse4.2'; \
+    else \
+      PG_CFLAGS='-O2'; \
+    fi && \
+    CFLAGS="$PG_CFLAGS" ac_cv_func_getaddrinfo=yes ./configure --prefix=/usr/local/pgsql \
         --without-readline \
         --without-zlib \
         --without-openssl \
