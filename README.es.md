@@ -5,7 +5,7 @@
 
 **Ejecuta Plex Media Server con PostgreSQL en lugar de SQLite.**
 
-Una biblioteca shim que intercepta las llamadas SQLite de Plex y las redirige a PostgreSQL. Sin modificaciones a Plex.
+Una librería shim pequeña que captura las llamadas SQLite de Plex y las envía a PostgreSQL. No necesitas modificar Plex.
 
 | Plataforma | Estado |
 |------------|--------|
@@ -23,16 +23,16 @@ Una biblioteca shim que intercepta las llamadas SQLite de Plex y las redirige a 
 
 ## ¿Por qué PostgreSQL?
 
-SQLite es excelente para la mayoría de instalaciones de Plex, pero tiene una limitación importante: **bloqueo de base de datos**.
+SQLite funciona bien en muchos casos, pero tiene una limitación importante: **bloqueo de base de datos**.
 
-- **Sin bloqueos** - SQLite bloquea toda la base de datos durante escrituras. Los escaneos bloquean la reproducción. Escaneos concurrentes se ponen en cola. Con PostgreSQL, todo se ejecuta simultáneamente - escanea tus bibliotecas mientras transmites sin interrupciones.
-- **Almacenamiento remoto** - Mejores patrones de I/O para rclone, Real-Debrid o configuraciones en la nube.
-- **Bibliotecas grandes** - El optimizador de PostgreSQL maneja eficientemente más de 10K películas y 50K episodios.
-- **Herramientas estándar** - pg_dump para backups, replicación, cualquier cliente PostgreSQL para depuración.
+- **Menos bloqueos** - con PostgreSQL, escaneos y reproducción conviven mejor.
+- **Mejor para almacenamiento remoto** - útil con rclone y servicios en la nube.
+- **Mejor en bibliotecas grandes** - maneja catálogos grandes con más estabilidad.
+- **Herramientas conocidas** - `pg_dump` y clientes PostgreSQL para backup y revisión.
 
 ## Inicio Rápido (Docker)
 
-La forma más fácil de ejecutar Plex con PostgreSQL:
+La forma más simple de ejecutar Plex con PostgreSQL:
 
 ```bash
 git clone https://github.com/cgnl/plex-postgresql.git
@@ -47,7 +47,7 @@ docker-compose logs -f plex
 
 Plex estará disponible en http://localhost:8080
 
-PostgreSQL se configura automáticamente con inicialización del esquema.
+PostgreSQL se configura automáticamente y crea el esquema inicial.
 
 ### Configuración
 
@@ -84,19 +84,7 @@ psql -d plex -c "ALTER USER plex PASSWORD 'plex';"
 psql -U plex -d plex -c "CREATE SCHEMA plex;"
 ```
 
-### 2. Compilar e Instalar
-
-```bash
-git clone https://github.com/cgnl/plex-postgresql.git
-cd plex-postgresql
-make clean && make
-
-# Detener Plex, instalar wrappers
-pkill -x "Plex Media Server" 2>/dev/null
-./scripts/install_wrappers.sh
-```
-
-### Opción precompilada (ZIP)
+### 2. Instalar (ZIP recomendado)
 
 ```bash
 curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.16/plex-postgresql-v0.9.16-macos.zip -o /tmp/plex-pg-macos.zip
@@ -104,6 +92,17 @@ mkdir -p /tmp/plex-pg && cd /tmp/plex-pg
 unzip /tmp/plex-pg-macos.zip
 
 # Ejecutar instalador de wrappers desde el ZIP extraído
+./scripts/install_wrappers.sh
+```
+
+### Opción desde código fuente
+
+```bash
+git clone https://github.com/cgnl/plex-postgresql.git
+cd plex-postgresql
+make clean && make
+
+pkill -x "Plex Media Server" 2>/dev/null
 ./scripts/install_wrappers.sh
 ```
 
@@ -122,7 +121,7 @@ pkill -x "Plex Media Server" 2>/dev/null
 ./scripts/uninstall_wrappers.sh
 ```
 
-## Inicio Rápido (Linux Nativo) - No Probado
+## Inicio Rápido (Linux Nativo)
 
 ### 1. Configurar PostgreSQL
 
@@ -134,23 +133,7 @@ sudo -u postgres psql -c "ALTER USER plex PASSWORD 'plex';"
 psql -U plex -d plex -c "CREATE SCHEMA plex;"
 ```
 
-### 2. Compilar e Instalar
-
-```bash
-# Instalar dependencias
-sudo apt install build-essential libsqlite3-dev libpq-dev
-
-git clone https://github.com/cgnl/plex-postgresql.git
-cd plex-postgresql
-make linux
-sudo make install
-
-# Detener Plex, instalar wrappers
-sudo systemctl stop plexmediaserver
-sudo ./scripts/install_wrappers_linux.sh
-```
-
-### Opción precompilada (ZIP)
+### 2. Instalar (ZIP recomendado)
 
 ```bash
 curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.16/plex-postgresql-v0.9.16-linux.zip -o /tmp/plex-pg-linux.zip
@@ -164,6 +147,20 @@ if [ "$(uname -m)" = "x86_64" ]; then
 else
   sudo install -m 755 db_interpose_pg-linux-aarch64.so /usr/local/lib/plex-postgresql/db_interpose_pg.so
 fi
+sudo ./scripts/install_wrappers_linux.sh
+```
+
+### Opción desde código fuente
+
+```bash
+sudo apt install build-essential libsqlite3-dev libpq-dev
+
+git clone https://github.com/cgnl/plex-postgresql.git
+cd plex-postgresql
+make linux
+sudo make install
+
+sudo systemctl stop plexmediaserver
 sudo ./scripts/install_wrappers_linux.sh
 ```
 
@@ -207,14 +204,14 @@ Linux:  Plex → SQLite API → LD_PRELOAD shim    → Traductor SQL → Postgre
 Docker: Plex → SQLite API → LD_PRELOAD shim    → Traductor SQL → PostgreSQL (contenedor)
 ```
 
-El shim intercepta todas las llamadas `sqlite3_*`, traduce la sintaxis SQL (placeholders, funciones, tipos) y ejecuta en PostgreSQL via libpq.
+El shim captura llamadas `sqlite3_*`, traduce SQL de SQLite a PostgreSQL y lo ejecuta con libpq.
 
 ### Características Principales
 
-- **Pool de conexiones** - Reutilización eficiente de conexiones PostgreSQL
-- **Traducción SQL** - Conversión automática de sintaxis SQLite → PostgreSQL
-- **Prepared statements** - Caché de consultas para rendimiento
-- **Inicialización del esquema** - Crea automáticamente el esquema PostgreSQL en el primer inicio
+- **Pool de conexiones** - Reutiliza conexiones PostgreSQL
+- **Traducción SQL** - Convierte sintaxis SQLite → PostgreSQL
+- **Prepared statements** - Usa caché de consultas para mejor rendimiento
+- **Inicialización del esquema** - Crea el esquema PostgreSQL en el primer arranque
 
 ## Solución de Problemas
 
@@ -234,7 +231,7 @@ docker-compose logs -f plex
 
 ### Problemas Comunes
 
-**Plex no inicia**: Verifica que PostgreSQL esté ejecutándose y accesible.
+**Plex no inicia**: verifica que PostgreSQL esté activo y accesible.
 
 **Errores de base de datos**: Asegúrate de que el esquema existe: `psql -U plex -d plex -c "CREATE SCHEMA IF NOT EXISTS plex;"`
 
