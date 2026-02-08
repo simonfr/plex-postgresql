@@ -13,6 +13,14 @@ Una biblioteca shim que intercepta las llamadas SQLite de Plex y las redirige a 
 | Linux (Docker) | ✅ Funciona (init y ejecución probados, no probado en producción) |
 | Linux (Nativo) | ⚠️ No probado |
 
+## Última versión
+
+- **v0.9.16**
+- Descarga: https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.16
+- Formato de assets: solo ZIP
+  - `plex-postgresql-v0.9.16-macos.zip`
+  - `plex-postgresql-v0.9.16-linux.zip`
+
 ## ¿Por qué PostgreSQL?
 
 SQLite es excelente para la mayoría de instalaciones de Plex, pero tiene una limitación importante: **bloqueo de base de datos**.
@@ -88,6 +96,17 @@ pkill -x "Plex Media Server" 2>/dev/null
 ./scripts/install_wrappers.sh
 ```
 
+### Opción precompilada (ZIP)
+
+```bash
+curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.16/plex-postgresql-v0.9.16-macos.zip -o /tmp/plex-pg-macos.zip
+mkdir -p /tmp/plex-pg && cd /tmp/plex-pg
+unzip /tmp/plex-pg-macos.zip
+
+# Ejecutar instalador de wrappers desde el ZIP extraído
+./scripts/install_wrappers.sh
+```
+
 ### 3. Iniciar Plex
 
 ```bash
@@ -128,6 +147,23 @@ sudo make install
 
 # Detener Plex, instalar wrappers
 sudo systemctl stop plexmediaserver
+sudo ./scripts/install_wrappers_linux.sh
+```
+
+### Opción precompilada (ZIP)
+
+```bash
+curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.16/plex-postgresql-v0.9.16-linux.zip -o /tmp/plex-pg-linux.zip
+mkdir -p /tmp/plex-pg && cd /tmp/plex-pg
+unzip /tmp/plex-pg-linux.zip
+
+# Instalar shim y wrappers
+sudo mkdir -p /usr/local/lib/plex-postgresql
+if [ "$(uname -m)" = "x86_64" ]; then
+  sudo install -m 755 db_interpose_pg-linux-x86_64.so /usr/local/lib/plex-postgresql/db_interpose_pg.so
+else
+  sudo install -m 755 db_interpose_pg-linux-aarch64.so /usr/local/lib/plex-postgresql/db_interpose_pg.so
+fi
 sudo ./scripts/install_wrappers_linux.sh
 ```
 
