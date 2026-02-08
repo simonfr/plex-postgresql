@@ -30,7 +30,7 @@ jobs:
           - name: plexinc
             dockerfile: Dockerfile.standalone
             image: ghcr.io/${{ github.repository_owner }}/plex-postgresql-plexinc
-            legacy_image: ghcr.io/${{ github.repository_owner }}/plex-postgresql-standalone
+            legacy_image: ""
 
     steps:
       - name: Checkout
