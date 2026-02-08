@@ -16,20 +16,8 @@ permissions:
 
 jobs:
   build:
-    name: Build macOS ${{ matrix.arch }} dylib
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: arm64
-            runner: macos-14
-            target: release-arm64
-            output: db_interpose_pg-arm64.dylib
-          - arch: x86_64
-            runner: macos-13
-            target: release-x86_64
-            output: db_interpose_pg-x86_64.dylib
+    name: Build macOS arm64 dylib
+    runs-on: macos-14
 
     steps:
       - name: Checkout
@@ -42,20 +30,24 @@ jobs:
           set -eux
           brew install postgresql@15
 
-      - name: Build ${{ matrix.arch }} dylib
+      - name: Build arm64 dylib
         run: |
           set -eux
           PG_PREFIX="$(brew --prefix postgresql@15)"
-          make "${{ matrix.target }}" \
+          make release-arm64 \
             CFLAGS="-Wall -Wextra -O2 -I${PG_PREFIX}/include -Iinclude -Isrc -fvisibility=hidden" \
             LDFLAGS="-L${PG_PREFIX}/lib -lpq"
-          test -f "${{ matrix.output }}"
+          cp db_interpose_pg-arm64.dylib db_interpose_pg.dylib
+          test -f db_interpose_pg-arm64.dylib
+          test -f db_interpose_pg.dylib
 
-      - name: Upload architecture artifact
+      - name: Upload macOS dylib artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: macos-${{ matrix.arch }}
-          path: ${{ matrix.output }}
+          name: macos-arm64
+          path: |
+            db_interpose_pg-arm64.dylib
+            db_interpose_pg.dylib
           if-no-files-found: error
 
   package-macos-zip:
@@ -80,12 +72,12 @@ jobs:
             echo "value=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Download architecture artifacts
+      - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
           path: release-assets
 
-      - name: Build universal dylib and zip
+      - name: Build macOS zip
         run: |
           set -eux
           TAG="${{ steps.tag.outputs.value }}"
@@ -96,12 +88,7 @@ jobs:
           mkdir -p "$STAGE/scripts"
 
           cp release-assets/macos-arm64/db_interpose_pg-arm64.dylib "$STAGE/"
-          cp release-assets/macos-x86_64/db_interpose_pg-x86_64.dylib "$STAGE/"
-
-          lipo -create \
-            "$STAGE/db_interpose_pg-arm64.dylib" \
-            "$STAGE/db_interpose_pg-x86_64.dylib" \
-            -output "$STAGE/db_interpose_pg.dylib"
+          cp release-assets/macos-arm64/db_interpose_pg.dylib "$STAGE/"
 
           cp README.md CHANGELOG.md INSTALL.md LICENSE "$STAGE/"
           cp -R scripts/* "$STAGE/scripts/"
