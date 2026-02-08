@@ -1,6 +1,6 @@
 # Installation Guide
 
-Complete installation instructions for all platforms.
+Simple install steps for Docker, macOS, and Linux.
 
 ---
 
@@ -12,7 +12,7 @@ Release assets are zip-only:
 - `plex-postgresql-v0.9.16-macos.zip`
 - `plex-postgresql-v0.9.16-linux.zip`
 
-- **[Docker](#docker-all-platforms)** - Easiest, works everywhere (Linux/macOS/Windows)
+- **[Docker](#docker-all-platforms)** - Easiest option, works on Linux/macOS/Windows
 - **[macOS](#macos-native)** - Native installation for Apple Silicon
 - **[Linux](#linux-native)** - Native installation for production servers
 
@@ -20,7 +20,7 @@ Release assets are zip-only:
 
 ## 🐳 Docker (All Platforms)
 
-**Recommended for:** Quick testing, development, Windows users, multi-platform deployments
+**Best for:** quick setup, testing, and multi-platform deployments
 
 ### Prerequisites
 - Docker & Docker Compose installed
@@ -44,22 +44,22 @@ docker-compose logs -f plex
 # Then open: http://localhost:8080/web
 ```
 
-**Setup Steps:**
+**Setup steps:**
 1. Open http://localhost:8080/web in browser
 2. Sign in with Plex account to claim server
 3. Add libraries through web interface
-4. Done! Your libraries are stored in PostgreSQL
+4. Done. Your library data is now in PostgreSQL.
 
 **What happens:**
-- ✅ PostgreSQL 15 + Plex Media Server start automatically
-- ✅ Empty PostgreSQL schema created
-- ✅ Latest shim fixes active
-- ✅ Multi-arch support (works on x86_64 and ARM64)
-- ✅ All required directories pre-created
+- ✅ PostgreSQL 15 and Plex start automatically
+- ✅ An empty PostgreSQL schema is created
+- ✅ Current shim fixes are active
+- ✅ Works on x86_64 and ARM64
+- ✅ Required folders are created
 
 ### Migration from Existing Plex Database
 
-If you want to migrate your existing Plex library to PostgreSQL:
+If you already have a Plex SQLite library, follow these steps:
 
 **1. Edit `docker-compose.yml`**
 
@@ -96,15 +96,15 @@ docker-compose logs -f plex | grep -E "migration|Migration"
 ```
 
 **Migration process:**
-- Detects SQLite database automatically
-- Migrates all tables (tested: 34 tables, 89K+ items)
+- Detects the SQLite database automatically
+- Migrates all tables
 - Shows progress per table
-- Original SQLite database unchanged (read-only mount)
-- Takes 2-10 minutes depending on library size
+- Keeps source SQLite unchanged (read-only mount)
+- Usually takes a few minutes, depending on library size
 
 ### Configuration
 
-Default connection uses Unix socket (7% faster than TCP):
+Default connection uses a Unix socket (usually a bit faster than TCP):
 
 ```yaml
 environment:
@@ -158,10 +158,10 @@ docker-compose up -d
 
 ### Troubleshooting
 
-**Plex shows "Maintenance" for long time:**
-- Normal on first start (database migrations)
+**Plex shows "Maintenance" for a long time:**
+- This is normal on first start (database migrations)
 - Check logs: `docker-compose logs plex | tail -50`
-- Wait 2-5 minutes for initialization
+- Wait a few minutes for initialization
 
 **Port 8080 already in use:**
 ```yaml
@@ -180,7 +180,7 @@ docker-compose ps
 
 ## 🍎 macOS Native
 
-**Recommended for:** Production macOS installations, best performance
+**Best for:** production macOS setups
 
 ### Prerequisites
 - macOS ARM64 (M1/M2/M3 Apple Silicon)
@@ -224,8 +224,8 @@ pkill -f "Plex Media Server" 2>/dev/null || true
 **What this setup does:**
 - ✅ Uses pre-built `db_interpose_pg.dylib`
 - ✅ Backs up server/scanner binaries before patching
-- ✅ Installs wrapper/patch flow for Server + Scanner
-- ✅ Initializes/syncs migration state
+- ✅ Installs wrapper flow for Server + Scanner
+- ✅ Initializes and syncs migration state
 
 **3. Start Plex**
 
@@ -289,7 +289,7 @@ curl -s http://localhost:32400/library/sections | head -10
 
 ## 🐧 Linux Native
 
-**Recommended for:** Production Linux servers, best performance
+**Best for:** production Linux servers
 
 ### Prerequisites
 - Linux x86_64 or ARM64 (aarch64)
@@ -348,12 +348,12 @@ sudo ./scripts/install_wrappers_linux.sh
 ```
 
 **What the installer does:**
-- ✅ Checks for Plex installation
-- ✅ **Automatically backs up original binaries**
-- ✅ **Automatically migrates SQLite → PostgreSQL**
+- ✅ Checks the Plex installation
+- ✅ Backs up original binaries
+- ✅ Migrates SQLite to PostgreSQL
 - ✅ Installs wrapper scripts to `/usr/lib/plexmediaserver/`
 - ✅ Wraps both `Plex Media Server` and `Plex Media Scanner`
-- ✅ No Plex code modifications
+- ✅ No Plex source changes needed
 
 **3. Configure Connection**
 
