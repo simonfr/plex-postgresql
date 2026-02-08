@@ -26,9 +26,11 @@ jobs:
           - name: linuxserver
             dockerfile: Dockerfile
             image: ghcr.io/${{ github.repository_owner }}/plex-postgresql-linuxserver
-          - name: standalone
+            legacy_image: ""
+          - name: plexinc
             dockerfile: Dockerfile.standalone
-            image: ghcr.io/${{ github.repository_owner }}/plex-postgresql-standalone
+            image: ghcr.io/${{ github.repository_owner }}/plex-postgresql-plexinc
+            legacy_image: ghcr.io/${{ github.repository_owner }}/plex-postgresql-standalone
 
     steps:
       - name: Checkout
@@ -59,6 +61,23 @@ jobs:
             echo "value=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Resolve image tags
+        id: tags
+        run: |
+          set -eu
+          VERSION="${{ steps.version.outputs.value }}"
+          LEGACY_IMAGE="${{ matrix.legacy_image }}"
+          {
+            echo "value<<EOF"
+            echo "${{ matrix.image }}:${VERSION}"
+            echo "${{ matrix.image }}:latest"
+            if [ -n "$LEGACY_IMAGE" ]; then
+              echo "${LEGACY_IMAGE}:${VERSION}"
+              echo "${LEGACY_IMAGE}:latest"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and push image
         uses: docker/build-push-action@v6
         with:
@@ -67,6 +86,4 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           provenance: false
-          tags: |
-            ${{ matrix.image }}:${{ steps.version.outputs.value }}
-            ${{ matrix.image }}:latest
+          tags: ${{ steps.tags.outputs.value }}

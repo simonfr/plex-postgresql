@@ -19,7 +19,9 @@ A shim library that intercepts Plex's SQLite calls and redirects them to Postgre
 
 Linux and macOS release zips are built by GitHub Actions on tag push via `.github/workflows/release-linux-artifacts.yml` and `.github/workflows/release-macos-artifacts.yml`.
 Pull requests and `main` pushes run `.github/workflows/ci.yml` (script validation + Linux amd64 build check).
-Docker images are published to GHCR on release tags via `.github/workflows/docker-publish.yml`.
+Docker images are published to GHCR on release tags via `.github/workflows/docker-publish.yml`:
+- `ghcr.io/cgnl/plex-postgresql-linuxserver`
+- `ghcr.io/cgnl/plex-postgresql-plexinc` (legacy alias also pushed: `ghcr.io/cgnl/plex-postgresql-standalone`)
 
 **Available for:** macOS ARM64 • Linux x86_64 • Linux ARM64 • Docker (multi-arch)
 
