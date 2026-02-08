@@ -5,6 +5,22 @@ All notable changes to plex-postgresql will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.15] - 2026-02-08
+
+### Added
+- **GitHub Actions Linux release pipeline**
+  - Added `.github/workflows/release-linux-artifacts.yml` to build Linux release binaries on tag push.
+  - Builds `db_interpose_pg-linux-x86_64.so` and `db_interpose_pg-linux-aarch64.so` and uploads them to the GitHub release.
+  - Supports manual re-run via `workflow_dispatch` with a `tag` input.
+
+### Fixed
+- **CI tag checkout behavior for manual runs**
+  - Workflow now checks out the requested tag ref instead of always building `main` during manual dispatch.
+
+- **Architecture-specific PostgreSQL builder flags in Dockerfiles**
+  - Made PostgreSQL build flags architecture-aware to improve release build stability in CI.
+  - Files: `Dockerfile`, `Dockerfile.standalone`
+
 ## [0.9.14] - 2026-02-08
 
 ### Fixed

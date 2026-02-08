@@ -7,17 +7,17 @@
 
 A shim library that intercepts Plex's SQLite calls and redirects them to PostgreSQL. Zero Plex modifications required.
 
-## 🎉 Latest Release: v0.9.14
+## 🎉 Latest Release: v0.9.15
 
-**Linux stability release:** fixes `SIGCHLD` crash loops in Docker/Linux and aligns SQLite shadow migrations with PostgreSQL state.
+**Release automation update:** Linux release binaries are now built and uploaded automatically by GitHub Actions on tag push.
 
-- ✅ **Fixed:** Linux `Received unexpected async signal 17` crash loops under `LD_PRELOAD`
-- ✅ **Fixed:** non-server/scanner child processes now run in safe passthrough mode
-- ✅ **Fixed:** SQLite shadow `schema_migrations` now syncs from PostgreSQL (prevents migration reruns)
+- ✅ **Added:** CI workflow to build/upload Linux `x86_64` + `aarch64` artifacts per release tag
+- ✅ **Fixed:** manual workflow runs now build from the requested tag ref
+- ✅ **Fixed:** architecture-aware PostgreSQL builder flags for more stable CI release builds
 
-[📥 Download v0.9.14](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.14) | [📋 Full Release Notes](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.14)
+[📥 Download v0.9.15](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.15) | [📋 Full Release Notes](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.15)
 
-Linux release binaries are now also built by GitHub Actions on tag push via `.github/workflows/release-linux-artifacts.yml`.
+Linux release binaries are built by GitHub Actions on tag push via `.github/workflows/release-linux-artifacts.yml`.
 
 **Available for:** macOS ARM64 • Linux x86_64 • Linux ARM64 • Docker (multi-arch)
 
@@ -25,14 +25,14 @@ Linux release binaries are now also built by GitHub Actions on tag push via `.gi
 
 **macOS:**
 ```bash
-curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.14/db_interpose_pg.dylib \
+curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.15/db_interpose_pg.dylib \
   -o /usr/local/lib/db_interpose_pg.dylib
 # Then configure DYLD_INSERT_LIBRARIES in Plex launchd plist
 ```
 
 **Linux (x86_64):**
 ```bash
-sudo curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.14/db_interpose_pg-linux-x86_64.so \
+sudo curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.15/db_interpose_pg-linux-x86_64.so \
   -o /usr/local/lib/db_interpose_pg.so
 # Then configure LD_PRELOAD in systemd service
 ```
