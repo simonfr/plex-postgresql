@@ -5,6 +5,19 @@ All notable changes to plex-postgresql will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.16] - 2026-02-08
+
+### Fixed
+- **macOS wrapper portability and migration state correctness**
+  - Removed hardcoded machine-specific paths from generated server wrapper.
+  - Wrapper now uses install-time shim placeholders and user-home defaults.
+  - SQLite shadow `schema_migrations` now syncs from PostgreSQL (instead of only inserting `pg_adapter_1.0.0`).
+
+- **macOS scanner uninstall reliability**
+  - Installer now keeps `Plex Media Scanner.original` backup before patching.
+  - Uninstaller now restores scanner when backup exists and prints a clear warning when restore is impossible.
+  - Prevents silent "uninstall succeeded" state while scanner stays patched.
+
 ## [0.9.15] - 2026-02-08
 
 ### Added

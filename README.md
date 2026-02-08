@@ -7,15 +7,15 @@
 
 A shim library that intercepts Plex's SQLite calls and redirects them to PostgreSQL. Zero Plex modifications required.
 
-## 🎉 Latest Release: v0.9.15
+## 🎉 Latest Release: v0.9.16
 
-**Release automation update:** Linux release binaries are now built and uploaded automatically by GitHub Actions on tag push.
+**Wrapper reliability update:** fixes macOS wrapper portability and scanner uninstall restore behavior.
 
-- ✅ **Added:** CI workflow to build/upload Linux `x86_64` + `aarch64` artifacts per release tag
-- ✅ **Fixed:** manual workflow runs now build from the requested tag ref
-- ✅ **Fixed:** architecture-aware PostgreSQL builder flags for more stable CI release builds
+- ✅ **Fixed:** removed hardcoded local paths from generated macOS server wrapper
+- ✅ **Fixed:** SQLite shadow `schema_migrations` is now synced from PostgreSQL in wrapper init
+- ✅ **Fixed:** scanner backup/restore flow for reliable uninstall behavior
 
-[📥 Download v0.9.15](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.15) | [📋 Full Release Notes](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.15)
+[📥 Download v0.9.16](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.16) | [📋 Full Release Notes](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.16)
 
 Linux release binaries are built by GitHub Actions on tag push via `.github/workflows/release-linux-artifacts.yml`.
 
@@ -25,7 +25,7 @@ Linux release binaries are built by GitHub Actions on tag push via `.github/work
 
 **macOS:**
 ```bash
-curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.15/plex-postgresql-v0.9.15-macos.zip \
+curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.16/plex-postgresql-v0.9.16-macos.zip \
   -o /tmp/plex-postgresql-macos.zip
 unzip -j /tmp/plex-postgresql-macos.zip db_interpose_pg.dylib -d /usr/local/lib
 # Then configure DYLD_INSERT_LIBRARIES in Plex launchd plist
@@ -33,7 +33,7 @@ unzip -j /tmp/plex-postgresql-macos.zip db_interpose_pg.dylib -d /usr/local/lib
 
 **Linux (x86_64):**
 ```bash
-sudo curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.15/plex-postgresql-v0.9.15-linux.zip \
+sudo curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.16/plex-postgresql-v0.9.16-linux.zip \
   -o /tmp/plex-postgresql-linux.zip
 sudo unzip -j /tmp/plex-postgresql-linux.zip db_interpose_pg-linux-x86_64.so -d /usr/local/lib
 sudo mv /usr/local/lib/db_interpose_pg-linux-x86_64.so /usr/local/lib/db_interpose_pg.so

@@ -9,9 +9,9 @@ echo "=== Plex PostgreSQL Wrapper Uninstaller ==="
 echo ""
 
 # Check if Plex is running
-if pgrep -x "Plex Media Server" >/dev/null 2>&1 || pgrep -x "Plex Media Server.original" >/dev/null 2>&1; then
+if pgrep -f "Plex Media Server" >/dev/null 2>&1; then
     echo "WARNING: Plex is running. Stop it first:"
-    echo "  pkill -x 'Plex Media Server' 'Plex Media Server.original'"
+    echo "  pkill -f 'Plex Media Server'"
     exit 1
 fi
 
@@ -32,7 +32,12 @@ if [[ -f "$PLEX_APP/Plex Media Scanner.original" ]]; then
     mv "$PLEX_APP/Plex Media Scanner.original" "$PLEX_APP/Plex Media Scanner"
     echo "  Done"
 else
-    echo "Plex Media Scanner.original not found - nothing to restore"
+    if otool -L "$PLEX_APP/Plex Media Scanner" 2>/dev/null | grep -q "db_interpose_pg.dylib"; then
+        echo "WARNING: Scanner is patched but Plex Media Scanner.original is missing."
+        echo "         Reinstall Plex to fully restore Scanner binary."
+    else
+        echo "Plex Media Scanner.original not found - nothing to restore"
+    fi
 fi
 
 echo ""
