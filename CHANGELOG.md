@@ -5,6 +5,11 @@ All notable changes to plex-postgresql will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.22] - 2026-02-09
+
+### Changed
+- **Extracted `db_interpose_value.c`** from `db_interpose_column.c` — all 7 `sqlite3_value_*` functions (type, text, int, int64, double, bytes, blob) now in separate module. Column.c: 2065 → 1769 lines.
+
 ## [0.9.21] - 2026-02-09
 
 ### Fixed
