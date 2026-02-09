@@ -41,7 +41,8 @@ PG_MODULES = src/pg_config.o src/pg_logging.o src/pg_client.o src/pg_statement.o
 # DB Interpose modules - shared between Mac and Linux
 DB_INTERPOSE_SHARED = src/db_interpose_common.o src/platform_backtrace.o src/db_interpose_open.o \
                       src/db_interpose_exec.o src/db_interpose_prepare.o src/db_interpose_bind.o \
-                      src/db_interpose_step.o src/db_interpose_column.o src/db_interpose_metadata.o
+                      src/db_interpose_step.o src/db_interpose_column.o src/db_interpose_value.o \
+                      src/db_interpose_metadata.o
 
 # Platform-specific core module
 ifeq ($(UNAME_S),Darwin)
@@ -172,6 +173,9 @@ src/db_interpose_step.o: src/db_interpose_step.c src/db_interpose.h
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
 src/db_interpose_column.o: src/db_interpose_column.c src/db_interpose.h
+	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
+
+src/db_interpose_value.o: src/db_interpose_value.c src/db_interpose.h
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
 src/db_interpose_metadata.o: src/db_interpose_metadata.c src/db_interpose.h
