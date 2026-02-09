@@ -30,9 +30,11 @@ Docker images are published to GHCR on release tags via `.github/workflows/docke
 **macOS:**
 ```bash
 curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.16/plex-postgresql-v0.9.16-macos.zip \
-  -o /tmp/plex-postgresql-macos.zip
-unzip -j /tmp/plex-postgresql-macos.zip db_interpose_pg.dylib -d /usr/local/lib
-# Then configure DYLD_INSERT_LIBRARIES in Plex launchd plist
+  -o /tmp/plex-pg-macos.zip
+mkdir -p /tmp/plex-pg-macos && cd /tmp/plex-pg-macos
+unzip /tmp/plex-pg-macos.zip
+pkill -f "Plex Media Server" 2>/dev/null || true
+./scripts/install_wrappers.sh
 ```
 
 **Linux (x86_64):**
@@ -208,18 +210,19 @@ volumes:
 
 ## Quick Start (macOS)
 
-Use the latest macOS zip and run the wrapper installer.
+Use the latest macOS zip and run the wrapper installer. The installer copies the shim dylib into `Plex Media Server.app`, patches the binaries, and sets up the wrapper script. Everything lives inside the Plex app bundle.
 
 ```bash
 curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.16/plex-postgresql-v0.9.16-macos.zip -o /tmp/plex-pg-macos.zip
-mkdir -p /tmp/plex-pg-macos
-cd /tmp/plex-pg-macos
+mkdir -p /tmp/plex-pg-macos && cd /tmp/plex-pg-macos
 unzip /tmp/plex-pg-macos.zip
 
 pkill -f "Plex Media Server" 2>/dev/null || true
 ./scripts/install_wrappers.sh
 open "/Applications/Plex Media Server.app"
 ```
+
+After a Plex update, re-run `install_wrappers.sh` to re-install the shim.
 
 To uninstall:
 

@@ -11,7 +11,8 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SHIM_DIR="$(dirname "$SCRIPT_DIR")"
 PLEX_APP="/Applications/Plex Media Server.app/Contents/MacOS"
-SHIM_PATH="$SHIM_DIR/db_interpose_pg.dylib"
+SHIM_SRC="$SHIM_DIR/db_interpose_pg.dylib"
+SHIM_DST="$PLEX_APP/db_interpose_pg.dylib"
 SQLITE_DB="$HOME/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db"
 
 # Colors
@@ -23,9 +24,9 @@ NC='\033[0m'
 echo "=== Plex PostgreSQL Wrapper Installer ==="
 echo ""
 
-# Check if shim exists
-if [[ ! -f "$SHIM_PATH" ]]; then
-    echo -e "${RED}ERROR: Shim not found at $SHIM_PATH${NC}"
+# Check if shim exists in source directory
+if [[ ! -f "$SHIM_SRC" ]]; then
+    echo -e "${RED}ERROR: Shim not found at $SHIM_SRC${NC}"
     echo "Run 'make' first to build the shim."
     exit 1
 fi
@@ -70,6 +71,18 @@ if [[ ! -f "$INSERT_DYLIB" ]]; then
 fi
 
 # ============================================================================
+# Copy shim dylib into Plex.app
+# ============================================================================
+# The dylib lives next to the Plex binaries so both the Server wrapper
+# (DYLD_INSERT_LIBRARIES) and the Scanner (LC_LOAD_DYLIB @loader_path)
+# can find it without relying on external paths.
+
+echo ""
+echo "Installing shim dylib..."
+cp -f "$SHIM_SRC" "$SHIM_DST"
+echo -e "${GREEN}  Copied to $SHIM_DST${NC}"
+
+# ============================================================================
 # Server: bash wrapper + .original
 # ============================================================================
 
@@ -100,8 +113,7 @@ if [[ -f "$PLEX_APP/Plex Media Server.original" ]]; then
 
 SCRIPT_DIR="$(dirname "$0")"
 SERVER_BINARY="$SCRIPT_DIR/Plex Media Server.original"
-SHIM_ROOT="${PLEX_PG_SHIM_ROOT:-__PLEX_PG_SHIM_ROOT__}"
-SHIM_FILE="${PLEX_PG_SHIM_PATH:-__PLEX_PG_SHIM_PATH__}"
+SHIM_FILE="$SCRIPT_DIR/db_interpose_pg.dylib"
 
 # Add PostgreSQL binaries to PATH
 export PATH="/opt/homebrew/opt/postgresql@15/bin:$PATH"
@@ -124,17 +136,11 @@ if [ -n "$CODEC_VERSION" ]; then
     echo "[plex-pg] External codecs: $FFMPEG_EXTERNAL_LIBS"
 fi
 
-# PostgreSQL shim - auto-build if missing
+# Check shim exists
 if [ ! -f "$SHIM_FILE" ]; then
-    echo "[plex-pg] Shim not found, building..."
-    if [ -f "$SHIM_ROOT/Makefile" ]; then
-        (cd "$SHIM_ROOT" && make -j4 2>/dev/null)
-    fi
-    if [ ! -f "$SHIM_FILE" ]; then
-        echo "[plex-pg] ERROR: Build failed. Run 'make' in $SHIM_ROOT"
-        exit 1
-    fi
-    echo "[plex-pg] Shim built successfully"
+    echo "[plex-pg] ERROR: Shim not found at $SHIM_FILE"
+    echo "[plex-pg] Re-run install_wrappers.sh to fix."
+    exit 1
 fi
 
 # === Initialization Functions ===
@@ -166,7 +172,6 @@ wait_for_postgres() {
 
 init_pg_schema() {
     local schema="$PLEX_PG_SCHEMA"
-    local schema_file="$SHIM_ROOT/schema/plex_schema.sql"
 
     psql -c "CREATE SCHEMA IF NOT EXISTS $schema;" 2>/dev/null || true
 
@@ -175,23 +180,12 @@ init_pg_schema() {
     if [ "$table_count" -gt "0" ] 2>/dev/null; then
         echo "[plex-pg] PostgreSQL schema '$schema' ready with $table_count tables"
     else
-        echo "[plex-pg] PostgreSQL schema '$schema' is empty, loading schema..."
-        if [ -f "$schema_file" ]; then
-            if psql -f "$schema_file" >/dev/null 2>&1; then
-                local new_count=$(psql -t -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = '$schema';" 2>/dev/null | tr -d ' ')
-                echo "[plex-pg] Schema loaded! $new_count tables created."
-            else
-                echo "[plex-pg] WARNING: Schema load had errors, continuing anyway..."
-            fi
-        else
-            echo "[plex-pg] WARNING: Schema file not found: $schema_file"
-        fi
+        echo "[plex-pg] PostgreSQL schema '$schema' is empty (Plex will create tables on first run)"
     fi
 }
 
 init_sqlite_schema() {
     local db_dir="$PLEX_MEDIA_SERVER_APPLICATION_SUPPORT_DIR/Plex Media Server/Plug-in Support/Databases"
-    local schema_file="$SHIM_ROOT/schema/sqlite_schema.sql"
 
     sync_schema_migrations_to_sqlite() {
         local db_file="$1"
@@ -226,11 +220,7 @@ init_sqlite_schema() {
         local db_name=$(basename "$db_file")
 
         if [ ! -f "$db_file" ]; then
-            echo "[plex-pg] Pre-initializing SQLite database $db_name..."
-            if [ -f "$schema_file" ]; then
-                sqlite3 "$db_file" < "$schema_file" 2>/dev/null || true
-                echo "[plex-pg] SQLite database $db_name initialized"
-            fi
+            echo "[plex-pg] SQLite database $db_name not found (Plex will create it)"
         else
             if ! sqlite3 "$db_file" "SELECT min_version FROM schema_migrations LIMIT 1" >/dev/null 2>&1; then
                 echo "[plex-pg] Adding min_version column to $db_name..."
@@ -258,19 +248,12 @@ else
     echo "[plex-pg] WARNING: sqlite3 not found, skipping SQLite initialization"
 fi
 
-echo "[plex-pg] Starting Plex Media Server..."
-
 # Set DYLD_INSERT_LIBRARIES right before exec (not earlier, to avoid affecting init tools)
 export DYLD_INSERT_LIBRARIES="$SHIM_FILE"
 
 echo "[plex-pg] Starting Plex Media Server (DYLD_INSERT_LIBRARIES=$SHIM_FILE)..."
 exec "$SERVER_BINARY" "$@"
 WRAPPER
-
-    ESCAPED_SHIM_PATH=$(printf '%s' "$SHIM_PATH" | sed 's/[\/&]/\\&/g')
-    ESCAPED_SHIM_DIR=$(printf '%s' "$SHIM_DIR" | sed 's/[\/&]/\\&/g')
-    sed -i '' "s/__PLEX_PG_SHIM_PATH__/$ESCAPED_SHIM_PATH/g" "$PLEX_APP/Plex Media Server"
-    sed -i '' "s/__PLEX_PG_SHIM_ROOT__/$ESCAPED_SHIM_DIR/g" "$PLEX_APP/Plex Media Server"
 
     chmod +x "$PLEX_APP/Plex Media Server"
     echo -e "${GREEN}  Server wrapper installed${NC}"
@@ -323,7 +306,7 @@ else
 
     echo "  Injecting shim dylib into Scanner binary..."
     "$INSERT_DYLIB" --strip-codesig --all-yes \
-        "$SHIM_PATH" \
+        "@loader_path/db_interpose_pg.dylib" \
         "$SCANNER" \
         "$SCANNER.patched" >/dev/null 2>&1
 
@@ -382,16 +365,25 @@ else
 fi
 
 echo ""
+echo "Shim dylib:"
+if [[ -f "$SHIM_DST" ]]; then
+    echo -e "  ${GREEN}db_interpose_pg.dylib present in Plex.app${NC}"
+else
+    echo -e "  ${RED}db_interpose_pg.dylib missing from Plex.app!${NC}"
+fi
+
+echo ""
 echo -e "${GREEN}=== Installation complete ===${NC}"
 echo ""
-echo "Binary layout:"
+echo "Layout inside $PLEX_APP/:"
 echo "  Plex Media Server          → bash wrapper (env + init + exec .original)"
 echo "  Plex Media Server.original → real server binary (shim via DYLD_INSERT_LIBRARIES)"
-echo "  Plex Media Scanner         → patched binary (shim via LC_LOAD_DYLIB)"
+echo "  Plex Media Scanner         → patched binary (shim via LC_LOAD_DYLIB @loader_path)"
+echo "  db_interpose_pg.dylib      → PostgreSQL shim library"
 echo ""
 echo "Start Plex normally - the shim will be auto-injected."
 echo ""
-echo "NOTE: After a Plex update, re-run this script to re-patch the Scanner."
+echo "NOTE: After a Plex update, re-run this script to re-install."
 echo ""
 echo "To uninstall:"
 echo "  ./scripts/uninstall_wrappers.sh"

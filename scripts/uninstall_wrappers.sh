@@ -40,6 +40,13 @@ else
     fi
 fi
 
+# Remove shim dylib
+if [[ -f "$PLEX_APP/db_interpose_pg.dylib" ]]; then
+    echo "Removing shim dylib..."
+    rm -f "$PLEX_APP/db_interpose_pg.dylib"
+    echo "  Done"
+fi
+
 echo ""
 echo "=== Uninstall complete ==="
 echo "Plex will now use SQLite (original behavior)."

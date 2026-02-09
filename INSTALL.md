@@ -212,8 +212,7 @@ psql -d plex -c "ALTER USER plex PASSWORD 'plex';"
 curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.16/plex-postgresql-v0.9.16-macos.zip -o /tmp/plex-pg-macos.zip
 
 # Extract
-mkdir -p /tmp/plex-pg-macos
-cd /tmp/plex-pg-macos
+mkdir -p /tmp/plex-pg-macos && cd /tmp/plex-pg-macos
 unzip /tmp/plex-pg-macos.zip
 
 # Stop Plex and install wrappers
@@ -221,11 +220,14 @@ pkill -f "Plex Media Server" 2>/dev/null || true
 ./scripts/install_wrappers.sh
 ```
 
-**What this setup does:**
-- ✅ Uses pre-built `db_interpose_pg.dylib`
-- ✅ Backs up server/scanner binaries before patching
-- ✅ Installs wrapper flow for Server + Scanner
-- ✅ Initializes and syncs migration state
+**What the installer does:**
+- Copies `db_interpose_pg.dylib` into `Plex Media Server.app`
+- Backs up original server/scanner binaries (`.original`)
+- Installs a bash wrapper for the Server (`DYLD_INSERT_LIBRARIES`)
+- Patches the Scanner binary with `@loader_path` dylib injection
+- Syncs schema migration state between PostgreSQL and SQLite
+
+After a Plex update, re-run `install_wrappers.sh` to re-install.
 
 **3. Start Plex**
 
@@ -513,7 +515,7 @@ grep "DECLTYPE_AGGREGATE" /tmp/plex_redirect_pg.log
 
 If not present, ensure you're running a current release:
 ```bash
-ls -la ~/.plex-postgresql/db_interpose_pg.dylib  # macOS
+ls -la "/Applications/Plex Media Server.app/Contents/MacOS/db_interpose_pg.dylib"  # macOS
 ls -la /usr/local/lib/plex-postgresql/db_interpose_pg.so  # Linux
 ```
 

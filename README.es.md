@@ -72,26 +72,27 @@ volumes:
 
 ## Inicio Rápido (macOS)
 
+El instalador copia la librería shim dentro de `Plex Media Server.app`, parchea los binarios y configura el wrapper. Todo queda dentro del app bundle de Plex.
+
 ### 1. Configurar PostgreSQL
 
 ```bash
-brew install postgresql@17
-brew services start postgresql@17
+brew install postgresql@15
+brew services start postgresql@15
 
 createuser plex
 createdb -O plex plex
 psql -d plex -c "ALTER USER plex PASSWORD 'plex';"
-psql -U plex -d plex -c "CREATE SCHEMA plex;"
 ```
 
 ### 2. Instalar (ZIP recomendado)
 
 ```bash
 curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.16/plex-postgresql-v0.9.16-macos.zip -o /tmp/plex-pg-macos.zip
-mkdir -p /tmp/plex-pg && cd /tmp/plex-pg
+mkdir -p /tmp/plex-pg-macos && cd /tmp/plex-pg-macos
 unzip /tmp/plex-pg-macos.zip
 
-# Ejecutar instalador de wrappers desde el ZIP extraído
+pkill -f "Plex Media Server" 2>/dev/null || true
 ./scripts/install_wrappers.sh
 ```
 
@@ -102,7 +103,7 @@ git clone https://github.com/cgnl/plex-postgresql.git
 cd plex-postgresql
 make clean && make
 
-pkill -x "Plex Media Server" 2>/dev/null
+pkill -f "Plex Media Server" 2>/dev/null || true
 ./scripts/install_wrappers.sh
 ```
 
@@ -114,10 +115,12 @@ open "/Applications/Plex Media Server.app"
 
 El shim se inyecta automáticamente. Ver logs: `tail -f /tmp/plex_redirect_pg.log`
 
+Después de una actualización de Plex, ejecuta `install_wrappers.sh` de nuevo.
+
 ### Desinstalar
 
 ```bash
-pkill -x "Plex Media Server" 2>/dev/null
+pkill -f "Plex Media Server" 2>/dev/null || true
 ./scripts/uninstall_wrappers.sh
 ```
 
