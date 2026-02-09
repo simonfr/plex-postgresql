@@ -111,4 +111,13 @@ void common_shim_init_modules(void);
 // Cleanup all common modules
 void common_shim_cleanup(void);
 
+// ============================================================================
+// Shared Symbol Loading
+// ============================================================================
+
+// Populate all orig_sqlite3_* function pointers via dlsym from the given handle.
+// Uses if-not-set pattern: only sets pointers that are still NULL.
+// Called from macOS load_sqlite_fallback() and Linux load_original_functions().
+void common_load_sqlite_symbols(void *handle);
+
 #endif /* DB_INTERPOSE_COMMON_H */

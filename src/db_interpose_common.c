@@ -249,6 +249,114 @@ char* simple_str_replace(const char *str, const char *old, const char *new_str) 
 }
 
 // ============================================================================
+// Shared Symbol Loading
+// ============================================================================
+
+void common_load_sqlite_symbols(void *handle) {
+    if (!handle) return;
+
+    // Open/Close
+    if (!orig_sqlite3_open) orig_sqlite3_open = dlsym(handle, "sqlite3_open");
+    if (!orig_sqlite3_open_v2) orig_sqlite3_open_v2 = dlsym(handle, "sqlite3_open_v2");
+    if (!orig_sqlite3_close) orig_sqlite3_close = dlsym(handle, "sqlite3_close");
+    if (!orig_sqlite3_close_v2) orig_sqlite3_close_v2 = dlsym(handle, "sqlite3_close_v2");
+
+    // Exec
+    if (!orig_sqlite3_exec) orig_sqlite3_exec = dlsym(handle, "sqlite3_exec");
+    if (!orig_sqlite3_get_table) orig_sqlite3_get_table = dlsym(handle, "sqlite3_get_table");
+
+    // Metadata
+    if (!orig_sqlite3_changes) orig_sqlite3_changes = dlsym(handle, "sqlite3_changes");
+    if (!orig_sqlite3_changes64) orig_sqlite3_changes64 = dlsym(handle, "sqlite3_changes64");
+    if (!orig_sqlite3_last_insert_rowid) orig_sqlite3_last_insert_rowid = dlsym(handle, "sqlite3_last_insert_rowid");
+
+    // Error
+    if (!orig_sqlite3_errmsg) orig_sqlite3_errmsg = dlsym(handle, "sqlite3_errmsg");
+    if (!orig_sqlite3_errcode) orig_sqlite3_errcode = dlsym(handle, "sqlite3_errcode");
+    if (!orig_sqlite3_extended_errcode) orig_sqlite3_extended_errcode = dlsym(handle, "sqlite3_extended_errcode");
+
+    // Prepare
+    if (!orig_sqlite3_prepare) orig_sqlite3_prepare = dlsym(handle, "sqlite3_prepare");
+    if (!orig_sqlite3_prepare_v2) orig_sqlite3_prepare_v2 = dlsym(handle, "sqlite3_prepare_v2");
+    if (!orig_sqlite3_prepare_v3) orig_sqlite3_prepare_v3 = dlsym(handle, "sqlite3_prepare_v3");
+    if (!orig_sqlite3_prepare16_v2) orig_sqlite3_prepare16_v2 = dlsym(handle, "sqlite3_prepare16_v2");
+
+    // Bind
+    if (!orig_sqlite3_bind_int) orig_sqlite3_bind_int = dlsym(handle, "sqlite3_bind_int");
+    if (!orig_sqlite3_bind_int64) orig_sqlite3_bind_int64 = dlsym(handle, "sqlite3_bind_int64");
+    if (!orig_sqlite3_bind_double) orig_sqlite3_bind_double = dlsym(handle, "sqlite3_bind_double");
+    if (!orig_sqlite3_bind_text) orig_sqlite3_bind_text = dlsym(handle, "sqlite3_bind_text");
+    if (!orig_sqlite3_bind_text64) orig_sqlite3_bind_text64 = dlsym(handle, "sqlite3_bind_text64");
+    if (!orig_sqlite3_bind_blob) orig_sqlite3_bind_blob = dlsym(handle, "sqlite3_bind_blob");
+    if (!orig_sqlite3_bind_blob64) orig_sqlite3_bind_blob64 = dlsym(handle, "sqlite3_bind_blob64");
+    if (!orig_sqlite3_bind_value) orig_sqlite3_bind_value = dlsym(handle, "sqlite3_bind_value");
+    if (!orig_sqlite3_bind_null) orig_sqlite3_bind_null = dlsym(handle, "sqlite3_bind_null");
+
+    // Step/Reset/Finalize
+    if (!orig_sqlite3_step) orig_sqlite3_step = dlsym(handle, "sqlite3_step");
+    if (!orig_sqlite3_reset) orig_sqlite3_reset = dlsym(handle, "sqlite3_reset");
+    if (!orig_sqlite3_finalize) orig_sqlite3_finalize = dlsym(handle, "sqlite3_finalize");
+    if (!orig_sqlite3_clear_bindings) orig_sqlite3_clear_bindings = dlsym(handle, "sqlite3_clear_bindings");
+
+    // Column access
+    if (!orig_sqlite3_column_count) orig_sqlite3_column_count = dlsym(handle, "sqlite3_column_count");
+    if (!orig_sqlite3_column_type) orig_sqlite3_column_type = dlsym(handle, "sqlite3_column_type");
+    if (!orig_sqlite3_column_int) orig_sqlite3_column_int = dlsym(handle, "sqlite3_column_int");
+    if (!orig_sqlite3_column_int64) orig_sqlite3_column_int64 = dlsym(handle, "sqlite3_column_int64");
+    if (!orig_sqlite3_column_double) orig_sqlite3_column_double = dlsym(handle, "sqlite3_column_double");
+    if (!orig_sqlite3_column_text) orig_sqlite3_column_text = dlsym(handle, "sqlite3_column_text");
+    if (!orig_sqlite3_column_blob) orig_sqlite3_column_blob = dlsym(handle, "sqlite3_column_blob");
+    if (!orig_sqlite3_column_bytes) orig_sqlite3_column_bytes = dlsym(handle, "sqlite3_column_bytes");
+    if (!orig_sqlite3_column_name) orig_sqlite3_column_name = dlsym(handle, "sqlite3_column_name");
+    if (!orig_sqlite3_column_decltype) orig_sqlite3_column_decltype = dlsym(handle, "sqlite3_column_decltype");
+    if (!orig_sqlite3_column_value) orig_sqlite3_column_value = dlsym(handle, "sqlite3_column_value");
+    if (!orig_sqlite3_data_count) orig_sqlite3_data_count = dlsym(handle, "sqlite3_data_count");
+
+    // Value access
+    if (!orig_sqlite3_value_type) orig_sqlite3_value_type = dlsym(handle, "sqlite3_value_type");
+    if (!orig_sqlite3_value_text) orig_sqlite3_value_text = dlsym(handle, "sqlite3_value_text");
+    if (!orig_sqlite3_value_int) orig_sqlite3_value_int = dlsym(handle, "sqlite3_value_int");
+    if (!orig_sqlite3_value_int64) orig_sqlite3_value_int64 = dlsym(handle, "sqlite3_value_int64");
+    if (!orig_sqlite3_value_double) orig_sqlite3_value_double = dlsym(handle, "sqlite3_value_double");
+    if (!orig_sqlite3_value_bytes) orig_sqlite3_value_bytes = dlsym(handle, "sqlite3_value_bytes");
+    if (!orig_sqlite3_value_blob) orig_sqlite3_value_blob = dlsym(handle, "sqlite3_value_blob");
+
+    // Collation
+    if (!orig_sqlite3_create_collation) orig_sqlite3_create_collation = dlsym(handle, "sqlite3_create_collation");
+    if (!orig_sqlite3_create_collation_v2) orig_sqlite3_create_collation_v2 = dlsym(handle, "sqlite3_create_collation_v2");
+
+    // Memory, statement info, misc
+    if (!orig_sqlite3_free) orig_sqlite3_free = dlsym(handle, "sqlite3_free");
+    if (!orig_sqlite3_malloc) orig_sqlite3_malloc = dlsym(handle, "sqlite3_malloc");
+    if (!orig_sqlite3_db_handle) orig_sqlite3_db_handle = dlsym(handle, "sqlite3_db_handle");
+    if (!orig_sqlite3_sql) orig_sqlite3_sql = dlsym(handle, "sqlite3_sql");
+    if (!orig_sqlite3_expanded_sql) orig_sqlite3_expanded_sql = dlsym(handle, "sqlite3_expanded_sql");
+    if (!orig_sqlite3_bind_parameter_count) orig_sqlite3_bind_parameter_count = dlsym(handle, "sqlite3_bind_parameter_count");
+    if (!orig_sqlite3_bind_parameter_index) orig_sqlite3_bind_parameter_index = dlsym(handle, "sqlite3_bind_parameter_index");
+    if (!orig_sqlite3_bind_parameter_name) orig_sqlite3_bind_parameter_name = dlsym(handle, "sqlite3_bind_parameter_name");
+    if (!orig_sqlite3_stmt_readonly) orig_sqlite3_stmt_readonly = dlsym(handle, "sqlite3_stmt_readonly");
+    if (!orig_sqlite3_stmt_busy) orig_sqlite3_stmt_busy = dlsym(handle, "sqlite3_stmt_busy");
+    if (!orig_sqlite3_stmt_status) orig_sqlite3_stmt_status = dlsym(handle, "sqlite3_stmt_status");
+
+    // Set up aliases for backward compatibility
+    if (!real_sqlite3_prepare_v2) real_sqlite3_prepare_v2 = orig_sqlite3_prepare_v2;
+    if (!real_sqlite3_errmsg) real_sqlite3_errmsg = orig_sqlite3_errmsg;
+    if (!real_sqlite3_errcode) real_sqlite3_errcode = orig_sqlite3_errcode;
+
+    // Log critical symbol resolution
+    if (orig_sqlite3_open) {
+        fprintf(stderr, "[SHIM_INIT] orig_sqlite3_open = %p\n", (void*)orig_sqlite3_open);
+    } else {
+        fprintf(stderr, "[SHIM_INIT] WARNING: orig_sqlite3_open is NULL!\n");
+    }
+    if (orig_sqlite3_prepare_v2) {
+        fprintf(stderr, "[SHIM_INIT] orig_sqlite3_prepare_v2 = %p\n", (void*)orig_sqlite3_prepare_v2);
+    } else {
+        fprintf(stderr, "[SHIM_INIT] WARNING: orig_sqlite3_prepare_v2 is NULL!\n");
+    }
+}
+
+// ============================================================================
 // Symbol Resolution Safety Check
 // ============================================================================
 

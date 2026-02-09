@@ -39,9 +39,9 @@ SQL_TR_OBJS = src/sql_translator.o src/sql_tr_helpers.o src/sql_tr_placeholders.
 PG_MODULES = src/pg_config.o src/pg_logging.o src/pg_client.o src/pg_statement.o src/pg_query_cache.o
 
 # DB Interpose modules - shared between Mac and Linux
-DB_INTERPOSE_SHARED = src/db_interpose_common.o src/db_interpose_open.o src/db_interpose_exec.o \
-                      src/db_interpose_prepare.o src/db_interpose_bind.o src/db_interpose_step.o \
-                      src/db_interpose_column.o src/db_interpose_metadata.o
+DB_INTERPOSE_SHARED = src/db_interpose_common.o src/platform_backtrace.o src/db_interpose_open.o \
+                      src/db_interpose_exec.o src/db_interpose_prepare.o src/db_interpose_bind.o \
+                      src/db_interpose_step.o src/db_interpose_column.o src/db_interpose_metadata.o
 
 # Platform-specific core module
 ifeq ($(UNAME_S),Darwin)
@@ -145,6 +145,9 @@ src/fishhook.o: src/fishhook.c include/fishhook.h
 
 # DB Interpose module compilation rules
 src/db_interpose_common.o: src/db_interpose_common.c src/db_interpose.h src/db_interpose_common.h
+	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
+
+src/platform_backtrace.o: src/platform_backtrace.c src/db_interpose.h src/db_interpose_common.h
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
 src/db_interpose_core.o: src/db_interpose_core.c src/db_interpose.h src/db_interpose_common.h
