@@ -40,11 +40,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libpq-dev libsqlite3-dev
 
-      - name: Build shim (Linux)
-        run: make linux
-
       - name: Run unit tests
-        run: make unit-test
+        run: make ci-test
 
   linux-build-amd64:
     name: Build Linux amd64 shim

@@ -60,7 +60,7 @@ else
 endif
 LINUX_OBJECTS = $(SQL_TR_OBJS) $(PG_MODULES) $(DB_INTERPOSE_SHARED) src/db_interpose_core_linux.o
 
-.PHONY: all clean install test macos linux run stop unit-test test-recursion test-crash test-params test-logging test-soci test-fork test-fts test-buffer test-reaper test-groupby test-upsert
+.PHONY: all clean install test macos linux run stop unit-test ci-test test-recursion test-crash test-params test-logging test-soci test-fork test-fts test-buffer test-reaper test-groupby test-upsert
 
 all: $(TARGET)
 
@@ -527,6 +527,10 @@ test-statement: $(TEST_BIN_DIR)/test_statement_helpers
 # Run all unit tests
 unit-test: test-recursion test-crash test-sql test-groupby test-upsert test-types test-soci test-cache test-tls test-fork test-reaper test-buffer test-api test-expanded test-params test-logging test-exception test-fts test-config test-bind test-common test-statement
 	@echo "All unit tests complete."
+
+# CI-safe subset: excludes tests needing LD_PRELOAD + shim (test-api, test-expanded, test-params)
+ci-test: test-recursion test-crash test-sql test-groupby test-upsert test-types test-soci test-cache test-tls test-fork test-reaper test-buffer test-logging test-exception test-fts test-config test-bind test-common test-statement
+	@echo "All CI unit tests complete."
 
 # ============================================================================
 # Release builds

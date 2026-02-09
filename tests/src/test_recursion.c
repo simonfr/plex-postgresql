@@ -8,6 +8,10 @@
  * 4. Query hash function
  */
 
+#ifndef __APPLE__
+#define _GNU_SOURCE  // Required for pthread_getattr_np on Linux
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -659,8 +663,17 @@ static int consume_stack_and_simulate(size_t target_remaining, int depth) {
     char *stack_base = (char*)stack_addr;
     size_t remaining = stack_size - (stack_base - current);
 #else
-    // Linux: estimate based on depth
-    size_t remaining = 512 * 1024 - (depth * 4096);
+    // Linux: use pthread_attr_getstack for accurate remaining calculation
+    pthread_attr_t attr;
+    pthread_getattr_np(pthread_self(), &attr);
+    void *stack_base_addr;
+    size_t stack_size;
+    pthread_attr_getstack(&attr, &stack_base_addr, &stack_size);
+    pthread_attr_destroy(&attr);
+    
+    volatile char local;
+    char *current = (char*)&local;
+    size_t remaining = (size_t)(current - (char*)stack_base_addr);
 #endif
     
     if (remaining > target_remaining && depth < 100) {
