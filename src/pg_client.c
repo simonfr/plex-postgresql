@@ -1050,11 +1050,44 @@ int pg_pool_check_connection_health(pg_connection_t *conn) {
                     atomic_store(&library_pool[i].state, SLOT_READY);
                     return 1;
                 } else {
-                    // Reset failed - mark as error
-                    LOG_ERROR("Pool: connection reset failed for slot %d", i);
-                    atomic_store(&library_pool[i].state, SLOT_ERROR);
-                    conn->is_pg_active = 0;
-                    return 1;
+                    // PQreset failed - try fresh PQconnectdb (PG may have restarted)
+                    LOG_ERROR("Pool: PQreset failed for slot %d, trying fresh connection...", i);
+                    pg_stmt_cache_clear(conn);
+                    PQfinish(conn->conn);
+                    conn->conn = NULL;
+
+                    pg_conn_config_t *cfg2 = pg_config_get();
+                    char conninfo[1024];
+                    snprintf(conninfo, sizeof(conninfo),
+                             "host=%s port=%d dbname=%s user=%s password=%s "
+                             "connect_timeout=5 keepalives=1 keepalives_idle=30 "
+                             "keepalives_interval=10 keepalives_count=3",
+                             cfg2->host, cfg2->port, cfg2->database, cfg2->user, cfg2->password);
+
+                    PGconn *new_pg = PQconnectdb(conninfo);
+                    if (PQstatus(new_pg) == CONNECTION_OK) {
+                        pg_set_socket_timeout(new_pg);
+                        char schema_cmd2[256];
+                        snprintf(schema_cmd2, sizeof(schema_cmd2), "SET search_path TO %s, public", cfg2->schema);
+                        PGresult *r2 = PQexec(new_pg, schema_cmd2);
+                        PQclear(r2);
+                        r2 = PQexec(new_pg, "SET statement_timeout = '60s'");
+                        PQclear(r2);
+
+                        conn->conn = new_pg;
+                        conn->is_pg_active = 1;
+                        library_pool[i].last_used = time(NULL);
+                        LOG_ERROR("Pool: fresh connection succeeded for slot %d (reconnected)", i);
+                        atomic_store(&library_pool[i].state, SLOT_READY);
+                        return 1;
+                    } else {
+                        LOG_ERROR("Pool: fresh connection also failed for slot %d: %s",
+                                  i, PQerrorMessage(new_pg));
+                        PQfinish(new_pg);
+                        conn->is_pg_active = 0;
+                        atomic_store(&library_pool[i].state, SLOT_ERROR);
+                        return 1;
+                    }
                 }
             }
             break;
