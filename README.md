@@ -9,7 +9,7 @@ A small shim library that catches Plex SQLite calls and sends them to PostgreSQL
 
 ## 🎉 Latest Release: v0.9.20
 
-**Test coverage and CI update:** 698 unit tests, GitHub Actions runs them on every push.
+**Test coverage and CI update:** 764 unit tests, GitHub Actions runs them on every push.
 
 - ✅ **Added:** 160 new unit tests for SQL translator, upsert, GROUP BY rewriter
 - ✅ **Added:** GitHub Actions unit test pipeline (657 tests on every push/PR)
@@ -20,7 +20,7 @@ A small shim library that catches Plex SQLite calls and sends them to PostgreSQL
 [📥 Download v0.9.20](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.20) | [📋 Full Release Notes](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.20)
 
 Linux and macOS release zips are built by GitHub Actions on tag push via `.github/workflows/release-linux-artifacts.yml` and `.github/workflows/release-macos-artifacts.yml`.
-Pull requests and `main` pushes run `.github/workflows/ci.yml` (script validation + Linux amd64 build check + **698 unit tests**).
+Pull requests and `main` pushes run `.github/workflows/ci.yml` (script validation + Linux amd64 build check + **764 unit tests**).
 Docker images are published to GHCR on release tags via `.github/workflows/docker-publish.yml`:
 - `ghcr.io/cgnl/plex-postgresql-linuxserver`
 - `ghcr.io/cgnl/plex-postgresql-plexinc`
@@ -317,7 +317,7 @@ The shim catches `sqlite3_*` calls, rewrites SQLite SQL to PostgreSQL SQL, and r
 ## Testing
 
 ```bash
-make unit-test       # All 698 unit tests (22 suites)
+make unit-test       # All 764 unit tests (23 suites)
 make ci-test         # CI-safe subset (657 tests, no LD_PRELOAD)
 make benchmark       # Shim micro-benchmarks
 ```

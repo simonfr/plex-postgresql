@@ -15,7 +15,7 @@ Una librería shim pequeña que captura las llamadas SQLite de Plex y las envía
 
 ## Última versión: v0.9.20
 
-**Cobertura de tests y CI:** 698 tests unitarios, GitHub Actions los ejecuta en cada push.
+**Cobertura de tests y CI:** 764 tests unitarios, GitHub Actions los ejecuta en cada push.
 
 - ✅ **Nuevo:** 160 tests unitarios para traductor SQL, upsert, GROUP BY
 - ✅ **Nuevo:** pipeline de tests en GitHub Actions (657 tests en cada push/PR)
