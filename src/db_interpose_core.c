@@ -13,7 +13,6 @@
 #include "db_interpose_common.h"
 #include "pg_query_cache.h"
 #include "fishhook.h"
-#include <execinfo.h>
 #include <signal.h>
 
 // ============================================================================
@@ -28,79 +27,7 @@ static cxa_throw_fn orig_cxa_throw = NULL;
 static __thread int in_exception_handler = 0;
 
 // Thread-local counters and demangle function are in db_interpose_common.c
-
-// ============================================================================
-// Backtrace Support (macOS uses execinfo.h)
-// ============================================================================
-
-// Platform-specific backtrace implementation (macOS uses execinfo.h)
-void platform_print_backtrace(const char *reason, int skip_frames) {
-    void *callstack[64];
-    int frames = backtrace(callstack, 64);
-    char **symbols = backtrace_symbols(callstack, frames);
-    
-    fprintf(stderr, "\n");
-    fprintf(stderr, "╔══════════════════════════════════════════════════════════════════════════════╗\n");
-    fprintf(stderr, "║ BACKTRACE: %-67s ║\n", reason ? reason : "Unknown");
-    fprintf(stderr, "╠══════════════════════════════════════════════════════════════════════════════╣\n");
-    LOG_ERROR("=== BACKTRACE (%s) ===", reason ? reason : "Unknown");
-    
-    int start = skip_frames;
-    int printed = 0;
-    
-    for (int i = start; i < frames && printed < 25; i++) {
-        char *symbol = symbols[i];
-        
-        // Find the mangled symbol name
-        char *name_start = NULL;
-        char *plus_sign = strrchr(symbol, '+');
-        if (plus_sign) {
-            char *p = plus_sign - 1;
-            while (p > symbol && *p == ' ') p--;
-            while (p > symbol && *p != ' ') p--;
-            if (*p == ' ') name_start = p + 1;
-        }
-        
-        char demangled_line[256] = {0};
-        if (name_start && cxa_demangle_fn) {
-            size_t name_len = plus_sign - name_start - 1;
-            char mangled[256];
-            if (name_len < sizeof(mangled)) {
-                strncpy(mangled, name_start, name_len);
-                mangled[name_len] = '\0';
-                
-                int status = 0;
-                char *demangled = cxa_demangle_fn(mangled, NULL, NULL, &status);
-                if (demangled && status == 0) {
-                    if (strlen(demangled) > 70) {
-                        demangled[67] = '.';
-                        demangled[68] = '.';
-                        demangled[69] = '.';
-                        demangled[70] = '\0';
-                    }
-                    snprintf(demangled_line, sizeof(demangled_line), "[%2d] %s", i - start, demangled);
-                    free(demangled);
-                }
-            }
-        }
-        
-        if (demangled_line[0] == '\0') {
-            snprintf(demangled_line, sizeof(demangled_line), "[%2d] %.72s", i - start, symbol);
-        }
-        
-        fprintf(stderr, "║ %-78s ║\n", demangled_line);
-        LOG_ERROR("  %s", demangled_line);
-        printed++;
-    }
-    
-    if (frames > start + 25) {
-        fprintf(stderr, "║ ... and %d more frames                                                         ║\n", frames - start - 25);
-    }
-    fprintf(stderr, "╚══════════════════════════════════════════════════════════════════════════════╝\n");
-    fflush(stderr);
-    
-    free(symbols);
-}
+// platform_print_backtrace is in platform_backtrace.c
 
 // ============================================================================
 // Exception Handling (macOS - currently disabled via fishhook)
@@ -191,6 +118,7 @@ static void setup_fishhook_rebindings(void) {
         {"sqlite3_column_blob", my_sqlite3_column_blob, (void**)&orig_sqlite3_column_blob},
         {"sqlite3_column_bytes", my_sqlite3_column_bytes, (void**)&orig_sqlite3_column_bytes},
         {"sqlite3_column_name", my_sqlite3_column_name, (void**)&orig_sqlite3_column_name},
+        {"sqlite3_column_decltype", my_sqlite3_column_decltype, (void**)&orig_sqlite3_column_decltype},
         {"sqlite3_column_value", my_sqlite3_column_value, (void**)&orig_sqlite3_column_value},
         {"sqlite3_data_count", my_sqlite3_data_count, (void**)&orig_sqlite3_data_count},
 
@@ -229,23 +157,6 @@ static void setup_fishhook_rebindings(void) {
 
     if (result == 0) {
         fprintf(stderr, "[SHIM_INIT] fishhook rebind_symbols succeeded for %d functions\n", count);
-        
-        // Set up aliases for backward compatibility
-        real_sqlite3_prepare_v2 = orig_sqlite3_prepare_v2;
-        real_sqlite3_errmsg = orig_sqlite3_errmsg;
-        real_sqlite3_errcode = orig_sqlite3_errcode;
-
-        // Verify critical functions were bound
-        if (orig_sqlite3_open) {
-            fprintf(stderr, "[SHIM_INIT] orig_sqlite3_open = %p\n", (void*)orig_sqlite3_open);
-        } else {
-            fprintf(stderr, "[SHIM_INIT] WARNING: orig_sqlite3_open is NULL!\n");
-        }
-        if (orig_sqlite3_prepare_v2) {
-            fprintf(stderr, "[SHIM_INIT] orig_sqlite3_prepare_v2 = %p\n", (void*)orig_sqlite3_prepare_v2);
-        } else {
-            fprintf(stderr, "[SHIM_INIT] WARNING: orig_sqlite3_prepare_v2 is NULL!\n");
-        }
     } else {
         fprintf(stderr, "[SHIM_INIT] ERROR: fishhook rebind_symbols failed with code %d\n", result);
     }
@@ -274,24 +185,7 @@ static void load_sqlite_fallback(void) {
     // If fishhook didn't set up pointers, use dlsym as fallback
     if (sqlite_handle && (!real_sqlite3_prepare_v2 || !orig_sqlite3_prepare_v2)) {
         fprintf(stderr, "[SHIM_INIT] Fishhook incomplete, using dlsym fallback\n");
-
-        real_sqlite3_prepare_v2 = dlsym(sqlite_handle, "sqlite3_prepare_v2");
-        real_sqlite3_errmsg = dlsym(sqlite_handle, "sqlite3_errmsg");
-        real_sqlite3_errcode = dlsym(sqlite_handle, "sqlite3_errcode");
-
-        // Populate orig_* pointers if not set by fishhook
-        if (!orig_sqlite3_open) orig_sqlite3_open = dlsym(sqlite_handle, "sqlite3_open");
-        if (!orig_sqlite3_open_v2) orig_sqlite3_open_v2 = dlsym(sqlite_handle, "sqlite3_open_v2");
-        if (!orig_sqlite3_close) orig_sqlite3_close = dlsym(sqlite_handle, "sqlite3_close");
-        if (!orig_sqlite3_close_v2) orig_sqlite3_close_v2 = dlsym(sqlite_handle, "sqlite3_close_v2");
-        if (!orig_sqlite3_exec) orig_sqlite3_exec = dlsym(sqlite_handle, "sqlite3_exec");
-        if (!orig_sqlite3_prepare_v2) orig_sqlite3_prepare_v2 = dlsym(sqlite_handle, "sqlite3_prepare_v2");
-        if (!orig_sqlite3_step) orig_sqlite3_step = dlsym(sqlite_handle, "sqlite3_step");
-        if (!orig_sqlite3_finalize) orig_sqlite3_finalize = dlsym(sqlite_handle, "sqlite3_finalize");
-        if (!orig_sqlite3_reset) orig_sqlite3_reset = dlsym(sqlite_handle, "sqlite3_reset");
-        if (!orig_sqlite3_errmsg) orig_sqlite3_errmsg = dlsym(sqlite_handle, "sqlite3_errmsg");
-        if (!orig_sqlite3_errcode) orig_sqlite3_errcode = dlsym(sqlite_handle, "sqlite3_errcode");
-        // ... add more as needed
+        common_load_sqlite_symbols(sqlite_handle);
     }
 }
 
