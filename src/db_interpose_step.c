@@ -59,6 +59,60 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                     LOG_DEBUG("  expanded_sql=%s", expanded_sql ? "YES" : "NO");
                     LOG_DEBUG("  sql (first 300): %.300s", sql ? sql : "(null)");
                 }
+                // GUARD: Block cached junk INSERTs into metadata_items
+                // For cached stmts, expanded_sql has literal values inline
+                if (sql && strcasestr(sql, "INSERT") && strcasestr(sql, "metadata_items") &&
+                    !strcasestr(sql, "metadata_item_settings") &&
+                    !strcasestr(sql, "metadata_item_views") &&
+                    !strcasestr(sql, "metadata_item_accounts") &&
+                    !strcasestr(sql, "metadata_item_clusters")) {
+                    // Check if library_section_id and metadata_type are both NULL in the VALUES
+                    // In expanded SQL, NULL columns appear as literal NULL in the VALUES list
+                    // Parse: find VALUES(...) then check columns by position
+                    const char *col_start = strchr(sql, '(');
+                    if (col_start) {
+                        int lib_idx = -1, type_idx = -1, idx = 0;
+                        const char *p = col_start + 1;
+                        while (*p && *p != ')') {
+                            while (*p == ' ' || *p == '"' || *p == '`') p++;
+                            if (strncmp(p, "library_section_id", 18) == 0) lib_idx = idx;
+                            if (strncmp(p, "metadata_type", 13) == 0 &&
+                                (p[13] == '"' || p[13] == '`' || p[13] == ',' || p[13] == ')' || p[13] == ' '))
+                                type_idx = idx;
+                            while (*p && *p != ',' && *p != ')') p++;
+                            if (*p == ',') { p++; idx++; }
+                        }
+                        // Now find VALUES(...) and check the corresponding positions
+                        const char *vals = strcasestr(sql, "VALUES");
+                        if (vals && lib_idx >= 0 && type_idx >= 0) {
+                            const char *vp = strchr(vals, '(');
+                            if (vp) {
+                                vp++;
+                                int vi = 0;
+                                int lib_null = 0, type_null = 0;
+                                while (*vp && *vp != ')') {
+                                    while (*vp == ' ') vp++;
+                                    if (vi == lib_idx && strncasecmp(vp, "NULL", 4) == 0) lib_null = 1;
+                                    if (vi == type_idx && strncasecmp(vp, "NULL", 4) == 0) type_null = 1;
+                                    // Skip to next value (handle quoted strings)
+                                    int in_quote = 0;
+                                    while (*vp && (*vp != ',' || in_quote) && *vp != ')') {
+                                        if (*vp == '\'') in_quote = !in_quote;
+                                        vp++;
+                                    }
+                                    if (*vp == ',') { vp++; vi++; }
+                                }
+                                if (lib_null && type_null) {
+                                    LOG_ERROR("GUARD: Blocked cached junk INSERT into metadata_items "
+                                              "(library_section_id=NULL, metadata_type=NULL)");
+                                    if (expanded_sql) sqlite3_free(expanded_sql);
+                                    return SQLITE_DONE;
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // CRITICAL FIX: Check if this cached write was already executed
                 pg_stmt_t *cached = pg_find_cached_stmt(pStmt);
                 if (cached && cached->write_executed) {
@@ -82,7 +136,18 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                     char *insert_sql = convert_metadata_settings_insert_to_upsert(trans.sql);
                     if (insert_sql) {
                         exec_sql = insert_sql;
-                    } else if (strncasecmp(sql, "INSERT", 6) == 0 && !strstr(trans.sql, "RETURNING")) {
+                    } else if (strncasecmp(sql, "INSERT", 6) == 0 &&
+                               strcasestr(trans.sql, "schema_migrations") &&
+                               !strcasestr(trans.sql, "ON CONFLICT")) {
+                        // schema_migrations: add ON CONFLICT DO NOTHING (no RETURNING id)
+                        size_t len = strlen(trans.sql);
+                        insert_sql = malloc(len + 40);
+                        if (insert_sql) {
+                            snprintf(insert_sql, len + 40, "%s ON CONFLICT DO NOTHING", trans.sql);
+                            exec_sql = insert_sql;
+                        }
+                    } else if (strncasecmp(sql, "INSERT", 6) == 0 && !strstr(trans.sql, "RETURNING") &&
+                               !strcasestr(trans.sql, "schema_migrations")) {
                         size_t len = strlen(trans.sql);
                         insert_sql = malloc(len + 20);
                         if (insert_sql) {
@@ -459,11 +524,26 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                 // CRITICAL FIX v0.9.4: Lock connection BEFORE status check to prevent TOCTOU race
                 // Another thread could PQfinish() between the check and use, causing SIGSEGV
                 if (!exec_conn || !exec_conn->conn) {
-                    LOG_ERROR("STEP SELECT: NULL connection (exec_conn=%p, conn=%p)",
-                             (void*)exec_conn,
-                             exec_conn ? (void*)exec_conn->conn : NULL);
+                    // v0.9.17: Retry once — pool may have all slots in ERROR/RECONNECTING
+                    // after a PG restart; a brief wait lets the pool recover
+                    LOG_ERROR("STEP SELECT: NULL connection, retrying in 500ms (exec_conn=%p)",
+                             (void*)exec_conn);
                     pthread_mutex_unlock(&pg_stmt->mutex);
-                    return SQLITE_ERROR;
+                    usleep(500000);  // 500ms
+                    pthread_mutex_lock(&pg_stmt->mutex);
+
+                    // Re-resolve connection from pool
+                    sqlite3 *retry_db = sqlite3_db_handle(pg_stmt->shadow_stmt);
+                    pg_connection_t *retry_handle = pg_find_connection(retry_db);
+                    if (retry_handle && retry_handle->db_path[0]) {
+                        exec_conn = pg_get_thread_connection(retry_handle->db_path);
+                    }
+                    if (!exec_conn || !exec_conn->conn) {
+                        LOG_ERROR("STEP SELECT: NULL connection after retry — giving up");
+                        pthread_mutex_unlock(&pg_stmt->mutex);
+                        return SQLITE_ERROR;
+                    }
+                    LOG_ERROR("STEP SELECT: reconnect retry succeeded (exec_conn=%p)", (void*)exec_conn);
                 }
 
                 // CRITICAL: Touch connection to prevent pool from releasing it during long queries
@@ -497,14 +577,35 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                     LOG_ERROR("STEP READ: Attempting PQreset...");
                     PQreset(exec_conn->conn);
                     if (PQstatus(exec_conn->conn) != CONNECTION_OK) {
-                        const char *reset_err = PQerrorMessage(exec_conn->conn);
-                        LOG_ERROR("STEP READ: Reset FAILED - connection unrecoverable");
-                        LOG_ERROR("  Post-reset error: %s", reset_err ? reset_err : "(null)");
-                        pthread_mutex_unlock(&exec_conn->mutex);
-                        pthread_mutex_unlock(&pg_stmt->mutex);
-                        return SQLITE_ERROR;
+                        LOG_ERROR("STEP READ: PQreset failed, trying fresh PQconnectdb...");
+                        pg_stmt_cache_clear(exec_conn);
+                        PQfinish(exec_conn->conn);
+                        exec_conn->conn = NULL;
+
+                        pg_conn_config_t *rcfg = pg_config_get();
+                        char rconninfo[1024];
+                        snprintf(rconninfo, sizeof(rconninfo),
+                                 "host=%s port=%d dbname=%s user=%s password=%s "
+                                 "connect_timeout=5 keepalives=1 keepalives_idle=30 "
+                                 "keepalives_interval=10 keepalives_count=3",
+                                 rcfg->host, rcfg->port, rcfg->database, rcfg->user, rcfg->password);
+                        PGconn *new_read_conn = PQconnectdb(rconninfo);
+                        if (PQstatus(new_read_conn) == CONNECTION_OK) {
+                            exec_conn->conn = new_read_conn;
+                            exec_conn->is_pg_active = 1;
+                            LOG_ERROR("STEP READ: fresh connection succeeded (reconnected)");
+                        } else {
+                            const char *reset_err = PQerrorMessage(new_read_conn);
+                            LOG_ERROR("STEP READ: fresh connection also failed: %s", reset_err ? reset_err : "(null)");
+                            PQfinish(new_read_conn);
+                            exec_conn->is_pg_active = 0;
+                            pthread_mutex_unlock(&exec_conn->mutex);
+                            pthread_mutex_unlock(&pg_stmt->mutex);
+                            return SQLITE_ERROR;
+                        }
+                    } else {
+                        LOG_ERROR("STEP READ: PQreset succeeded, connection recovered");
                     }
-                    LOG_ERROR("STEP READ: PQreset succeeded, connection recovered");
                     // Re-apply settings after reset
                     pg_conn_config_t *cfg = pg_config_get();
                     if (cfg) {
@@ -754,12 +855,88 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                 }
             }
 
+            // VALIDATION: Skip metadata_items INSERTs with NULL library_section_id AND metadata_type
+            // These are junk rows created by misinterpreted bulk operations (40K+ found in production)
+            if (pg_stmt->pg_sql && strcasestr(pg_stmt->pg_sql, "INSERT INTO") &&
+                strcasestr(pg_stmt->pg_sql, "metadata_items") &&
+                !strcasestr(pg_stmt->pg_sql, "metadata_item_settings") &&
+                !strcasestr(pg_stmt->pg_sql, "metadata_item_views") &&
+                !strcasestr(pg_stmt->pg_sql, "metadata_item_accounts") &&
+                !strcasestr(pg_stmt->pg_sql, "metadata_item_clusters")) {
+                // Find column indices for library_section_id and metadata_type
+                // by counting commas before each column name in the INSERT column list
+                const char *col_list_start = strchr(pg_stmt->pg_sql, '(');
+                if (col_list_start) {
+                    int lib_idx = -1, type_idx = -1;
+                    const char *p = col_list_start + 1;
+                    int col_idx = 0;
+                    while (*p && *p != ')') {
+                        // Skip whitespace
+                        while (*p == ' ' || *p == '"' || *p == '`') p++;
+                        // Check column name
+                        if (strncmp(p, "library_section_id", 18) == 0) lib_idx = col_idx;
+                        if (strncmp(p, "metadata_type", 13) == 0 &&
+                            (p[13] == '"' || p[13] == '`' || p[13] == ',' || p[13] == ')' || p[13] == ' '))
+                            type_idx = col_idx;
+                        // Advance to next comma or end
+                        while (*p && *p != ',' && *p != ')') p++;
+                        if (*p == ',') { p++; col_idx++; }
+                    }
+
+                    if (lib_idx >= 0 && type_idx >= 0 &&
+                        lib_idx < pg_stmt->param_count && type_idx < pg_stmt->param_count) {
+                        const char *lib_val = paramValues[lib_idx];
+                        const char *type_val = paramValues[type_idx];
+                        if (!lib_val && !type_val) {
+                            LOG_ERROR("GUARD: Blocked junk INSERT into metadata_items "
+                                      "(library_section_id=NULL, metadata_type=NULL) "
+                                      "param_count=%d lib_idx=%d type_idx=%d",
+                                      pg_stmt->param_count, lib_idx, type_idx);
+
+                            // Advance sequence so last_insert_rowid() still works
+                            if (exec_conn && exec_conn->conn) {
+                                pthread_mutex_lock(&exec_conn->mutex);
+                                if (exec_conn->conn && PQstatus(exec_conn->conn) == CONNECTION_OK) {
+                                    PGresult *seq_res = PQexec(exec_conn->conn,
+                                        "SELECT nextval('plex.metadata_items_id_seq')");
+                                    if (PQresultStatus(seq_res) == PGRES_TUPLES_OK && PQntuples(seq_res) > 0) {
+                                        LOG_DEBUG("GUARD: Advanced metadata_items sequence to %s",
+                                                  PQgetvalue(seq_res, 0, 0));
+                                    }
+                                    PQclear(seq_res);
+                                }
+                                pthread_mutex_unlock(&exec_conn->mutex);
+                            }
+
+                            pg_stmt->write_executed = 1;
+                            pthread_mutex_unlock(&pg_stmt->mutex);
+                            return SQLITE_DONE;
+                        }
+                    }
+                }
+            }
+
             // CRITICAL FIX v0.9.4: Check NULL but DON'T call PQstatus yet (TOCTOU fix)
             if (!exec_conn || !exec_conn->conn) {
-                LOG_ERROR("STEP: NULL connection");
-                pg_stmt->write_executed = 1;
+                // v0.9.17: Retry once — pool may still be recovering after PG restart
+                LOG_ERROR("STEP WRITE: NULL connection, retrying in 500ms (exec_conn=%p)",
+                         (void*)exec_conn);
                 pthread_mutex_unlock(&pg_stmt->mutex);
-                return SQLITE_ERROR;
+                usleep(500000);  // 500ms
+                pthread_mutex_lock(&pg_stmt->mutex);
+
+                sqlite3 *retry_db = sqlite3_db_handle(pg_stmt->shadow_stmt);
+                pg_connection_t *retry_handle = pg_find_connection(retry_db);
+                if (retry_handle && retry_handle->db_path[0]) {
+                    exec_conn = pg_get_thread_connection(retry_handle->db_path);
+                }
+                if (!exec_conn || !exec_conn->conn) {
+                    LOG_ERROR("STEP WRITE: NULL connection after retry — giving up");
+                    pg_stmt->write_executed = 1;
+                    pthread_mutex_unlock(&pg_stmt->mutex);
+                    return SQLITE_ERROR;
+                }
+                LOG_ERROR("STEP WRITE: reconnect retry succeeded (exec_conn=%p)", (void*)exec_conn);
             }
 
             // CRITICAL: Touch connection to prevent pool from releasing it during query
@@ -792,15 +969,36 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                 LOG_ERROR("STEP WRITE: Attempting PQreset...");
                 PQreset(exec_conn->conn);
                 if (PQstatus(exec_conn->conn) != CONNECTION_OK) {
-                    const char *reset_err = PQerrorMessage(exec_conn->conn);
-                    LOG_ERROR("STEP WRITE: Reset FAILED - connection unrecoverable");
-                    LOG_ERROR("  Post-reset error: %s", reset_err ? reset_err : "(null)");
-                    pthread_mutex_unlock(&exec_conn->mutex);
-                    pg_stmt->write_executed = 1;
-                    pthread_mutex_unlock(&pg_stmt->mutex);
-                    return SQLITE_ERROR;
+                    LOG_ERROR("STEP WRITE: PQreset failed, trying fresh PQconnectdb...");
+                    pg_stmt_cache_clear(exec_conn);
+                    PQfinish(exec_conn->conn);
+                    exec_conn->conn = NULL;
+
+                    pg_conn_config_t *wcfg = pg_config_get();
+                    char wconninfo[1024];
+                    snprintf(wconninfo, sizeof(wconninfo),
+                             "host=%s port=%d dbname=%s user=%s password=%s "
+                             "connect_timeout=5 keepalives=1 keepalives_idle=30 "
+                             "keepalives_interval=10 keepalives_count=3",
+                             wcfg->host, wcfg->port, wcfg->database, wcfg->user, wcfg->password);
+                    PGconn *new_write_conn = PQconnectdb(wconninfo);
+                    if (PQstatus(new_write_conn) == CONNECTION_OK) {
+                        exec_conn->conn = new_write_conn;
+                        exec_conn->is_pg_active = 1;
+                        LOG_ERROR("STEP WRITE: fresh connection succeeded (reconnected)");
+                    } else {
+                        const char *reset_err = PQerrorMessage(new_write_conn);
+                        LOG_ERROR("STEP WRITE: fresh connection also failed: %s", reset_err ? reset_err : "(null)");
+                        PQfinish(new_write_conn);
+                        exec_conn->is_pg_active = 0;
+                        pthread_mutex_unlock(&exec_conn->mutex);
+                        pg_stmt->write_executed = 1;
+                        pthread_mutex_unlock(&pg_stmt->mutex);
+                        return SQLITE_ERROR;
+                    }
+                } else {
+                    LOG_ERROR("STEP WRITE: PQreset succeeded, connection recovered");
                 }
-                LOG_ERROR("STEP WRITE: PQreset succeeded, connection recovered");
             }
 
             // CRITICAL: Ensure connection is in blocking mode and consume any pending data
@@ -876,6 +1074,8 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
             } else {
                 const char *err = (exec_conn && exec_conn->conn) ? PQerrorMessage(exec_conn->conn) : "NULL connection";
                 LOG_ERROR("STEP PG write error: %s", err);
+                LOG_ERROR("  Original SQL: %.300s", pg_stmt->sql ? pg_stmt->sql : "(null)");
+                LOG_ERROR("  Translated SQL: %.300s", pg_stmt->pg_sql ? pg_stmt->pg_sql : "(null)");
                 // CRITICAL: Check if connection is corrupted and needs reset
                 pg_pool_check_connection_health(exec_conn);
             }
