@@ -5,6 +5,21 @@ All notable changes to plex-postgresql will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.21] - 2026-02-09
+
+### Fixed
+- **macOS `sqlite3_column_decltype` not intercepted** — was missing from fishhook rebindings, so Plex's SOCI type-mapping logic (`my_sqlite3_column_decltype`, 150+ lines) was never called on macOS.
+- **Linux `sqlite3_column_decltype` wrapper bypassed SOCI type mapping** — routed to `orig_sqlite3_column_decltype` instead of `my_sqlite3_column_decltype`.
+- **macOS fallback `load_sqlite_fallback()` only loaded ~11 of ~60 symbols** — replaced with shared `common_load_sqlite_symbols()` covering all functions.
+
+### Changed
+- **Extracted `common_load_sqlite_symbols()`** into `db_interpose_common.c` — single source of truth for all ~60 `dlsym` lookups, used by both macOS fallback and Linux `load_original_functions()`.
+- **Extracted `platform_backtrace.c`** — unified backtrace module with `#ifdef __APPLE__` for platform-specific frame collection and symbol resolution. Removed ~300 lines of duplicated code.
+
+### Added
+- **66 new platform parity tests** (`test_platform_parity.c`) — symbol loading completeness, if-not-set pattern, idempotency, callable pointer verification, backtrace output format.
+- Total: 764 tests across 23 suites (CI: 722 tests, 19 suites).
+
 ## [0.9.20] - 2026-02-09
 
 ### Added
