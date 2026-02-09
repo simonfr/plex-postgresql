@@ -35,26 +35,74 @@ scanner_wrapper
 # Test binaries
 tests/bin/
 
-# Backup files
+# Backup / original files
 *.backup
 *.bak
+*.orig
+*.tmp
+*.agent1_backup
+*.debug_backup
+src/*.original
 postgresql-15.3/
 
 # Debug scripts and output
 debug_*.sh
+debug_*.py
 debug_*.lldb
+debug-*/
+debug_output/
 lldb_*.txt
-run_plex_debug.sh
-verify_function_pointers.sh
+lldb_*.py
+lldb_*.sh
+lldb.pid
 *.lldb
+*.exp
+run_plex_debug.sh
+run_lldb*.sh
+attach_lldb*.sh
+attach_lldb*.py
+attach_and_wait.sh
+simple_attach_lldb.sh
+verify_function_pointers.sh
+capture_*.sh
+check_*.sh
+identify_*.sh
+trace_*.sh
+enable_shim_logging.sh
+plex.pid
 
-# Temporary benchmark binaries (root level)
+# Debug/session notes and patches
+*.patch
+/BUGFIX_*.md
+/BUG_FIX_*.md
+/*_FIX*.md
+/*_SUMMARY*.md
+/*_SUMMARY*.txt
+/DEBUG_*.md
+/FINAL_*.md
+/LLDB_*.md
+/MONITORING_*.md
+/MONITORING_*.txt
+/PERFORMANCE_*.md
+/POSTGRESQL_TIMELINE.txt
+/probleem.md
+/blobplan.md
+/sharedcontext.md
+/state.md
+/supernerdanalyse.md
+/werk.md
+/wtf.md
+/cleanup_summary.md
+/release_notes_*.md
+/query_result.xml
+/final_lldb.txt
+
+# Temporary test scripts (root level)
+/test_*.sh
 /bench_*
 /test_stack_calc
 /test_stack_calc.c
 /test_old.dylib
-/test_fork_fix.sh
-/test_stack_protection.sh
 
 # Temporary fix scripts
 /fix_*.py
@@ -62,5 +110,8 @@ verify_function_pointers.sh
 /turbo_poster_fix.py
 /fast_poster_fix.py
 
-# Release builds
+# Old schema backups
+schema/*_old.sql
+
+# Release builds (CI handles this)
 /release/
