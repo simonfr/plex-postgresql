@@ -7,6 +7,7 @@ plex-postgresql/
 ├── src/
 │   ├── db_interpose_core.c       macOS: DYLD_INTERPOSE + fishhook initialization
 │   ├── db_interpose_core_linux.c Linux: LD_PRELOAD + dlsym(RTLD_NEXT)
+│   ├── db_interpose_common.c/h   Shared: exception tracking, fork handlers, signal handling
 │   ├── db_interpose_open.c       sqlite3_open/close interception
 │   ├── db_interpose_prepare.c    sqlite3_prepare_v2 interception
 │   ├── db_interpose_bind.c       sqlite3_bind_* interception
@@ -14,51 +15,67 @@ plex-postgresql/
 │   ├── db_interpose_column.c     sqlite3_column_* interception
 │   ├── db_interpose_metadata.c   sqlite3_column_name/count/decltype
 │   ├── db_interpose_exec.c       sqlite3_exec interception
+│   ├── db_interpose.h            Interpose declarations and macros
 │   ├── pg_types.h                Core type definitions
-│   ├── pg_config.c/h             Configuration loading
-│   ├── pg_logging.c/h            Logging infrastructure
-│   ├── pg_client.c/h             Connection pool management
-│   ├── pg_statement.c/h          Statement lifecycle
-│   ├── pg_query_cache.c/h        Query result caching
-│   ├── sql_translator.c          SQL translation orchestrator
-│   ├── sql_tr_helpers.c          String utilities
+│   ├── pg_config.c/h             Configuration loading + SQL classification
+│   ├── pg_logging.c/h            Thread-safe logging infrastructure
+│   ├── pg_client.c/h             Connection pool management + auto-reconnect
+│   ├── pg_statement.c/h          Statement lifecycle, reference counting
+│   ├── pg_query_cache.c/h        Query result caching (thread-local, TTL-based)
+│   ├── sql_translator.c          SQL translation orchestrator + TLS cache
+│   ├── sql_translator_internal.h Internal translator interfaces
+│   ├── sql_tr_helpers.c          String utilities (strdup, replace, etc.)
 │   ├── sql_tr_placeholders.c     ? → $1 placeholder translation
 │   ├── sql_tr_functions.c        Function translations (iif, strftime, etc.)
-│   ├── sql_tr_query.c            Query structure fixes
-│   ├── sql_tr_groupby.c          GROUP BY rewriting
-│   ├── sql_tr_types.c            Type translations
-│   ├── sql_tr_quotes.c           Quote translations
-│   ├── sql_tr_keywords.c         Keyword translations
-│   ├── sql_tr_upsert.c           UPSERT/ON CONFLICT handling
-│   ├── sql_translator_internal.h Internal translator interfaces
+│   ├── sql_tr_query.c            Query structure fixes (ORDER BY, LIMIT, CASE booleans)
+│   ├── sql_tr_groupby.c          GROUP BY strict mode rewriting + NULLS FIRST
+│   ├── sql_tr_types.c            Type translations (BLOB→BYTEA, DDL types)
+│   ├── sql_tr_quotes.c           Quote translations (backticks, brackets)
+│   ├── sql_tr_keywords.c         Keyword translations (GLOB, COLLATE NOCASE)
+│   ├── sql_tr_upsert.c           UPSERT/ON CONFLICT handling (28 table mappings)
 │   └── fishhook.c                macOS runtime symbol rebinding
 ├── include/
-│   └── sql_translator.h          Translator public interface
+│   ├── sql_translator.h          Translator public interface
+│   └── fishhook.h                fishhook public interface
 ├── scripts/
 │   ├── install_wrappers.sh       Install Plex wrappers (macOS)
 │   ├── install_wrappers_linux.sh Install Plex wrappers (Linux)
-│   ├── uninstall_wrappers.sh     Restore original binaries
-│   ├── migrate_sqlite_to_pg.sh   SQLite to PostgreSQL migration
-│   ├── analyze_fallbacks.sh      Analyze fallback queries
+│   ├── uninstall_wrappers.sh     Restore original binaries (macOS)
+│   ├── uninstall_wrappers_linux.sh Restore original binaries (Linux)
+│   ├── migrate_sqlite_to_pg.sh   SQLite → PostgreSQL migration
+│   ├── migrate_pg_to_sqlite.sh   PostgreSQL → SQLite migration (rollback)
+│   ├── migrate_lib.sh            Shared migration library functions
+│   ├── doctor.sh                 Diagnostic health check for installations
+│   ├── docker-entrypoint.sh      Docker container entrypoint
+│   ├── standalone-entrypoint.sh  Standalone Docker entrypoint
+│   ├── analyze_fallbacks.sh      Analyze fallback queries (passed to SQLite)
 │   ├── benchmark.sh              PostgreSQL raw benchmark
-│   ├── benchmark_compare.py      SQLite vs PostgreSQL comparison
+│   ├── benchmark_compare.sh      Shell-based SQLite vs PostgreSQL comparison
+│   ├── benchmark_compare.py      Python SQLite vs PostgreSQL comparison
 │   ├── benchmark_plex_stress.py  Library scan + playback simulation
 │   ├── benchmark_multiprocess.py Multi-process concurrent access test
-│   └── benchmark_locking.py      Database locking test
+│   └── benchmark_locking.py      Database locking contention test
 ├── tests/
-│   ├── src/
-│   │   ├── test_sql_translator.c SQL translation tests (32 tests)
-│   │   ├── test_recursion.c      Recursion guards (11 tests)
-│   │   ├── test_crash.c          Crash scenario tests (21 tests)
-│   │   ├── test_query_cache.c    Query cache tests (16 tests)
-│   │   ├── test_tls_cache.c      Thread-local storage tests (7 tests)
-│   │   └── test_benchmark.c      Micro-benchmarks
+│   ├── src/                      Unit test sources (25 files, see below)
+│   ├── test_group_by_rewriter.c  GROUP BY rewriter test (31 tests)
 │   ├── bench_cache.c             Cache implementation benchmark
-│   └── bench_sqlite_vs_pg.py     SQLite vs PostgreSQL latency
+│   ├── bench_translation.c       Translation pipeline benchmark
+│   ├── bench_shim.c              Full shim benchmark
+│   ├── bench_pipeline.c          Pipeline stage benchmark
+│   ├── bench_micro.c             Micro-operation benchmark
+│   ├── bench_libpq.c             Raw libpq benchmark
+│   └── bench_sqlite_vs_pg.py     SQLite vs PostgreSQL latency comparison
 ├── schema/
-│   └── plex_schema.sql           PostgreSQL schema
+│   ├── plex_schema.sql           PostgreSQL schema for Plex tables
+│   ├── sqlite_schema.sql         Reference SQLite schema
+│   └── sqlite_column_types.sql   Column type mapping reference
+├── .github/workflows/
+│   ├── ci.yml                    Unit test CI (656 tests, Linux)
+│   ├── docker-publish.yml        Docker image publishing
+│   ├── release-linux-artifacts.yml  Linux release build (aarch64 + x86_64)
+│   └── release-macos-artifacts.yml  macOS release build (universal binary)
 └── docs/
-    └── modules.md                This file
+    └── MODULES.md                This file
 ```
 
 ## Module Overview
@@ -70,6 +87,9 @@ Entry point for macOS. Uses `DYLD_INTERPOSE` for static interposition and `fishh
 
 #### db_interpose_core_linux.c (Linux)
 Entry point for Linux. Uses `LD_PRELOAD` with `dlsym(RTLD_NEXT)` to intercept SQLite calls.
+
+#### db_interpose_common.c
+Platform-independent shared code: exception type tracking (`__cxa_throw` interception), fork safety handlers (`pthread_atfork`), signal handlers for crash diagnostics, symbol verification, and common initialization/cleanup.
 
 ### Interception Modules
 
@@ -90,23 +110,23 @@ Entry point for Linux. Uses `LD_PRELOAD` with `dlsym(RTLD_NEXT)` to intercept SQ
 | `sql_translator.c` | Main orchestrator, thread-local cache management |
 | `sql_tr_helpers.c` | String utilities (strdup, replace, etc.) |
 | `sql_tr_placeholders.c` | `?` → `$1`, `:name` → `$2` |
-| `sql_tr_functions.c` | `iif` → `CASE`, `strftime` → `EXTRACT`, `IFNULL` → `COALESCE` |
-| `sql_tr_query.c` | Query structure fixes (ORDER BY, LIMIT) |
-| `sql_tr_groupby.c` | GROUP BY expression rewriting |
-| `sql_tr_types.c` | `BLOB` → `BYTEA`, type casts |
-| `sql_tr_quotes.c` | Backticks → double quotes |
-| `sql_tr_keywords.c` | `GLOB` → `LIKE`, `COLLATE NOCASE` → `ILIKE` |
-| `sql_tr_upsert.c` | `INSERT OR REPLACE` → `ON CONFLICT DO UPDATE` |
+| `sql_tr_functions.c` | `iif` → `CASE`, `strftime` → `EXTRACT`, `IFNULL` → `COALESCE`, `typeof` → `pg_typeof`, `unixepoch`, `json_each` |
+| `sql_tr_query.c` | Query structure fixes (ORDER BY, LIMIT -1, forward-ref joins, CASE boolean 0/1 → FALSE/TRUE) |
+| `sql_tr_groupby.c` | GROUP BY strict mode rewriting (PostgreSQL requires all non-aggregate columns), NULLS FIRST ordering |
+| `sql_tr_types.c` | `BLOB` → `BYTEA`, DDL type translation (`datetime`, `integer`, etc.), `sqlite_master` → `pg_catalog` |
+| `sql_tr_quotes.c` | Backticks → double quotes, bracket quotes → double quotes |
+| `sql_tr_keywords.c` | `GLOB` → `LIKE`, `COLLATE NOCASE` → `ILIKE`, operator spacing |
+| `sql_tr_upsert.c` | `INSERT OR REPLACE` → `ON CONFLICT DO UPDATE` with 28 table-specific conflict target mappings, special column handling (updated_at COALESCE, view_count GREATEST) |
 
 ### PostgreSQL Client
 
 | Module | Responsibility |
 |--------|---------------|
-| `pg_client.c` | Connection pool (50 connections default, max 100) |
-| `pg_statement.c` | Statement lifecycle, reference counting |
+| `pg_client.c` | Connection pool (50 connections default, max 100), auto-reconnect on failure |
+| `pg_statement.c` | Statement lifecycle, reference counting, metadata settings upsert |
 | `pg_query_cache.c` | Query result caching (thread-local, TTL-based eviction) |
-| `pg_config.c` | Environment variable configuration |
-| `pg_logging.c` | Thread-safe logging |
+| `pg_config.c` | Environment variable configuration, SQL classification (should_redirect, is_write/read_operation) |
+| `pg_logging.c` | Thread-safe logging, deadlock prevention |
 
 ## Caching Architecture
 
@@ -264,6 +284,9 @@ SQLite SQL
 │     datetime('now') → NOW()                               │
 │     SUBSTR(a,b,c) → SUBSTRING(a FROM b FOR c)            │
 │     INSTR(a,b) → POSITION(b IN a)                        │
+│     typeof(x) → pg_typeof(x)::text                       │
+│     unixepoch('now') → EXTRACT(EPOCH FROM NOW())::bigint  │
+│     json_each(x).value → jsonb_array_elements_text(x)    │
 └──────────────────────────────────────────────────────────┘
     │
     ▼
@@ -271,27 +294,41 @@ SQLite SQL
 │  4. Type Translation                                      │
 │     BLOB → BYTEA                                          │
 │     INTEGER PRIMARY KEY → SERIAL (on CREATE)              │
+│     DDL: datetime, float, boolean, varchar → PG types     │
+│     sqlite_master → pg_catalog.pg_tables                  │
 └──────────────────────────────────────────────────────────┘
     │
     ▼
 ┌──────────────────────────────────────────────────────────┐
-│  5. Keyword Translation                                   │
-│     GLOB '*term*' → LIKE '%term%'                         │
-│     COLLATE NOCASE → ILIKE / LOWER()                      │
+│  5. Query Structure                                       │
+│     CASE WHEN x THEN 1 ELSE 0 END → boolean              │
 │     WHERE 0 / WHERE 1 → WHERE FALSE / WHERE TRUE          │
 │     LIMIT -1 → (removed)                                  │
+│     Forward-reference joins → reordered                   │
+│     GROUP BY → add missing non-aggregate columns          │
+│     ORDER BY → add NULLS FIRST where needed               │
 └──────────────────────────────────────────────────────────┘
     │
     ▼
 ┌──────────────────────────────────────────────────────────┐
-│  6. UPSERT Translation                                    │
+│  6. Keyword Translation                                   │
+│     GLOB '*term*' → LIKE '%term%'                         │
+│     COLLATE NOCASE → ILIKE / LOWER()                      │
+│     Operator spacing normalization                        │
+└──────────────────────────────────────────────────────────┘
+    │
+    ▼
+┌──────────────────────────────────────────────────────────┐
+│  7. UPSERT Translation                                    │
 │     INSERT OR REPLACE → INSERT ... ON CONFLICT DO UPDATE  │
 │     INSERT OR IGNORE → INSERT ... ON CONFLICT DO NOTHING  │
+│     28 table-specific conflict target mappings            │
+│     Special: COALESCE(updated_at), GREATEST(view_count)   │
 └──────────────────────────────────────────────────────────┘
     │
     ▼
 ┌──────────────────────────────────────────────────────────┐
-│  7. Quote Translation                                     │
+│  8. Quote Translation                                     │
 │     `column` → "column"                                   │
 │     [column] → "column"                                   │
 └──────────────────────────────────────────────────────────┘
@@ -300,38 +337,88 @@ SQLite SQL
 PostgreSQL SQL
 ```
 
+## Testing
+
+### Test Suites
+
+698 tests across 22 suites. CI runs 656 tests (18 suites); 3 suites (test-api, test-expanded, test-params) require the shim loaded via LD_PRELOAD and 1 suite (test-stack-macos) is macOS-only.
+
+| Makefile Target | Test File | Tests | Description |
+|-----------------|-----------|-------|-------------|
+| `test-recursion` | `test_recursion.c` | 17 | Recursion guards, stack overflow protection |
+| `test-crash` | `test_crash_scenarios.c` | 27 | Crash scenarios from production history |
+| `test-sql` | `test_sql_translator.c` | 198 | Full SQL translation pipeline (functions, types, keywords, placeholders, CASE booleans, GROUP BY, etc.) |
+| `test-groupby` | `test_group_by_rewriter.c` | 31 | GROUP BY strict mode rewriting + NULLS FIRST ordering |
+| `test-upsert` | `test_upsert.c` | 59 | UPSERT: all 28 conflict targets, schema prefix stripping, special columns, quoted columns |
+| `test-types` | `test_type_normalization.c` | 42 | decltype normalization for SOCI compatibility |
+| `test-soci` | `test_decltype_soci_compat.c` | 41 | SOCI std::bad_cast prevention (type coercion) |
+| `test-cache` | `test_query_cache.c` | 25 | Query result cache (TTL, eviction, hash collisions) |
+| `test-tls` | `test_tls_cache.c` | 7 | Thread-local storage cache correctness |
+| `test-fork` | `test_fork_safety.c` | 9 | pthread_atfork handler correctness |
+| `test-reaper` | `test_pool_reaper.c` | 12 | Connection pool idle reaper |
+| `test-buffer` | `test_buffer_pool.c` | 14 | column_text buffer expansion |
+| `test-logging` | `test_logging_deadlock.c` | 9 | Logging deadlock prevention (10s timeout) |
+| `test-exception` | `test_exception_handler.c` | 17 | C++ exception interception (__cxa_throw, __cxa_demangle) |
+| `test-fts` | `test_fts_quotes.c` | 10 | FTS escaped quote handling |
+| `test-config` | `test_pg_config.c` | 63 | SQL classification (should_redirect, should_skip, is_write/read) |
+| `test-bind` | `test_bind_helpers.c` | 27 | Binary detection, hex encoding (contains_binary_bytes, bytes_to_pg_hex) |
+| `test-common` | `test_common_helpers.c` | 25 | is_library_db_path, simple_str_replace |
+| `test-statement` | `test_statement_helpers.c` | 23 | metadata_settings upsert, metadata ID extraction |
+| `test-api` | `test_sqlite_api.c` | — | SQLite API with shim loaded (requires LD_PRELOAD) |
+| `test-expanded` | `test_expanded_sql.c` | — | sqlite3_expanded_sql + boolean conversion (requires LD_PRELOAD) |
+| `test-params` | `test_bind_parameter_index.c` | — | Named parameter mapping (requires LD_PRELOAD) |
+| `test-stack-macos` | `test_stack_macos.c` | — | macOS stack protection integration test |
+
+### Running Tests
+
+```bash
+# All unit tests (698 tests, 22 suites — requires shim built + PostgreSQL)
+make unit-test
+
+# CI-safe subset (656 tests, 18 suites — no shim/PostgreSQL needed)
+make ci-test
+
+# Individual suites
+make test-sql          # SQL translation (198 tests)
+make test-upsert       # UPSERT handling (59 tests)
+make test-config       # SQL classification (63 tests)
+make test-types        # Type normalization (42 tests)
+make test-soci         # SOCI compatibility (41 tests)
+make test-groupby      # GROUP BY rewriting (31 tests)
+make test-crash        # Crash scenarios (27 tests)
+make test-bind         # Bind helpers (27 tests)
+make test-common       # Common helpers (25 tests)
+make test-cache        # Query cache (25 tests)
+make test-statement    # Statement helpers (23 tests)
+make test-recursion    # Recursion/stack (17 tests)
+make test-exception    # Exception handler (17 tests)
+make test-buffer       # Buffer pool (14 tests)
+make test-reaper       # Pool reaper (12 tests)
+make test-fts          # FTS quotes (10 tests)
+make test-fork         # Fork safety (9 tests)
+make test-logging      # Logging deadlock (9 tests)
+make test-tls          # TLS cache (7 tests)
+
+# Benchmarks
+make benchmark                         # Shim micro-benchmarks
+```
+
 ## Development
 
 ### Build
 
 ```bash
-# macOS
+# macOS (auto-detect)
 make clean && make
+
+# Explicit macOS build
+make macos
 
 # Linux
 make clean && make linux
 
 # With debug symbols
 make DEBUG=1
-```
-
-### Test
-
-```bash
-# All unit tests (87 tests)
-make unit-test
-
-# Individual test suites
-make test-sql          # SQL translation
-make test-recursion    # Recursion guards
-make test-crash        # Crash scenarios
-make test-cache        # Query cache
-make test-tls          # Thread-local storage
-
-# Benchmarks
-make benchmark                        # Shim micro-benchmarks
-./tests/bin/bench_cache              # Cache comparison
-python3 tests/bench_sqlite_vs_pg.py  # SQLite vs PostgreSQL
 ```
 
 ### Debug
@@ -342,6 +429,9 @@ tail -f /tmp/plex_redirect_pg.log
 
 # Analyze fallback queries (queries passed to SQLite)
 ./scripts/analyze_fallbacks.sh
+
+# Health check
+./scripts/doctor.sh
 ```
 
 ### Adding Function Translation

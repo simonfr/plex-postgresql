@@ -13,13 +13,17 @@ Una librería shim pequeña que captura las llamadas SQLite de Plex y las envía
 | Linux (Docker) | ✅ Funciona (init y ejecución probados, no probado en producción) |
 | Linux (Nativo) | ⚠️ No probado |
 
-## Última versión
+## Última versión: v0.9.20
 
-- **v0.9.16**
-- Descarga: https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.16
-- Formato de assets: solo ZIP
-  - `plex-postgresql-v0.9.16-macos.zip`
-  - `plex-postgresql-v0.9.16-linux.zip`
+**Cobertura de tests y CI:** 698 tests unitarios, GitHub Actions los ejecuta en cada push.
+
+- ✅ **Nuevo:** 160 tests unitarios para traductor SQL, upsert, GROUP BY
+- ✅ **Nuevo:** pipeline de tests en GitHub Actions (657 tests en cada push/PR)
+- ✅ **Corregido:** 3 bugs en traductor SQL encontrados por los nuevos tests
+- ✅ **Corregido:** reconexión automática tras reinicio de PostgreSQL (v0.9.18)
+- ✅ **Corregido:** bloqueo de inserts huérfanos, conflictos en schema_migrations (v0.9.19)
+
+Descarga: https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.20
 
 ## ¿Por qué PostgreSQL?
 
@@ -88,7 +92,7 @@ psql -d plex -c "ALTER USER plex PASSWORD 'plex';"
 ### 2. Instalar (ZIP recomendado)
 
 ```bash
-curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.16/plex-postgresql-v0.9.16-macos.zip -o /tmp/plex-pg-macos.zip
+curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.20/plex-postgresql-v0.9.20-macos.zip -o /tmp/plex-pg-macos.zip
 mkdir -p /tmp/plex-pg-macos && cd /tmp/plex-pg-macos
 unzip /tmp/plex-pg-macos.zip
 
@@ -139,7 +143,7 @@ psql -U plex -d plex -c "CREATE SCHEMA plex;"
 ### 2. Instalar (ZIP recomendado)
 
 ```bash
-curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.16/plex-postgresql-v0.9.16-linux.zip -o /tmp/plex-pg-linux.zip
+curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.20/plex-postgresql-v0.9.20-linux.zip -o /tmp/plex-pg-linux.zip
 mkdir -p /tmp/plex-pg && cd /tmp/plex-pg
 unzip /tmp/plex-pg-linux.zip
 

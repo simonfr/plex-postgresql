@@ -5,6 +5,55 @@ All notable changes to plex-postgresql will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.20] - 2026-02-09
+
+### Added
+- **GitHub Actions unit test pipeline**
+  - New `unit-tests` job in `.github/workflows/ci.yml` runs 657 tests across 18 suites on every push and PR.
+  - New `ci-test` Makefile target for CI-safe test subset (excludes LD_PRELOAD tests).
+  - Fixes for Linux/GCC portability: `pthread_getattr_np` for stack tests, `stddef.h` for `ptrdiff_t`, graceful `__cxa_demangle` skip.
+
+- **~160 new unit tests for SQL translator and upsert** (540 -> 698 total)
+  - Upsert: 6 -> 59 tests covering all 28 conflict targets, schema prefix stripping, special column handling.
+  - Case booleans: 2 -> 14 tests. Integer/text mismatch: 9 tests. DDL types: 12 tests. Keywords: 18 tests.
+  - Forward reference joins: 5 tests. Null sorting: 6 tests. Plex pipeline: 3 tests.
+  - `fix_group_by_strict_complete`: 15 direct tests. `add_nulls_first_ordering`: 4 tests.
+  - typeof remapping, strftime, unixepoch, json_each, placeholder edge cases, operator spacing, COLLATE NOCASE.
+
+### Fixed
+- **sql_tr_upsert.c**: schema prefix not stripped before `metadata_item_settings` special case comparison.
+- **sql_tr_query.c**: fast-path in `translate_case_booleans` missing `" 0)"` and `" 1)"` patterns.
+- **sql_tr_types.c**: fast-path in `sql_translate_types` missing `" datetime"` check.
+
+## [0.9.19] - 2026-02-09
+
+### Fixed
+- **Block junk metadata inserts** with both `library_section_id` and `metadata_type` NULL (orphan rows).
+  - Added `chk_not_orphan` CHECK constraint to schema and `doctor.sh`.
+- **schema_migrations conflict handling**: added `ON CONFLICT DO NOTHING` for INSERTs to prevent UNIQUE violation crash.
+- **Placeholder translator**: only track single-quote strings, not double-quote identifiers.
+- **Duplicate assignment dedup**: handle backtick-quoted columns, consume removed `$N` params with COALESCE.
+- **NULLS FIRST ordering** added for GROUP BY queries (SOCI compatibility).
+- Downgraded `COLUMN_TEXT_NO_STMT` from ERROR to DEBUG for non-PG databases.
+
+## [0.9.18] - 2026-02-09
+
+### Fixed
+- **Auto-reconnect PostgreSQL after connection loss**
+  - `step()` READ/WRITE retries once after 500ms if pool returns NULL connection.
+  - If `PQreset` fails on `CONNECTION_BAD`, tries fresh `PQconnectdb` instead of giving up.
+  - `pg_pool_check_connection_health` uses same fallback to fresh connection when reset fails.
+  - Fixes HTTP 500 on all library endpoints after PostgreSQL restart or after Plex is killed with SIGKILL.
+
+## [0.9.17] - 2026-02-09
+
+### Changed
+- **macOS: shim dylib installed into Plex.app bundle**
+  - `install_wrappers.sh` copies dylib into `Plex.app/Contents/MacOS/` instead of referencing external paths.
+  - Scanner uses `@loader_path` for `LC_LOAD_DYLIB` (portable, no absolute paths).
+  - Server wrapper simplified (no more placeholder sed, no auto-build).
+  - Uninstaller cleans up dylib from Plex.app.
+
 ## [0.9.16] - 2026-02-08
 
 ### Fixed
