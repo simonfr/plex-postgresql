@@ -5,6 +5,26 @@ All notable changes to plex-postgresql will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.23] - 2026-02-10
+
+### Fixed
+- **`LPE: only library URIs are allowed right now` errors on startup** (142-221 per startup)
+  - Root cause: Plex's `extra_data` column stores JSON blobs containing `"pv:uri":"server://<machineId>/com.plexapp.plugins.library/library/..."` URIs. Plex's LPE parser only accepts `library://` scheme.
+  - Solution: Rewrote `rewrite_server_library_uri()` to scan text values for embedded `server://` URIs and rewrite them to `library://` inline. Handles both standalone URIs and JSON-embedded URIs.
+  - The data in PostgreSQL is correct (identical to original SQLite); the rewrite happens at read-time only.
+- **Off-by-one in `needle_len` constant** — hardcoded 36 instead of actual 37. Found by new unit tests. Replaced all hardcoded string lengths with `sizeof() - 1`.
+- **`/library/metadata/<id>` returning HTTP 500** with `std::bad_cast` — return `dt_integer(8)` for OID=20 timestamp columns.
+- **`/library/metadata/<id>/related` returning HTTP 500** with `std::bad_cast` — return `SQLITE_NULL` for `metadata_type=18` (collection/folder) in related-items queries.
+- **`DatabaseFixups/SyncCollections` throwing `std::bad_cast`** — skip two problematic query patterns with empty-result dummy statements.
+
+### Added
+- **13 unit tests** (`test_uri_rewrite.c`) — standalone URIs, JSON-embedded URIs, multiple URIs, edge cases (NULL, empty, small buffer, no match, partial match).
+- Total: 777 tests across 24 suites.
+
+### Changed
+- Removed `LPE_URI_READ` diagnostic trace (was ERROR-level, spammed 884 lines per startup).
+- Cleaned up dead `col_name_for_log` variable and redundant comments.
+
 ## [0.9.22] - 2026-02-09
 
 ### Changed

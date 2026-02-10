@@ -774,6 +774,252 @@ static const char* sqlite_type_name(int type) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Targeted bad_cast tracing
+//
+// Goal: capture the exact decltype/type values returned for specific column
+// indexes right before SOCI throws std::bad_cast.
+//
+// Enable with:
+//   PLEX_PG_TRACE_BADCAST=1
+// Optional:
+//   PLEX_PG_TRACE_BADCAST_IDX="5,6"   (default)
+//   PLEX_PG_TRACE_BADCAST_THREAD="ReqHandler" (default; set to "any" to disable)
+// ---------------------------------------------------------------------------
+
+static int trace_badcast_enabled = -1;
+static const char *trace_badcast_idx_list = NULL;
+static const char *trace_badcast_thread_substr = NULL;
+static const char *trace_badcast_sql_contains = NULL;
+static const char *trace_badcast_col_contains = NULL;
+
+static char trace_badcast_idx_file_buf[256];
+static char trace_badcast_sql_file_buf[256];
+static char trace_badcast_thread_file_buf[128];
+static char trace_badcast_col_file_buf[128];
+
+static const char *read_trace_file_first_line(const char *path, char *buf, size_t buf_len) {
+    if (!path || !buf || buf_len < 2) return NULL;
+    buf[0] = '\0';
+
+    FILE *f = fopen(path, "r");
+    if (!f) return NULL;
+    if (!fgets(buf, (int)buf_len, f)) {
+        fclose(f);
+        return NULL;
+    }
+    fclose(f);
+
+    // Trim trailing newline/CR and surrounding whitespace.
+    size_t n = strlen(buf);
+    while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r' || buf[n - 1] == ' ' || buf[n - 1] == '\t')) {
+        buf[--n] = '\0';
+    }
+    char *p = buf;
+    while (*p == ' ' || *p == '\t') p++;
+    if (p != buf) memmove(buf, p, strlen(p) + 1);
+
+    return buf[0] ? buf : NULL;
+}
+
+static void trace_badcast_log_ctx(pg_stmt_t *pg_stmt,
+                                 sqlite3_stmt *pStmt,
+                                 int idx,
+                                 const char *fn,
+                                 const char *phase,
+                                 int row,
+                                 int is_null,
+                                 Oid oid,
+                                 const char *col_name) {
+    if (!pg_stmt) return;
+    // Keep this line compact and safe to log (no large values).
+    // Use LOG_ERROR so it still appears even if log level is ERROR.
+    LOG_ERROR("TRACE_BADCAST_CTX: fn=%s phase=%s stmt=%p pg_stmt=%p idx=%d col='%s' oid=%u row=%d/%d cols=%d is_null=%d sql=%.200s",
+             fn ? fn : "?", phase ? phase : "?",
+             (void*)pStmt, (void*)pg_stmt, idx,
+             col_name ? col_name : "?", (unsigned)oid,
+             row, pg_stmt->num_rows, pg_stmt->num_cols,
+             is_null,
+             pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
+}
+
+static void trace_badcast_init(void) {
+    if (trace_badcast_enabled != -1) return;
+
+    const char *env = getenv("PLEX_PG_TRACE_BADCAST");
+    if (env) {
+        trace_badcast_enabled = (env[0] && strcmp(env, "0") != 0) ? 1 : 0;
+    } else {
+        // If the var isn't present (some Plex launch paths sanitize env),
+        // auto-enable tracing when log level is ERROR. This keeps behavior
+        // opt-in for normal DEBUG/INFO runs.
+        const char *lvl = getenv("PLEX_PG_LOG_LEVEL");
+        trace_badcast_enabled = (lvl && strcasecmp(lvl, "ERROR") == 0) ? 1 : 0;
+    }
+
+    trace_badcast_idx_list = getenv("PLEX_PG_TRACE_BADCAST_IDX");
+    if (!trace_badcast_idx_list || !trace_badcast_idx_list[0]) {
+        // Some Plex restart paths sanitize env. Allow /tmp overrides.
+        trace_badcast_idx_list = read_trace_file_first_line(
+            "/tmp/plex_pg_trace_badcast_idx",
+            trace_badcast_idx_file_buf,
+            sizeof(trace_badcast_idx_file_buf)
+        );
+    }
+    if (!trace_badcast_idx_list || !trace_badcast_idx_list[0]) trace_badcast_idx_list = "5,6";
+
+    trace_badcast_thread_substr = getenv("PLEX_PG_TRACE_BADCAST_THREAD");
+    if (!trace_badcast_thread_substr || !trace_badcast_thread_substr[0]) {
+        trace_badcast_thread_substr = read_trace_file_first_line(
+            "/tmp/plex_pg_trace_badcast_thread",
+            trace_badcast_thread_file_buf,
+            sizeof(trace_badcast_thread_file_buf)
+        );
+    }
+    if (!trace_badcast_thread_substr || !trace_badcast_thread_substr[0]) {
+        // Default to no thread filter.
+        trace_badcast_thread_substr = "any";
+    }
+
+    trace_badcast_sql_contains = getenv("PLEX_PG_TRACE_BADCAST_SQL_CONTAINS");
+    if (!trace_badcast_sql_contains || !trace_badcast_sql_contains[0]) {
+        trace_badcast_sql_contains = read_trace_file_first_line(
+            "/tmp/plex_pg_trace_badcast_sql_contains",
+            trace_badcast_sql_file_buf,
+            sizeof(trace_badcast_sql_file_buf)
+        );
+    }
+
+    trace_badcast_col_contains = getenv("PLEX_PG_TRACE_BADCAST_COL_CONTAINS");
+    if (!trace_badcast_col_contains || !trace_badcast_col_contains[0]) {
+        trace_badcast_col_contains = read_trace_file_first_line(
+            "/tmp/plex_pg_trace_badcast_col_contains",
+            trace_badcast_col_file_buf,
+            sizeof(trace_badcast_col_file_buf)
+        );
+    }
+}
+
+static int trace_badcast_list_contains_idx(const char *list, int idx) {
+    if (!list || !list[0]) return 0;
+    if (strcasecmp(list, "all") == 0) return 1;
+
+    const char *p = list;
+    while (*p) {
+        // Skip separators
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == ',' || *p == ';') p++;
+        if (!*p) break;
+
+        char *end = NULL;
+        long v = strtol(p, &end, 10);
+        if (end == p) {
+            // Skip non-numeric token
+            while (*p && *p != ',' && *p != ';' && *p != ' ' && *p != '\t' && *p != '\n') p++;
+            continue;
+        }
+        if ((int)v == idx) return 1;
+        p = end;
+    }
+    return 0;
+}
+
+static int trace_badcast_thread_ok(void) {
+    trace_badcast_init();
+    if (!trace_badcast_enabled) return 0;
+    if (!trace_badcast_thread_substr || !trace_badcast_thread_substr[0]) return 1;
+    if (strcasecmp(trace_badcast_thread_substr, "any") == 0) return 1;
+
+#ifdef __APPLE__
+    char tname[64];
+    tname[0] = '\0';
+    pthread_getname_np(pthread_self(), tname, sizeof(tname));
+    if (!tname[0]) return 0;
+    return strstr(tname, trace_badcast_thread_substr) != NULL;
+#else
+    // Non-Apple platforms: no thread name filter.
+    return 1;
+#endif
+}
+
+static int trace_badcast_sql_ok(const pg_stmt_t *pg_stmt) {
+    trace_badcast_init();
+    if (!trace_badcast_enabled) return 0;
+    if (!trace_badcast_sql_contains || !trace_badcast_sql_contains[0]) return 1;
+    if (!pg_stmt || !pg_stmt->pg_sql) return 0;
+
+    // Comma/semicolon separated list of substrings; any match enables logging.
+    const char *sql = pg_stmt->pg_sql;
+    const char *p = trace_badcast_sql_contains;
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == ',' || *p == ';') p++;
+        if (!*p) break;
+        const char *start = p;
+        while (*p && *p != ',' && *p != ';' && *p != '\n') p++;
+        size_t len = (size_t)(p - start);
+        if (len > 0) {
+            // Temporary NUL-terminated token without heap alloc.
+            char token[128];
+            if (len >= sizeof(token)) len = sizeof(token) - 1;
+            memcpy(token, start, len);
+            token[len] = '\0';
+            if (token[0] && strstr(sql, token) != NULL) return 1;
+        }
+    }
+    return 0;
+}
+
+static int trace_badcast_col_ok(const char *col_name) {
+    trace_badcast_init();
+    if (!trace_badcast_enabled) return 0;
+    if (!trace_badcast_col_contains || !trace_badcast_col_contains[0]) return 1;
+    if (!col_name || !col_name[0]) return 0;
+
+    // Comma/semicolon separated list of substrings; any match enables logging.
+    const char *p = trace_badcast_col_contains;
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == ',' || *p == ';') p++;
+        if (!*p) break;
+        const char *start = p;
+        while (*p && *p != ',' && *p != ';' && *p != '\n') p++;
+        size_t len = (size_t)(p - start);
+        if (len > 0) {
+            char token[64];
+            if (len >= sizeof(token)) len = sizeof(token) - 1;
+            memcpy(token, start, len);
+            token[len] = '\0';
+            if (token[0] && strstr(col_name, token) != NULL) return 1;
+        }
+    }
+    return 0;
+}
+
+static int trace_badcast_should_log(const pg_stmt_t *pg_stmt, int idx) {
+    trace_badcast_init();
+    if (!trace_badcast_enabled) return 0;
+    if (!trace_badcast_thread_ok()) return 0;
+    if (!trace_badcast_sql_ok(pg_stmt)) return 0;
+    return trace_badcast_list_contains_idx(trace_badcast_idx_list, idx);
+}
+
+static int trace_badcast_should_log_col(const pg_stmt_t *pg_stmt, int idx, const char *col_name) {
+    if (!trace_badcast_should_log(pg_stmt, idx)) return 0;
+    return trace_badcast_col_ok(col_name);
+}
+
+// Some Plex queries (notably related-items lookups) include collection/folder rows
+// (metadata_type=18) but then attempt to dynamic_cast them to other metadata item
+// types and crash with std::bad_cast. Other code paths (e.g. SyncCollections fixups)
+// legitimately need to read metadata_type=18 and must not be affected.
+//
+// We scope the workaround to only the known "related" query shape.
+static int should_apply_type18_workaround(const pg_stmt_t *pg_stmt) {
+    if (!pg_stmt || !pg_stmt->pg_sql) return 0;
+    const char *sql = pg_stmt->pg_sql;
+    // Observed shape for /library/metadata/<id>/related queries.
+    if (strstr(sql, "taggings as related") != NULL) return 1;
+    return 0;
+}
+
 // Type consistency validation helper
 // Validates that column_type and column_decltype are consistent
 static void validate_type_consistency(sqlite3_stmt *pStmt, int idx, const char *accessor_name) {
@@ -792,8 +1038,8 @@ static void validate_type_consistency(sqlite3_stmt *pStmt, int idx, const char *
     Oid oid = PQftype(pg_stmt->result, idx);
     const char *col_name = PQfname(pg_stmt->result, idx);
     
-        // Warn about type mismatches
-        if (col_decltype) {
+    // Warn about type mismatches
+    if (col_decltype) {
             int expected_for_decltype = -1;
             if (strcmp(col_decltype, "INTEGER") == 0 || 
                 strcmp(col_decltype, "BIGINT") == 0 ||
@@ -812,6 +1058,26 @@ static void validate_type_consistency(sqlite3_stmt *pStmt, int idx, const char *
                       accessor_name, col_name ? col_name : "?", idx,
                       col_decltype, sqlite_type_name(expected_for_decltype),
                       sqlite_type_name(col_type), (unsigned)oid);
+
+            // If bad_cast tracing is active for this idx/sql, emit an ERROR line
+            // so we can correlate mismatches with Plex crashes even when running
+            // at ERROR log level.
+            if (trace_badcast_should_log(pg_stmt, idx)) {
+                trace_badcast_log_ctx(pg_stmt, pStmt, idx, accessor_name, "type_mismatch",
+                                      pg_stmt->current_row,
+                                      (col_type == SQLITE_NULL) ? 1 : 0,
+                                      oid,
+                                      col_name);
+                LOG_ERROR("TRACE_BADCAST_MISMATCH: accessor=%s col='%s' idx=%d oid=%u decltype='%s' expected=%s actual=%s sql=%.200s",
+                          accessor_name,
+                          col_name ? col_name : "?",
+                          idx,
+                          (unsigned)oid,
+                          col_decltype,
+                          sqlite_type_name(expected_for_decltype),
+                          sqlite_type_name(col_type),
+                          pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
+            }
         }
     }
     pthread_mutex_unlock(&pg_stmt->mutex);
@@ -821,6 +1087,7 @@ int my_sqlite3_column_type(sqlite3_stmt *pStmt, int idx) {
     global_column_type_calls++;  // Global counter for exception debugging
     LOG_DEBUG("COLUMN_TYPE: stmt=%p idx=%d", (void*)pStmt, idx);
     pg_stmt_t *pg_stmt = pg_find_any_stmt(pStmt);
+    int trace = 0;
     // Handle all PostgreSQL statements
     // For WRITE without result, return SQLITE_NULL (no data)
     if (pg_stmt && pg_stmt->is_pg) {
@@ -834,6 +1101,8 @@ int my_sqlite3_column_type(sqlite3_stmt *pStmt, int idx) {
             int row = pg_stmt->current_row;
             if (idx >= 0 && idx < cached->num_cols && row >= 0 && row < cached->num_rows) {
                 cached_row_t *crow = &cached->rows[row];
+                const char *cname = (cached->col_names && idx < cached->num_cols) ? cached->col_names[idx] : NULL;
+                trace = trace_badcast_should_log_col(pg_stmt, idx, cname);
                 if (crow->is_null[idx]) {
                     // Return SQLITE_NULL for NULL values.
                     // SOCI's load_rowset() handles this correctly by setting isNull_=true.
@@ -843,9 +1112,34 @@ int my_sqlite3_column_type(sqlite3_stmt *pStmt, int idx) {
                     pthread_mutex_unlock(&pg_stmt->mutex);
                     return SQLITE_NULL;
                 }
+
+                // WORKAROUND: metadata_type 18 (collection/folder) causes std::bad_cast in Plex.
+                // Pretend the value is NULL so SOCI marks it isNull_=true and Plex can skip.
+                if (cname && strstr(cname, "metadata_type") != NULL && crow->values[idx] && should_apply_type18_workaround(pg_stmt)) {
+                    if (atoi(crow->values[idx]) == 18) {
+                        if (trace) {
+                            trace_badcast_log_ctx(pg_stmt, pStmt, idx, "column_type", "type18->NULL(cached)", row, 1,
+                                                  cached->col_types[idx], cname);
+                            LOG_ERROR("TRACE_BADCAST_TYPE18: column_type (cached) forced NULL for metadata_type 18 col='%s' idx=%d row=%d sql=%.200s",
+                                      cname, idx, row, pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
+                        }
+                        LOG_DEBUG("TYPE18_WORKAROUND: column_type (cached) forcing SQLITE_NULL for metadata_type 18 col='%s' idx=%d row=%d",
+                                  cname, idx, row);
+                        pthread_mutex_unlock(&pg_stmt->mutex);
+                        return SQLITE_NULL;
+                    }
+                }
+
                 // Use cached column type OID to determine SQLite type
                 Oid oid = cached->col_types[idx];
                 int result = pg_oid_to_sqlite_type(oid);
+                if (trace) {
+                    // We don't have a PGresult here; still log a consistent context line.
+                    trace_badcast_log_ctx(pg_stmt, pStmt, idx, "column_type", "cached", row, 0, oid, cname);
+                    LOG_ERROR("TRACE_BADCAST: column_type (cached) idx=%d col='%s' row=%d oid=%u -> %s sql=%.200s",
+                             idx, cname ? cname : "?", row, (unsigned)oid,
+                             sqlite_type_name(result), pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
+                }
                 LOG_DEBUG("COLUMN_TYPE_VERBOSE: idx=%d row=%d OID=%u -> %s (cached)",
                         idx, row, (unsigned)oid, sqlite_type_name(result));
                 pthread_mutex_unlock(&pg_stmt->mutex);
@@ -876,15 +1170,40 @@ int my_sqlite3_column_type(sqlite3_stmt *pStmt, int idx) {
         int is_null = PQgetisnull(pg_stmt->result, row, idx);
         Oid oid = PQftype(pg_stmt->result, idx);
         const char *col_name = PQfname(pg_stmt->result, idx);
+        trace = trace_badcast_should_log_col(pg_stmt, idx, col_name);
         // Update exception context
         last_column_being_accessed = col_name;
         // Return SQLITE_NULL for NULL values.
         if (is_null) {
             LOG_DEBUG("COLUMN_TYPE: idx=%d col='%s' is NULL, returning SQLITE_NULL",
                       idx, col_name ? col_name : "?");
+            if (trace) {
+                trace_badcast_log_ctx(pg_stmt, pStmt, idx, "column_type", "live", row, 1, oid, col_name);
+                LOG_ERROR("TRACE_BADCAST: column_type idx=%d col='%s' row=%d oid=%u is_null=1 -> NULL sql=%.200s",
+                         idx, col_name ? col_name : "?", row, (unsigned)oid,
+                         pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
+            }
             pthread_mutex_unlock(&pg_stmt->mutex);
             return SQLITE_NULL;
         }
+
+        // WORKAROUND: metadata_type 18 (collection/folder) causes std::bad_cast in Plex.
+        // Pretend the value is NULL so SOCI marks it isNull_=true and Plex can skip.
+        if (col_name && strstr(col_name, "metadata_type") != NULL && should_apply_type18_workaround(pg_stmt)) {
+            const char *val = PQgetvalue(pg_stmt->result, row, idx);
+            if (val && atoi(val) == 18) {
+                if (trace) {
+                    trace_badcast_log_ctx(pg_stmt, pStmt, idx, "column_type", "type18->NULL", row, 1, oid, col_name);
+                    LOG_ERROR("TRACE_BADCAST_TYPE18: column_type forced NULL for metadata_type 18 col='%s' idx=%d row=%d sql=%.200s",
+                              col_name, idx, row, pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
+                }
+                LOG_DEBUG("TYPE18_WORKAROUND: column_type forcing SQLITE_NULL for metadata_type 18 col='%s' idx=%d row=%d",
+                          col_name, idx, row);
+                pthread_mutex_unlock(&pg_stmt->mutex);
+                return SQLITE_NULL;
+            }
+        }
+
         int result = pg_oid_to_sqlite_type(oid);
         
         // ENHANCED LOGGING: Include decltype for comparison
@@ -908,9 +1227,16 @@ int my_sqlite3_column_type(sqlite3_stmt *pStmt, int idx) {
                 break;
         }
         
-    LOG_DEBUG("COLUMN_TYPE: idx=%d col='%s' row=%d OID=%u is_null=%d -> %s (decltype='%s')",
-            idx, col_name ? col_name : "?", row, (unsigned)oid, is_null, 
-            sqlite_type_name(result), col_decltype ? col_decltype : "NULL");
+        if (trace) {
+            trace_badcast_log_ctx(pg_stmt, pStmt, idx, "column_type", "live", row, 0, oid, col_name);
+            LOG_ERROR("TRACE_BADCAST: column_type idx=%d col='%s' row=%d oid=%u is_null=0 -> %s (guess_decltype='%s') sql=%.200s",
+                     idx, col_name ? col_name : "?", row, (unsigned)oid,
+                     sqlite_type_name(result), col_decltype ? col_decltype : "?",
+                     pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
+        }
+        LOG_DEBUG("COLUMN_TYPE: idx=%d col='%s' row=%d OID=%u is_null=%d -> %s (decltype='%s')",
+                idx, col_name ? col_name : "?", row, (unsigned)oid, is_null,
+                sqlite_type_name(result), col_decltype ? col_decltype : "NULL");
         pthread_mutex_unlock(&pg_stmt->mutex);
         return result;
     }
@@ -920,6 +1246,7 @@ int my_sqlite3_column_type(sqlite3_stmt *pStmt, int idx) {
 int my_sqlite3_column_int(sqlite3_stmt *pStmt, int idx) {
     validate_type_consistency(pStmt, idx, "column_int");
     pg_stmt_t *pg_stmt = pg_find_any_stmt(pStmt);
+    const int trace = trace_badcast_should_log(pg_stmt, idx);
     
     // Handle all PostgreSQL statements
     if (pg_stmt && pg_stmt->is_pg) {
@@ -973,6 +1300,13 @@ int my_sqlite3_column_int(sqlite3_stmt *pStmt, int idx) {
         int result_val = 0;
         const char *val = NULL;
         const char *col_name = PQfname(pg_stmt->result, idx);
+        Oid oid = PQftype(pg_stmt->result, idx);
+
+        if (trace && oid == 20) {
+            trace_badcast_log_ctx(pg_stmt, pStmt, idx, "column_int", "entry", row, 0, oid, col_name);
+            LOG_ERROR("TRACE_BADCAST_ACCESSOR: column_int called for oid=20 col='%s' idx=%d sql=%.200s",
+                      col_name ? col_name : "?", idx, pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
+        }
         
         if (!PQgetisnull(pg_stmt->result, row, idx)) {
             val = PQgetvalue(pg_stmt->result, row, idx);
@@ -982,11 +1316,20 @@ int my_sqlite3_column_int(sqlite3_stmt *pStmt, int idx) {
             
             // WORKAROUND: metadata_type 18 (collection/folder) causes std::bad_cast
             // When Plex loads related objects, it tries to cast Collection to Show/Episode
-            // Convert type 18 to NULL to make Plex skip these items
-            if (col_name && (strcmp(col_name, "metadata_items_metadata_type") == 0 || 
-                            strcmp(col_name, "metadata_type") == 0)) {
-                if (result_val == 18) {
+            // Convert type 18 to 0 to make Plex skip these items (only for related-query shape)
+            if (col_name && strstr(col_name, "metadata_type") != NULL) {
+                if (trace_badcast_should_log(pg_stmt, idx)) {
+                    trace_badcast_log_ctx(pg_stmt, pStmt, idx, "column_int", "metadata_type", row, 0, PQftype(pg_stmt->result, idx), col_name);
+                    LOG_ERROR("TRACE_BADCAST_METADATA_TYPE: accessor=column_int col='%s' idx=%d row=%d value=%d sql=%.200s",
+                              col_name, idx, row, result_val, pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
+                }
+                if (result_val == 18 && should_apply_type18_workaround(pg_stmt)) {
                     LOG_DEBUG("TYPE18_WORKAROUND: Converting metadata_type 18 (collection) to 0 for row %d to prevent std::bad_cast", row);
+                    if (trace_badcast_should_log(pg_stmt, idx)) {
+                        trace_badcast_log_ctx(pg_stmt, pStmt, idx, "column_int", "type18->0", row, 0, PQftype(pg_stmt->result, idx), col_name);
+                        LOG_ERROR("TRACE_BADCAST_TYPE18: column_int converted metadata_type 18->0 col='%s' idx=%d row=%d sql=%.200s",
+                                  col_name, idx, row, pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
+                    }
                     result_val = 0;  // Return 0 (invalid type) so Plex will skip
                 }
             }
@@ -1008,6 +1351,7 @@ int my_sqlite3_column_int(sqlite3_stmt *pStmt, int idx) {
 sqlite3_int64 my_sqlite3_column_int64(sqlite3_stmt *pStmt, int idx) {
     validate_type_consistency(pStmt, idx, "column_int64");
     pg_stmt_t *pg_stmt = pg_find_any_stmt(pStmt);
+    const int trace = trace_badcast_should_log(pg_stmt, idx);
     
     // Handle all PostgreSQL statements
     if (pg_stmt && pg_stmt->is_pg) {
@@ -1025,9 +1369,28 @@ sqlite3_int64 my_sqlite3_column_int64(sqlite3_stmt *pStmt, int idx) {
                     if (val[0] == 't' && val[1] == '\0') result_val = 1;
                     else if (val[0] == 'f' && val[1] == '\0') result_val = 0;
                     else result_val = atoll(val);
+
+                    // WORKAROUND: metadata_type 18 (collection/folder) causes std::bad_cast
+                    // Apply the same workaround as column_int(), but for int64 reads.
+                    const char *col_name = (idx < MAX_PARAMS && cached->col_names) ? cached->col_names[idx] : NULL;
+                    if (col_name && strstr(col_name, "metadata_type") != NULL) {
+                        if (trace_badcast_should_log(pg_stmt, idx)) {
+                            trace_badcast_log_ctx(pg_stmt, pStmt, idx, "column_int64", "metadata_type", row, 0, 0, col_name);
+                            LOG_ERROR("TRACE_BADCAST_METADATA_TYPE: accessor=column_int64(cached) col='%s' idx=%d row=%d value=%lld sql=%.200s",
+                                      col_name, idx, row, (long long)result_val, pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
+                        }
+                        if (result_val == 18 && should_apply_type18_workaround(pg_stmt)) {
+                            LOG_DEBUG("TYPE18_WORKAROUND_INT64_CACHED: Converting metadata_type 18 (collection) to 0 for row %d to prevent std::bad_cast", row);
+                            if (trace_badcast_should_log(pg_stmt, idx)) {
+                                trace_badcast_log_ctx(pg_stmt, pStmt, idx, "column_int64", "type18->0", row, 0, 0, col_name);
+                                LOG_ERROR("TRACE_BADCAST_TYPE18: column_int64 (cached) converted metadata_type 18->0 col='%s' idx=%d row=%d sql=%.200s",
+                                          col_name, idx, row, pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
+                            }
+                            result_val = 0;
+                        }
+                    }
                     
                     // TYPE_DEBUG: Enhanced logging for type-related columns (cached path)
-                    const char *col_name = (idx < MAX_PARAMS && cached->col_names) ? cached->col_names[idx] : NULL;
                     if (col_name && strstr(col_name, "type") != NULL) {
                         LOG_DEBUG("TYPE_DEBUG_INT64_CACHED: col='%s' idx=%d row=%d raw_val='%s' result=%lld sql=%.200s",
                                   col_name, idx, row, val, (long long)result_val,
@@ -1059,14 +1422,40 @@ sqlite3_int64 my_sqlite3_column_int64(sqlite3_stmt *pStmt, int idx) {
         }
 
         sqlite3_int64 result_val = 0;
+        const char *col_name = PQfname(pg_stmt->result, idx);
+        Oid oid = PQftype(pg_stmt->result, idx);
+
+        if (trace && oid == 20) {
+            trace_badcast_log_ctx(pg_stmt, pStmt, idx, "column_int64", "entry", row, 0, oid, col_name);
+            LOG_ERROR("TRACE_BADCAST_ACCESSOR: column_int64 called for oid=20 col='%s' idx=%d sql=%.200s",
+                      col_name ? col_name : "?", idx, pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
+        }
+
         if (!PQgetisnull(pg_stmt->result, row, idx)) {
             const char *val = PQgetvalue(pg_stmt->result, row, idx);
             if (val[0] == 't' && val[1] == '\0') result_val = 1;
             else if (val[0] == 'f' && val[1] == '\0') result_val = 0;
             else result_val = atoll(val);
+
+            // WORKAROUND: metadata_type 18 (collection/folder) causes std::bad_cast
+            if (col_name && strstr(col_name, "metadata_type") != NULL) {
+                if (trace_badcast_should_log(pg_stmt, idx)) {
+                    trace_badcast_log_ctx(pg_stmt, pStmt, idx, "column_int64", "metadata_type", row, 0, oid, col_name);
+                    LOG_ERROR("TRACE_BADCAST_METADATA_TYPE: accessor=column_int64 col='%s' idx=%d row=%d value=%lld sql=%.200s",
+                              col_name, idx, row, (long long)result_val, pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
+                }
+                if (result_val == 18 && should_apply_type18_workaround(pg_stmt)) {
+                    LOG_DEBUG("TYPE18_WORKAROUND_INT64: Converting metadata_type 18 (collection) to 0 for row %d to prevent std::bad_cast", row);
+                    if (trace_badcast_should_log(pg_stmt, idx)) {
+                        trace_badcast_log_ctx(pg_stmt, pStmt, idx, "column_int64", "type18->0", row, 0, oid, col_name);
+                        LOG_ERROR("TRACE_BADCAST_TYPE18: column_int64 converted metadata_type 18->0 col='%s' idx=%d row=%d sql=%.200s",
+                                  col_name, idx, row, pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
+                    }
+                    result_val = 0;
+                }
+            }
             
             // TYPE_DEBUG: Enhanced logging for type-related columns (non-cached path)
-            const char *col_name = PQfname(pg_stmt->result, idx);
             if (col_name && strstr(col_name, "type") != NULL) {
                 LOG_DEBUG("TYPE_DEBUG_INT64: col='%s' idx=%d row=%d raw_val='%s' result=%lld sql=%.200s",
                           col_name, idx, row, val ? val : "(NULL)", (long long)result_val,
@@ -1208,6 +1597,87 @@ static int validate_utf8_string(const char *str, size_t len) {
 static __thread char column_text_buffers[NUM_TEXT_BUFFERS][TEXT_BUFFER_SIZE];
 static __thread int column_text_buf_idx = 0;  // Thread-local, no atomic needed
 
+// Rewrite server://<machineId>/com.plexapp.plugins.library/library/... to library://...
+// Handles both standalone URIs and JSON-embedded URIs (e.g. inside pv:uri in extra_data).
+// Output never exceeds input length. Returns 1 if any rewrite was performed.
+static int rewrite_server_library_uri(const char *in, char *out, size_t out_len) {
+    if (!in || !out || out_len < 16) return 0;
+
+    static const char server_prefix[] = "server://";
+    static const size_t server_prefix_len = sizeof(server_prefix) - 1;
+    static const char needle[] = "/com.plexapp.plugins.library/library/";
+    static const size_t needle_len = sizeof(needle) - 1;
+    static const char replacement[] = "library://";
+    static const size_t replacement_len = sizeof(replacement) - 1;
+
+    // Quick check: does the string contain "server://" at all?
+    if (!strstr(in, server_prefix)) return 0;
+    // Does it also contain the plugin path?
+    if (!strstr(in, needle)) return 0;
+
+    // Walk the input, copying to output, rewriting each server:// URI match
+    size_t in_pos = 0;
+    size_t out_pos = 0;
+    size_t in_len = strlen(in);
+    int rewrites = 0;
+
+    while (in_pos < in_len) {
+        // Look for next "server://" from current position
+        const char *match = strstr(in + in_pos, server_prefix);
+        if (!match) {
+            // No more matches - copy rest of input
+            size_t remaining = in_len - in_pos;
+            if (out_pos + remaining >= out_len) remaining = out_len - out_pos - 1;
+            memcpy(out + out_pos, in + in_pos, remaining);
+            out_pos += remaining;
+            break;
+        }
+
+        // Copy everything before this "server://" match
+        size_t prefix_bytes = (size_t)(match - (in + in_pos));
+        if (out_pos + prefix_bytes >= out_len) {
+            // Not enough space - copy what fits and stop
+            size_t fits = out_len - out_pos - 1;
+            if (fits > 0) memcpy(out + out_pos, in + in_pos, fits);
+            out_pos += fits;
+            break;
+        }
+        memcpy(out + out_pos, in + in_pos, prefix_bytes);
+        out_pos += prefix_bytes;
+        in_pos += prefix_bytes;
+
+        // Now in_pos points to "server://"
+        // Find the needle "/com.plexapp.plugins.library/library/" after the server:// prefix
+        // The machineId is between "server://" and the needle
+        const char *needle_pos = strstr(in + in_pos + server_prefix_len, needle);
+        if (!needle_pos) {
+            // No plugin path after this server:// - copy "server://" literally and move on
+            size_t copy = server_prefix_len;
+            if (out_pos + copy >= out_len) copy = out_len - out_pos - 1;
+            memcpy(out + out_pos, in + in_pos, copy);
+            out_pos += copy;
+            in_pos += server_prefix_len;
+            continue;
+        }
+
+        // Replace "server://<machineId>/com.plexapp.plugins.library/library/" with "library://"
+        size_t full_prefix_len = (size_t)(needle_pos - (in + in_pos)) + needle_len;
+        if (out_pos + replacement_len >= out_len) break;
+        memcpy(out + out_pos, replacement, replacement_len);
+        out_pos += replacement_len;
+        in_pos += full_prefix_len;
+        rewrites++;
+    }
+
+    out[out_pos] = '\0';
+
+    if (rewrites > 0) {
+        LOG_DEBUG("URI_REWRITE: rewrote %d server:// -> library:// URIs (in_len=%zu out_len=%zu)",
+                  rewrites, in_len, out_pos);
+    }
+    return rewrites > 0 ? 1 : 0;
+}
+
 const unsigned char* my_sqlite3_column_text(sqlite3_stmt *pStmt, int idx) {
     validate_type_consistency(pStmt, idx, "column_text");
     
@@ -1240,6 +1710,7 @@ const unsigned char* my_sqlite3_column_text(sqlite3_stmt *pStmt, int idx) {
                 cached_row_t *crow = &cached->rows[row];
                 if (!crow->is_null[idx] && crow->values[idx]) {
                     source_value = crow->values[idx];
+
                     LOG_DEBUG("COLUMN_TEXT_CACHE_HIT: found cached value len=%zu", strlen(source_value));
                 }
             }
@@ -1297,6 +1768,7 @@ const unsigned char* my_sqlite3_column_text(sqlite3_stmt *pStmt, int idx) {
             
             // TYPE_DEBUG: Enhanced logging for type-related columns (column_text non-cached path)
             const char *col_name = PQfname(pg_stmt->result, idx);
+
             Oid oid = PQftype(pg_stmt->result, idx);
             
             // CRITICAL WARNING: column_text called for INTEGER column - this suggests SOCI type mismatch
@@ -1339,13 +1811,8 @@ const unsigned char* my_sqlite3_column_text(sqlite3_stmt *pStmt, int idx) {
             }
         }
 
-        // FIX v0.8.13: Copy strings to thread-local buffers instead of returning PQgetvalue() directly
-        // This addresses potential Boost.Locale issues where it may be sensitive to:
-        // - Memory alignment of source strings  
-        // - Presence of specific memory metadata
-        // - String buffer ownership semantics
-        // 
-        // By copying to our own buffers, we ensure consistent behavior similar to native SQLite.
+        // Copy strings to thread-local buffers instead of returning PQgetvalue() directly.
+        // This ensures consistent behavior similar to native SQLite (alignment, ownership).
         
         // Validate UTF-8 first
         size_t str_len = strlen(source_value);
@@ -1360,11 +1827,18 @@ const unsigned char* my_sqlite3_column_text(sqlite3_stmt *pStmt, int idx) {
             pthread_mutex_unlock(&pg_stmt->mutex);
             return result;
         }
-        
-        // Copy string to thread-local buffer
+
+        // Copy (or rewrite) into thread-local buffer
         int buf_idx = column_text_buf_idx;
         column_text_buf_idx = (column_text_buf_idx + 1) % NUM_TEXT_BUFFERS;
-        
+
+        if (rewrite_server_library_uri(source_value, column_text_buffers[buf_idx], TEXT_BUFFER_SIZE)) {
+            LOG_DEBUG("COLUMN_TEXT_URI_REWRITE: idx=%d row=%d '%.80s' -> '%.80s'",
+                      idx, pg_stmt->current_row, source_value, column_text_buffers[buf_idx]);
+            pthread_mutex_unlock(&pg_stmt->mutex);
+            return (const unsigned char*)column_text_buffers[buf_idx];
+        }
+
         size_t copy_len = (str_len < TEXT_BUFFER_SIZE - 1) ? str_len : (TEXT_BUFFER_SIZE - 1);
         memcpy(column_text_buffers[buf_idx], source_value, copy_len);
         column_text_buffers[buf_idx][copy_len] = '\0';
@@ -1580,6 +2054,7 @@ const char* my_sqlite3_column_name(sqlite3_stmt *pStmt, int idx) {
 const char* my_sqlite3_column_decltype(sqlite3_stmt *pStmt, int idx) {
     LOG_DEBUG("DECLTYPE_ENTRY: stmt=%p idx=%d", (void*)pStmt, idx);
     pg_stmt_t *pg_stmt = pg_find_any_stmt(pStmt);
+    const int trace_any = trace_badcast_should_log(pg_stmt, idx);
     // CRITICAL DEBUG: Log all decltype calls
     LOG_DEBUG("DECLTYPE_CALLED: stmt=%p idx=%d pg_stmt=%p is_pg=%d",
              (void*)pStmt, idx, (void*)pg_stmt, pg_stmt ? pg_stmt->is_pg : -1);
@@ -1592,6 +2067,10 @@ const char* my_sqlite3_column_decltype(sqlite3_stmt *pStmt, int idx) {
         if (!pg_stmt->result && !pg_stmt->cached_result && pg_stmt->pg_sql) {
             if (!ensure_pg_result_for_metadata(pg_stmt)) {
                 LOG_ERROR("COLUMN_DECLTYPE: failed to execute query for metadata, returning TEXT");
+                if (trace_any) {
+                    LOG_INFO("TRACE_BADCAST: column_decltype idx=%d -> TEXT (metadata exec failed) sql=%.200s",
+                             idx, pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
+                }
                 pthread_mutex_unlock(&pg_stmt->mutex);
                 return "TEXT";  // Safe fallback
             }
@@ -1601,11 +2080,17 @@ const char* my_sqlite3_column_decltype(sqlite3_stmt *pStmt, int idx) {
         if (!pg_stmt->result || idx < 0 || idx >= pg_stmt->num_cols) {
             LOG_DEBUG("DECLTYPE_NO_RESULT: result=%p idx=%d num_cols=%d, returning TEXT",
                      (void*)pg_stmt->result, idx, pg_stmt->num_cols);
+            if (trace_any) {
+                trace_badcast_log_ctx(pg_stmt, pStmt, idx, "column_decltype", "noresult", pg_stmt->current_row, 0, 0, NULL);
+                LOG_ERROR("TRACE_BADCAST: column_decltype idx=%d -> TEXT (no result / oob) sql=%.200s",
+                         idx, pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
+            }
             pthread_mutex_unlock(&pg_stmt->mutex);
             return "TEXT";  // Safe default that matches SQLITE_TEXT
         }
 
         const char *col_name = PQfname(pg_stmt->result, idx);
+        const int trace = trace_badcast_should_log_col(pg_stmt, idx, col_name);
         const char *cached_type = NULL;
         
         // Debug logging for metadata_type specifically
@@ -1654,28 +2139,103 @@ const char* my_sqlite3_column_decltype(sqlite3_stmt *pStmt, int idx) {
             LOG_DEBUG("DECLTYPE_CACHED: idx=%d col='%s' -> '%s' sql=%.300s",
                      idx, col_name ? col_name : "?", cached_type,
                      pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
+            if (trace) {
+                Oid oid = PQftype(pg_stmt->result, idx);
+                trace_badcast_log_ctx(pg_stmt, pStmt, idx, "column_decltype", "cached", pg_stmt->current_row, 0, oid, col_name);
+                LOG_ERROR("TRACE_BADCAST: column_decltype (cached) idx=%d col='%s' oid=%u -> '%s' sql=%.200s",
+                         idx, col_name ? col_name : "?", (unsigned)oid,
+                         cached_type, pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
+            }
             pthread_mutex_unlock(&pg_stmt->mutex);
             return cached_type;
         }
 
         // STEP 4: Fallback to OID-based type mapping
         Oid oid = PQftype(pg_stmt->result, idx);
+
+        // Plex uses a custom declared type for datetime columns in its SQLite schema:
+        //   dt_integer(8)
+        // When we emulate SQLite against PostgreSQL, preserving this decltype for
+        // timestamp-ish BIGINT columns avoids downstream type assumptions that can
+        // lead to std::bad_cast in Plex's DB layer.
+        if (oid == 20 && col_name) {
+            // Common Plex timestamp columns.
+            if (strstr(col_name, "_at") != NULL ||
+                strstr(col_name, "timestamp") != NULL ||
+                strstr(col_name, "time") != NULL) {
+                if (trace) {
+                    trace_badcast_log_ctx(pg_stmt, pStmt, idx, "column_decltype", "dt_integer(8)", pg_stmt->current_row, 0, oid, col_name);
+                }
+                pthread_mutex_unlock(&pg_stmt->mutex);
+                return "dt_integer(8)";
+            }
+
+            // Special-case the metadata_items refresh query:
+            //   select GREATEST(max(metadata_items.changed_at), max(metadata_items.resources_changed_at)) ...
+            // The result is a Plex datetime int8.
+            if (strcmp(col_name, "greatest") == 0 && pg_stmt->pg_sql &&
+                strstr(pg_stmt->pg_sql, "metadata_items.changed_at") != NULL) {
+                if (trace) {
+                    trace_badcast_log_ctx(pg_stmt, pStmt, idx, "column_decltype", "dt_integer(8)", pg_stmt->current_row, 0, oid, col_name);
+                }
+                pthread_mutex_unlock(&pg_stmt->mutex);
+                return "dt_integer(8)";
+            }
+        }
         
         // SPECIAL CASE: Aggregate functions (count, sum, max, min, avg) 
         // PostgreSQL returns BIGINT (OID 20) for aggregates
-        // SOCI needs BIGINT (not INTEGER) to map to db_int64 for proper 64-bit handling
-        // This was the root cause: INTEGER -> db_int32 -> row.get<int64_t>() -> std::bad_cast
+        // Different Plex call sites expect different widths. In practice:
+        // - count(*) is often consumed as a 32-bit INTEGER
+        // - other aggregates (sum/max/min/avg) may require 64-bit handling
         if (col_name && oid == 20) {
-            if (strcmp(col_name, "count") == 0 ||
-                strcmp(col_name, "sum") == 0 ||
+            const int is_countish =
+                strcmp(col_name, "count") == 0 ||
+                strcmp(col_name, "cnt") == 0 ||
+                strstr(col_name, "count(") != NULL ||
+                strstr(col_name, "COUNT(") != NULL ||
+                (pg_stmt->pg_sql && (strstr(pg_stmt->pg_sql, "count(") != NULL || strstr(pg_stmt->pg_sql, "COUNT(") != NULL));
+
+            if (is_countish) {
+                const int has_table = (idx < MAX_PARAMS && pg_stmt->col_table_names[idx]);
+                // Native SQLite returns NULL decltype for computed expressions like count(*).
+                // Matching that behavior avoids SOCI/Plex making incorrect type assumptions.
+                if (!has_table) {
+                    if (trace) {
+                        trace_badcast_log_ctx(pg_stmt, pStmt, idx, "column_decltype", "NULL", pg_stmt->current_row, 0, oid, col_name);
+                    }
+                    LOG_DEBUG("DECLTYPE_AGGREGATE: col='%s' OID=20 (count expr) -> returning NULL", col_name);
+                    pthread_mutex_unlock(&pg_stmt->mutex);
+                    return NULL;
+                }
+                if (trace) {
+                    trace_badcast_log_ctx(pg_stmt, pStmt, idx, "column_decltype", "INTEGER", pg_stmt->current_row, 0, oid, col_name);
+                }
+                LOG_DEBUG("DECLTYPE_AGGREGATE: col='%s' OID=20 (BIGINT/count) -> returning INTEGER", col_name);
+                pthread_mutex_unlock(&pg_stmt->mutex);
+                return "INTEGER";
+            }
+
+            // For other aggregates returning int8, keep Plex's 8-byte token.
+            if (strcmp(col_name, "sum") == 0 ||
                 strcmp(col_name, "max") == 0 ||
                 strcmp(col_name, "min") == 0 ||
-                strcmp(col_name, "avg") == 0 ||
-                strstr(col_name, "count(") != NULL ||
-                strstr(col_name, "COUNT(") != NULL) {
-                LOG_DEBUG("DECLTYPE_AGGREGATE: col='%s' OID=20 (BIGINT) -> returning TEXT to avoid SOCI bad_cast bug", col_name);
+                strcmp(col_name, "avg") == 0) {
+                const int has_table = (idx < MAX_PARAMS && pg_stmt->col_table_names[idx]);
+                if (!has_table) {
+                    if (trace) {
+                        trace_badcast_log_ctx(pg_stmt, pStmt, idx, "column_decltype", "NULL", pg_stmt->current_row, 0, oid, col_name);
+                    }
+                    LOG_DEBUG("DECLTYPE_AGGREGATE: col='%s' OID=20 (agg expr) -> returning NULL", col_name);
+                    pthread_mutex_unlock(&pg_stmt->mutex);
+                    return NULL;
+                }
+                if (trace) {
+                    trace_badcast_log_ctx(pg_stmt, pStmt, idx, "column_decltype", "dt_integer(8)", pg_stmt->current_row, 0, oid, col_name);
+                }
+                LOG_DEBUG("DECLTYPE_AGGREGATE: col='%s' OID=20 (BIGINT/agg) -> returning dt_integer(8)", col_name);
                 pthread_mutex_unlock(&pg_stmt->mutex);
-                return "TEXT";  // WORKAROUND: Force TEXT to avoid SOCI integer parsing bug
+                return "dt_integer(8)";
             }
         }
         
@@ -1683,6 +2243,13 @@ const char* my_sqlite3_column_decltype(sqlite3_stmt *pStmt, int idx) {
         // CRITICAL: This function now differentiates INT4 (OID 23) -> "INTEGER" 
         //           from INT8 (OID 20) -> "BIGINT" to prevent std::bad_cast
         const char *decltype = pg_oid_to_sqlite_decltype(oid);
+
+        if (trace) {
+            trace_badcast_log_ctx(pg_stmt, pStmt, idx, "column_decltype", "oid", pg_stmt->current_row, 0, oid, col_name);
+            LOG_ERROR("TRACE_BADCAST: column_decltype idx=%d col='%s' oid=%u -> '%s' sql=%.200s",
+                     idx, col_name ? col_name : "?", (unsigned)oid,
+                     decltype ? decltype : "(null)", pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
+        }
 
         // LOG INT8 vs INT4 detection (for debugging type issues)
         if (strcmp(decltype, "BIGINT") == 0 || strcmp(decltype, "INTEGER") == 0) {
