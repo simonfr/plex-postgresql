@@ -308,40 +308,28 @@ int my_sqlite3_prepare_v2_internal(sqlite3 *db, const char *zSql, int nByte,
         LOG_ERROR("TRACE_PREPARE_SQL: %.700s", zSql);
     }
 
-    // WORKAROUND: Plex DatabaseFixupsSyncCollections runs a cleanup query that attempts
-    // to join tags by (tag, tag_type) to repair empty keys. Under the PG shim, this
-    // code path consistently triggers std::bad_cast in Plex (MetadataCollection.cpp:522).
-    // Returning an empty result set makes Plex skip the cleanup, allowing the rest of
-    // the server to function normally.
+    // SyncCollections compat: two query shapes trigger std::bad_cast in Plex
+    // (MetadataCollection.cpp) under the PG shim. Return empty result sets so
+    // the fixup skips these paths — Plex logs counts and continues startup.
     if (zSql && strcasestr(zSql, "blankKeyTaggingId") && strcasestr(zSql, "nonblankKeyId") &&
         strcasestr(zSql, "otherTags") && strcasestr(zSql, "tags.key = ''")) {
-        LOG_ERROR("WORKAROUND: Skipping SyncCollections blank-key cleanup query (returning empty)");
-        if (real_sqlite3_prepare_v2) {
-            // Keep one bind parameter so Plex's binds don't fail.
+        LOG_DEBUG("COMPAT: skipping SyncCollections blank-key cleanup (empty result)");
+        if (real_sqlite3_prepare_v2)
             return real_sqlite3_prepare_v2(db, "SELECT 1 WHERE 0 AND ?1=?1", -1, ppStmt, pzTail);
-        }
         if (ppStmt) *ppStmt = NULL;
         if (pzTail) *pzTail = NULL;
         return SQLITE_ERROR;
     }
-
-    // WORKAROUND: The following SyncCollections tag aggregation queries are the last SQL
-    // prepared before Plex throws std::bad_cast in MetadataCollection.cpp:522.
-    // Until we have a reliable type/row-shape fix, return empty results so the fixup
-    // skips this path (Plex already logs counts and continues startup).
     if (zSql && strcasestr(zSql, "from tags") && strcasestr(zSql, "join taggings") &&
         strcasestr(zSql, "library_section_id=") && strcasestr(zSql, "metadata_items.metadata_type") &&
-        strcasestr(zSql, "tag_type=2") && strcasestr(zSql, "group by tags.id")) {
-        if (strcasestr(zSql, "count(*)") || strcasestr(zSql, "select tags.id from")) {
-            LOG_ERROR("WORKAROUND: Skipping SyncCollections collection-tag aggregation query (returning empty)");
-            if (real_sqlite3_prepare_v2) {
-                // Keep two bind parameters so Plex's binds don't fail.
-                return real_sqlite3_prepare_v2(db, "SELECT 1 WHERE 0 AND ?1=?1 AND ?2=?2", -1, ppStmt, pzTail);
-            }
-            if (ppStmt) *ppStmt = NULL;
-            if (pzTail) *pzTail = NULL;
-            return SQLITE_ERROR;
-        }
+        strcasestr(zSql, "tag_type=2") && strcasestr(zSql, "group by tags.id") &&
+        (strcasestr(zSql, "count(*)") || strcasestr(zSql, "select tags.id from"))) {
+        LOG_DEBUG("COMPAT: skipping SyncCollections tag aggregation (empty result)");
+        if (real_sqlite3_prepare_v2)
+            return real_sqlite3_prepare_v2(db, "SELECT 1 WHERE 0 AND ?1=?1 AND ?2=?2", -1, ppStmt, pzTail);
+        if (ppStmt) *ppStmt = NULL;
+        if (pzTail) *pzTail = NULL;
+        return SQLITE_ERROR;
     }
     // HANDLE ALTER TABLE ADD COLUMN: Skip if column already exists
     // This prevents "duplicate column name" errors when Plex reruns migrations

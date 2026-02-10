@@ -1006,18 +1006,26 @@ static int trace_badcast_should_log_col(const pg_stmt_t *pg_stmt, int idx, const
     return trace_badcast_col_ok(col_name);
 }
 
-// Some Plex queries (notably related-items lookups) include collection/folder rows
-// (metadata_type=18) but then attempt to dynamic_cast them to other metadata item
-// types and crash with std::bad_cast. Other code paths (e.g. SyncCollections fixups)
-// legitimately need to read metadata_type=18 and must not be affected.
-//
-// We scope the workaround to only the known "related" query shape.
-static int should_apply_type18_workaround(const pg_stmt_t *pg_stmt) {
+// Plex related-items queries include collection/folder rows (metadata_type=18)
+// but then dynamic_cast them to Show/Episode and crash with std::bad_cast.
+// We mask type 18 only for the known "related" query shape so other code paths
+// (e.g. SyncCollections) can still read it normally.
+static int is_related_items_query(const pg_stmt_t *pg_stmt) {
     if (!pg_stmt || !pg_stmt->pg_sql) return 0;
-    const char *sql = pg_stmt->pg_sql;
-    // Observed shape for /library/metadata/<id>/related queries.
-    if (strstr(sql, "taggings as related") != NULL) return 1;
-    return 0;
+    return strstr(pg_stmt->pg_sql, "taggings as related") != NULL;
+}
+
+// Check if a metadata_type column value should be masked.
+// Returns 1 (and sets *out to the masked value) if masking applies, 0 otherwise.
+static int mask_collection_metadata_type(const pg_stmt_t *pg_stmt, const char *col_name,
+                                         long long raw_val, long long *out) {
+    if (raw_val != 18) return 0;
+    if (!col_name || !strstr(col_name, "metadata_type")) return 0;
+    if (!is_related_items_query(pg_stmt)) return 0;
+    LOG_DEBUG("COMPAT_TYPE18: masking metadata_type 18 -> 0 for related-items query, row %d",
+              pg_stmt->current_row);
+    *out = 0;
+    return 1;
 }
 
 // Type consistency validation helper
@@ -1113,18 +1121,10 @@ int my_sqlite3_column_type(sqlite3_stmt *pStmt, int idx) {
                     return SQLITE_NULL;
                 }
 
-                // WORKAROUND: metadata_type 18 (collection/folder) causes std::bad_cast in Plex.
-                // Pretend the value is NULL so SOCI marks it isNull_=true and Plex can skip.
-                if (cname && strstr(cname, "metadata_type") != NULL && crow->values[idx] && should_apply_type18_workaround(pg_stmt)) {
-                    if (atoi(crow->values[idx]) == 18) {
-                        if (trace) {
-                            trace_badcast_log_ctx(pg_stmt, pStmt, idx, "column_type", "type18->NULL(cached)", row, 1,
-                                                  cached->col_types[idx], cname);
-                            LOG_ERROR("TRACE_BADCAST_TYPE18: column_type (cached) forced NULL for metadata_type 18 col='%s' idx=%d row=%d sql=%.200s",
-                                      cname, idx, row, pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
-                        }
-                        LOG_DEBUG("TYPE18_WORKAROUND: column_type (cached) forcing SQLITE_NULL for metadata_type 18 col='%s' idx=%d row=%d",
-                                  cname, idx, row);
+                // Mask collection type 18 -> NULL so SOCI marks isNull_=true and Plex skips the row.
+                if (crow->values[idx]) {
+                    long long masked;
+                    if (mask_collection_metadata_type(pg_stmt, cname, atoi(crow->values[idx]), &masked)) {
                         pthread_mutex_unlock(&pg_stmt->mutex);
                         return SQLITE_NULL;
                     }
@@ -1187,18 +1187,11 @@ int my_sqlite3_column_type(sqlite3_stmt *pStmt, int idx) {
             return SQLITE_NULL;
         }
 
-        // WORKAROUND: metadata_type 18 (collection/folder) causes std::bad_cast in Plex.
-        // Pretend the value is NULL so SOCI marks it isNull_=true and Plex can skip.
-        if (col_name && strstr(col_name, "metadata_type") != NULL && should_apply_type18_workaround(pg_stmt)) {
+        // Mask collection type 18 -> NULL so SOCI marks isNull_=true and Plex skips the row.
+        {
             const char *val = PQgetvalue(pg_stmt->result, row, idx);
-            if (val && atoi(val) == 18) {
-                if (trace) {
-                    trace_badcast_log_ctx(pg_stmt, pStmt, idx, "column_type", "type18->NULL", row, 1, oid, col_name);
-                    LOG_ERROR("TRACE_BADCAST_TYPE18: column_type forced NULL for metadata_type 18 col='%s' idx=%d row=%d sql=%.200s",
-                              col_name, idx, row, pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
-                }
-                LOG_DEBUG("TYPE18_WORKAROUND: column_type forcing SQLITE_NULL for metadata_type 18 col='%s' idx=%d row=%d",
-                          col_name, idx, row);
+            long long masked;
+            if (val && mask_collection_metadata_type(pg_stmt, col_name, atoi(val), &masked)) {
                 pthread_mutex_unlock(&pg_stmt->mutex);
                 return SQLITE_NULL;
             }
@@ -1314,24 +1307,10 @@ int my_sqlite3_column_int(sqlite3_stmt *pStmt, int idx) {
             else if (val[0] == 'f' && val[1] == '\0') result_val = 0;
             else result_val = atoi(val);
             
-            // WORKAROUND: metadata_type 18 (collection/folder) causes std::bad_cast
-            // When Plex loads related objects, it tries to cast Collection to Show/Episode
-            // Convert type 18 to 0 to make Plex skip these items (only for related-query shape)
-            if (col_name && strstr(col_name, "metadata_type") != NULL) {
-                if (trace_badcast_should_log(pg_stmt, idx)) {
-                    trace_badcast_log_ctx(pg_stmt, pStmt, idx, "column_int", "metadata_type", row, 0, PQftype(pg_stmt->result, idx), col_name);
-                    LOG_ERROR("TRACE_BADCAST_METADATA_TYPE: accessor=column_int col='%s' idx=%d row=%d value=%d sql=%.200s",
-                              col_name, idx, row, result_val, pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
-                }
-                if (result_val == 18 && should_apply_type18_workaround(pg_stmt)) {
-                    LOG_DEBUG("TYPE18_WORKAROUND: Converting metadata_type 18 (collection) to 0 for row %d to prevent std::bad_cast", row);
-                    if (trace_badcast_should_log(pg_stmt, idx)) {
-                        trace_badcast_log_ctx(pg_stmt, pStmt, idx, "column_int", "type18->0", row, 0, PQftype(pg_stmt->result, idx), col_name);
-                        LOG_ERROR("TRACE_BADCAST_TYPE18: column_int converted metadata_type 18->0 col='%s' idx=%d row=%d sql=%.200s",
-                                  col_name, idx, row, pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
-                    }
-                    result_val = 0;  // Return 0 (invalid type) so Plex will skip
-                }
+            {
+                long long masked;
+                if (mask_collection_metadata_type(pg_stmt, col_name, result_val, &masked))
+                    result_val = (int)masked;
             }
         }
         
@@ -1370,33 +1349,13 @@ sqlite3_int64 my_sqlite3_column_int64(sqlite3_stmt *pStmt, int idx) {
                     else if (val[0] == 'f' && val[1] == '\0') result_val = 0;
                     else result_val = atoll(val);
 
-                    // WORKAROUND: metadata_type 18 (collection/folder) causes std::bad_cast
-                    // Apply the same workaround as column_int(), but for int64 reads.
-                    const char *col_name = (idx < MAX_PARAMS && cached->col_names) ? cached->col_names[idx] : NULL;
-                    if (col_name && strstr(col_name, "metadata_type") != NULL) {
-                        if (trace_badcast_should_log(pg_stmt, idx)) {
-                            trace_badcast_log_ctx(pg_stmt, pStmt, idx, "column_int64", "metadata_type", row, 0, 0, col_name);
-                            LOG_ERROR("TRACE_BADCAST_METADATA_TYPE: accessor=column_int64(cached) col='%s' idx=%d row=%d value=%lld sql=%.200s",
-                                      col_name, idx, row, (long long)result_val, pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
-                        }
-                        if (result_val == 18 && should_apply_type18_workaround(pg_stmt)) {
-                            LOG_DEBUG("TYPE18_WORKAROUND_INT64_CACHED: Converting metadata_type 18 (collection) to 0 for row %d to prevent std::bad_cast", row);
-                            if (trace_badcast_should_log(pg_stmt, idx)) {
-                                trace_badcast_log_ctx(pg_stmt, pStmt, idx, "column_int64", "type18->0", row, 0, 0, col_name);
-                                LOG_ERROR("TRACE_BADCAST_TYPE18: column_int64 (cached) converted metadata_type 18->0 col='%s' idx=%d row=%d sql=%.200s",
-                                          col_name, idx, row, pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
-                            }
-                            result_val = 0;
-                        }
+                    {
+                        const char *col_name = (idx < MAX_PARAMS && cached->col_names) ? cached->col_names[idx] : NULL;
+                        long long masked;
+                        if (mask_collection_metadata_type(pg_stmt, col_name, result_val, &masked))
+                            result_val = masked;
                     }
-                    
-                    // TYPE_DEBUG: Enhanced logging for type-related columns (cached path)
-                    if (col_name && strstr(col_name, "type") != NULL) {
-                        LOG_DEBUG("TYPE_DEBUG_INT64_CACHED: col='%s' idx=%d row=%d raw_val='%s' result=%lld sql=%.200s",
-                                  col_name, idx, row, val, (long long)result_val,
-                                  pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
-                    }
-                    
+
                     pthread_mutex_unlock(&pg_stmt->mutex);
                     return result_val;
                 }
@@ -1437,22 +1396,10 @@ sqlite3_int64 my_sqlite3_column_int64(sqlite3_stmt *pStmt, int idx) {
             else if (val[0] == 'f' && val[1] == '\0') result_val = 0;
             else result_val = atoll(val);
 
-            // WORKAROUND: metadata_type 18 (collection/folder) causes std::bad_cast
-            if (col_name && strstr(col_name, "metadata_type") != NULL) {
-                if (trace_badcast_should_log(pg_stmt, idx)) {
-                    trace_badcast_log_ctx(pg_stmt, pStmt, idx, "column_int64", "metadata_type", row, 0, oid, col_name);
-                    LOG_ERROR("TRACE_BADCAST_METADATA_TYPE: accessor=column_int64 col='%s' idx=%d row=%d value=%lld sql=%.200s",
-                              col_name, idx, row, (long long)result_val, pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
-                }
-                if (result_val == 18 && should_apply_type18_workaround(pg_stmt)) {
-                    LOG_DEBUG("TYPE18_WORKAROUND_INT64: Converting metadata_type 18 (collection) to 0 for row %d to prevent std::bad_cast", row);
-                    if (trace_badcast_should_log(pg_stmt, idx)) {
-                        trace_badcast_log_ctx(pg_stmt, pStmt, idx, "column_int64", "type18->0", row, 0, oid, col_name);
-                        LOG_ERROR("TRACE_BADCAST_TYPE18: column_int64 converted metadata_type 18->0 col='%s' idx=%d row=%d sql=%.200s",
-                                  col_name, idx, row, pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
-                    }
-                    result_val = 0;
-                }
+            {
+                long long masked;
+                if (mask_collection_metadata_type(pg_stmt, col_name, result_val, &masked))
+                    result_val = masked;
             }
             
             // TYPE_DEBUG: Enhanced logging for type-related columns (non-cached path)
