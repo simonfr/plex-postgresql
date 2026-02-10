@@ -8,8 +8,93 @@
 #define _GNU_SOURCE
 
 #include "db_interpose.h"
+#include "sql_translator_internal.h"
 #include <time.h>
 #include <sys/time.h>
+
+static char *maybe_alias_collection_sync_aggregates(const char *sqlite_sql, const char *pg_sql);
+
+// ---------------------------------------------------------------------------
+// Targeted SQL prepare tracing (low volume)
+//
+// Logs SQL strings at prepare time, before any row/column access happens.
+// This is useful when Plex throws std::bad_cast outside of sqlite3_column_* paths.
+//
+// Configure via:
+//   PLEX_PG_TRACE_PREPARE_SQL_CONTAINS="tags,taggings,collections"
+// or:
+//   /tmp/plex_pg_trace_prepare_sql_contains
+// ---------------------------------------------------------------------------
+
+static int trace_prepare_sql_enabled = -1;
+static const char *trace_prepare_sql_contains = NULL;
+static char trace_prepare_sql_file_buf[256];
+
+static const char *read_trace_prepare_file_first_line(const char *path, char *buf, size_t buf_len) {
+    if (!path || !buf || buf_len < 2) return NULL;
+    buf[0] = '\0';
+
+    FILE *f = fopen(path, "r");
+    if (!f) return NULL;
+    if (!fgets(buf, (int)buf_len, f)) {
+        fclose(f);
+        return NULL;
+    }
+    fclose(f);
+
+    size_t n = strlen(buf);
+    while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r' || buf[n - 1] == ' ' || buf[n - 1] == '\t')) {
+        buf[--n] = '\0';
+    }
+    char *p = buf;
+    while (*p == ' ' || *p == '\t') p++;
+    if (p != buf) memmove(buf, p, strlen(p) + 1);
+    return buf[0] ? buf : NULL;
+}
+
+static void trace_prepare_sql_init(void) {
+    if (trace_prepare_sql_enabled != -1) return;
+
+    trace_prepare_sql_contains = getenv("PLEX_PG_TRACE_PREPARE_SQL_CONTAINS");
+    if (!trace_prepare_sql_contains || !trace_prepare_sql_contains[0]) {
+        trace_prepare_sql_contains = read_trace_prepare_file_first_line(
+            "/tmp/plex_pg_trace_prepare_sql_contains",
+            trace_prepare_sql_file_buf,
+            sizeof(trace_prepare_sql_file_buf)
+        );
+    }
+    trace_prepare_sql_enabled = (trace_prepare_sql_contains && trace_prepare_sql_contains[0]) ? 1 : 0;
+}
+
+static int trace_prepare_sql_ok(const char *sql) {
+    trace_prepare_sql_init();
+    if (!trace_prepare_sql_enabled) return 0;
+    if (!sql || !sql[0]) return 0;
+
+    // Comma/semicolon separated list of substrings; any match enables logging.
+    const char *p = trace_prepare_sql_contains;
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == ',' || *p == ';') p++;
+        if (!*p) break;
+        const char *start = p;
+        while (*p && *p != ',' && *p != ';' && *p != '\n') p++;
+        size_t len = (size_t)(p - start);
+        if (len > 0) {
+            char token[128];
+            if (len >= sizeof(token)) len = sizeof(token) - 1;
+            memcpy(token, start, len);
+            token[len] = '\0';
+            if (token[0] && strstr(sql, token) != NULL) return 1;
+        }
+    }
+    return 0;
+}
+
+static void trace_prepare_pgsql_if_enabled(const char *sqlite_sql, const char *pg_sql) {
+    if (!trace_prepare_sql_ok(sqlite_sql)) return;
+    if (!pg_sql) return;
+    LOG_ERROR("TRACE_PREPARE_PGSQL: %.900s", pg_sql);
+}
 
 // ============================================================================
 // Query Loop Detection
@@ -219,6 +304,45 @@ static int column_exists_in_sqlite(sqlite3 *db, const char *table_name, const ch
 int my_sqlite3_prepare_v2_internal(sqlite3 *db, const char *zSql, int nByte,
                                    sqlite3_stmt **ppStmt, const char **pzTail,
                                    int from_worker) {
+    if (trace_prepare_sql_ok(zSql)) {
+        LOG_ERROR("TRACE_PREPARE_SQL: %.700s", zSql);
+    }
+
+    // WORKAROUND: Plex DatabaseFixupsSyncCollections runs a cleanup query that attempts
+    // to join tags by (tag, tag_type) to repair empty keys. Under the PG shim, this
+    // code path consistently triggers std::bad_cast in Plex (MetadataCollection.cpp:522).
+    // Returning an empty result set makes Plex skip the cleanup, allowing the rest of
+    // the server to function normally.
+    if (zSql && strcasestr(zSql, "blankKeyTaggingId") && strcasestr(zSql, "nonblankKeyId") &&
+        strcasestr(zSql, "otherTags") && strcasestr(zSql, "tags.key = ''")) {
+        LOG_ERROR("WORKAROUND: Skipping SyncCollections blank-key cleanup query (returning empty)");
+        if (real_sqlite3_prepare_v2) {
+            // Keep one bind parameter so Plex's binds don't fail.
+            return real_sqlite3_prepare_v2(db, "SELECT 1 WHERE 0 AND ?1=?1", -1, ppStmt, pzTail);
+        }
+        if (ppStmt) *ppStmt = NULL;
+        if (pzTail) *pzTail = NULL;
+        return SQLITE_ERROR;
+    }
+
+    // WORKAROUND: The following SyncCollections tag aggregation queries are the last SQL
+    // prepared before Plex throws std::bad_cast in MetadataCollection.cpp:522.
+    // Until we have a reliable type/row-shape fix, return empty results so the fixup
+    // skips this path (Plex already logs counts and continues startup).
+    if (zSql && strcasestr(zSql, "from tags") && strcasestr(zSql, "join taggings") &&
+        strcasestr(zSql, "library_section_id=") && strcasestr(zSql, "metadata_items.metadata_type") &&
+        strcasestr(zSql, "tag_type=2") && strcasestr(zSql, "group by tags.id")) {
+        if (strcasestr(zSql, "count(*)") || strcasestr(zSql, "select tags.id from")) {
+            LOG_ERROR("WORKAROUND: Skipping SyncCollections collection-tag aggregation query (returning empty)");
+            if (real_sqlite3_prepare_v2) {
+                // Keep two bind parameters so Plex's binds don't fail.
+                return real_sqlite3_prepare_v2(db, "SELECT 1 WHERE 0 AND ?1=?1 AND ?2=?2", -1, ppStmt, pzTail);
+            }
+            if (ppStmt) *ppStmt = NULL;
+            if (pzTail) *pzTail = NULL;
+            return SQLITE_ERROR;
+        }
+    }
     // HANDLE ALTER TABLE ADD COLUMN: Skip if column already exists
     // This prevents "duplicate column name" errors when Plex reruns migrations
     if (zSql && strcasestr(zSql, "ALTER TABLE") && strcasestr(zSql, " ADD ")) {
@@ -418,8 +542,11 @@ int my_sqlite3_prepare_v2_internal(sqlite3 *db, const char *zSql, int nByte,
                     // Translate query for PostgreSQL
                     sql_translation_t trans = sql_translate(zSql);
                     if (trans.success && trans.sql) {
-                        pg_stmt->pg_sql = strdup(trans.sql);
+                        char *aliased = maybe_alias_collection_sync_aggregates(zSql, trans.sql);
+                        pg_stmt->pg_sql = strdup(aliased ? aliased : trans.sql);
+                        if (aliased) free(aliased);
                         pg_stmt->param_count = trans.param_count;
+                        trace_prepare_pgsql_if_enabled(zSql, pg_stmt->pg_sql);
                         LOG_INFO("STACK LOW OnDeck: routed to PG: %.100s", trans.sql);
                     }
                     sql_translation_free(&trans);
@@ -477,8 +604,11 @@ int my_sqlite3_prepare_v2_internal(sqlite3 *db, const char *zSql, int nByte,
                     // Translate the query
                     sql_translation_t trans = sql_translate(zSql);
                     if (trans.success && trans.sql) {
-                        pg_stmt->pg_sql = strdup(trans.sql);
+                        char *aliased = maybe_alias_collection_sync_aggregates(zSql, trans.sql);
+                        pg_stmt->pg_sql = strdup(aliased ? aliased : trans.sql);
+                        if (aliased) free(aliased);
                         pg_stmt->param_count = trans.param_count;
+                        trace_prepare_pgsql_if_enabled(zSql, pg_stmt->pg_sql);
 
                         // Store parameter names
                         if (trans.param_names && trans.param_count > 0) {
@@ -708,8 +838,11 @@ int my_sqlite3_prepare_v2_internal(sqlite3 *db, const char *zSql, int nByte,
                 }
 
                 if (trans.success && trans.sql) {
-                    pg_stmt->pg_sql = strdup(trans.sql);
-                    
+                    char *aliased = maybe_alias_collection_sync_aggregates(zSql, trans.sql);
+                    pg_stmt->pg_sql = strdup(aliased ? aliased : trans.sql);
+                    if (aliased) free(aliased);
+                    trace_prepare_pgsql_if_enabled(zSql, pg_stmt->pg_sql);
+                     
                     // PERFORMANCE FIX: Cache count query detection at prepare time (not per-row)
                     // This avoids expensive strstr() calls in my_sqlite3_column_text()
                     pg_stmt->is_count_query = (pg_stmt->pg_sql && 
@@ -768,6 +901,71 @@ int my_sqlite3_prepare_v2_internal(sqlite3 *db, const char *zSql, int nByte,
     if (cleaned_sql) free(cleaned_sql);
     prepare_v2_depth--;  // Decrement before return
     return rc;
+}
+
+// Plex SyncCollections uses a query that selects aggregate expressions without
+// explicit aliases: count(*), min(year), max(year). SQLite exposes the full
+// expression text via sqlite3_column_name() (e.g. "min(year)"). PostgreSQL
+// reports only the function name ("min"/"max"/"count") unless an alias is
+// provided, which can break Plex's row mapping and lead to std::bad_cast.
+//
+// This helper adds explicit aliases matching SQLite's column names.
+static char *maybe_alias_collection_sync_aggregates(const char *sqlite_sql, const char *pg_sql) {
+    if (!sqlite_sql || !pg_sql) return NULL;
+
+    // Narrow trigger: the specific query shape seen during DatabaseFixupsSyncCollections.
+    if (!(strcasestr(sqlite_sql, "min(year)") && strcasestr(sqlite_sql, "max(year)") && strcasestr(sqlite_sql, "count(*)"))) {
+        return NULL;
+    }
+    if (!strcasestr(sqlite_sql, "from tags") || !strcasestr(sqlite_sql, "join taggings") || !strcasestr(sqlite_sql, "group by tags.id")) {
+        return NULL;
+    }
+
+    const char *sel = strcasestr(pg_sql, "select");
+    if (!sel) return NULL;
+    const char *from = strcasestr(sel, " from ");
+    if (!from) return NULL;
+
+    size_t prefix_len = (size_t)(sel - pg_sql);
+    size_t select_len = (size_t)(from - sel);
+    size_t suffix_len = strlen(from);
+
+    char *select_part = (char *)malloc(select_len + 1);
+    if (!select_part) return NULL;
+    memcpy(select_part, sel, select_len);
+    select_part[select_len] = '\0';
+
+    // Only rewrite in the SELECT list.
+    char *tmp = str_replace_nocase(select_part, "count(*)", "count(*) AS \"count(*)\"");
+    if (!tmp) {
+        free(select_part);
+        return NULL;
+    }
+    char *tmp2 = str_replace_nocase(tmp, "min(year)", "min(year) AS \"min(year)\"");
+    free(tmp);
+    if (!tmp2) {
+        free(select_part);
+        return NULL;
+    }
+    char *tmp3 = str_replace_nocase(tmp2, "max(year)", "max(year) AS \"max(year)\"");
+    free(tmp2);
+    free(select_part);
+    if (!tmp3) return NULL;
+
+    // Reassemble full SQL.
+    size_t new_len = prefix_len + strlen(tmp3) + suffix_len;
+    char *out = (char *)malloc(new_len + 1);
+    if (!out) {
+        free(tmp3);
+        return NULL;
+    }
+
+    if (prefix_len) memcpy(out, pg_sql, prefix_len);
+    memcpy(out + prefix_len, tmp3, strlen(tmp3));
+    memcpy(out + prefix_len + strlen(tmp3), from, suffix_len);
+    out[new_len] = '\0';
+    free(tmp3);
+    return out;
 }
 
 // ============================================================================
