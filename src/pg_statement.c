@@ -7,6 +7,7 @@
 #include "pg_logging.h"
 #include "pg_config.h"
 #include "pg_query_cache.h"
+#include "pg_mem_telemetry.h"
 #include "sql_translator.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -452,6 +453,8 @@ void pg_stmt_free(pg_stmt_t *stmt) {
             LOG_DEBUG("pg_stmt_free: freeing param_values[%d]=%p", i, (void*)stmt->param_values[i]);
             free(stmt->param_values[i]);
             stmt->param_values[i] = NULL;  // Prevent double-free
+            if (i >= safe_param_count && pg_mem_telemetry_enabled())
+                pg_mem_telemetry_add(PMT_STMT_SWEEP_EXTRA_FREE, 0, 1);
         }
     }
 

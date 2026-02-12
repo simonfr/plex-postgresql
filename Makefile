@@ -36,7 +36,7 @@ SQL_TR_OBJS = src/sql_translator.o src/sql_tr_helpers.o src/sql_tr_placeholders.
               src/sql_tr_quotes.o src/sql_tr_keywords.o src/sql_tr_upsert.o
 
 # PG modules
-PG_MODULES = src/pg_config.o src/pg_logging.o src/pg_client.o src/pg_statement.o src/pg_query_cache.o
+PG_MODULES = src/pg_config.o src/pg_logging.o src/pg_client.o src/pg_statement.o src/pg_query_cache.o src/pg_mem_telemetry.o
 
 # DB Interpose modules - shared between Mac and Linux
 DB_INTERPOSE_SHARED = src/db_interpose_common.o src/platform_backtrace.o src/db_interpose_open.o \
@@ -234,6 +234,7 @@ ifeq ($(UNAME_S),Darwin)
 	PLEX_PG_SCHEMA=$${PLEX_PG_SCHEMA:-plex} \
 	PLEX_PG_LOG_LEVEL=$${PLEX_PG_LOG_LEVEL:-ERROR} \
 	PLEX_PG_LOG_FILE=$${PLEX_PG_LOG_FILE:-/tmp/plex_redirect_pg.log} \
+	PLEX_PG_MEM_TELEMETRY=$${PLEX_PG_MEM_TELEMETRY:-0} \
 	"$(PLEX_BIN)" >> $${PLEX_PG_LOG_FILE:-/tmp/plex_redirect_pg.log} 2>&1 &
 	@echo "Plex started. Log: /tmp/plex_redirect_pg.log"
 else
@@ -542,9 +543,9 @@ test-statement: $(TEST_BIN_DIR)/test_statement_helpers
 	@echo ""
 
 # Statement free sweep regression test (ensures all param slots are freed)
-$(TEST_BIN_DIR)/test_stmt_free_param_sweep: $(TEST_DIR)/test_stmt_free_param_sweep.c src/pg_statement.o src/sql_tr_helpers.o
+$(TEST_BIN_DIR)/test_stmt_free_param_sweep: $(TEST_DIR)/test_stmt_free_param_sweep.c src/pg_statement.o src/sql_tr_helpers.o src/pg_mem_telemetry.o
 	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $< src/pg_statement.o src/sql_tr_helpers.o -Iinclude -Isrc -I$(PG_INCLUDE) -Wall -Wextra $(LDFLAGS) -lpthread
+	$(CC) -o $@ $< src/pg_statement.o src/sql_tr_helpers.o src/pg_mem_telemetry.o -Iinclude -Isrc -I$(PG_INCLUDE) -Wall -Wextra $(LDFLAGS) -lpthread
 
 test-stmt-free: $(TEST_BIN_DIR)/test_stmt_free_param_sweep
 	@echo ""
@@ -552,9 +553,9 @@ test-stmt-free: $(TEST_BIN_DIR)/test_stmt_free_param_sweep
 	@echo ""
 
 # Bind index mismatch regression (idx > param_count cleanup safety)
-$(TEST_BIN_DIR)/test_bind_index_mismatch_cleanup: $(TEST_DIR)/test_bind_index_mismatch_cleanup.c src/pg_statement.o src/sql_tr_helpers.o
+$(TEST_BIN_DIR)/test_bind_index_mismatch_cleanup: $(TEST_DIR)/test_bind_index_mismatch_cleanup.c src/pg_statement.o src/sql_tr_helpers.o src/pg_mem_telemetry.o
 	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $< src/pg_statement.o src/sql_tr_helpers.o -Iinclude -Isrc -I$(PG_INCLUDE) -Wall -Wextra $(LDFLAGS) -lpthread
+	$(CC) -o $@ $< src/pg_statement.o src/sql_tr_helpers.o src/pg_mem_telemetry.o -Iinclude -Isrc -I$(PG_INCLUDE) -Wall -Wextra $(LDFLAGS) -lpthread
 
 test-bind-mismatch: $(TEST_BIN_DIR)/test_bind_index_mismatch_cleanup
 	@echo ""

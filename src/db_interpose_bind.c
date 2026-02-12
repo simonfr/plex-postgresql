@@ -6,6 +6,7 @@
  */
 
 #include "db_interpose.h"
+#include "pg_mem_telemetry.h"
 
 // ============================================================================
 // RACE_DEBUG Macro
@@ -106,6 +107,9 @@ char* bytes_to_pg_hex(const unsigned char *data, size_t len) {
         hex[2 + i*2 + 1] = hex_chars[data[i] & 0x0F];
     }
     hex[hex_len - 1] = '\0';
+
+    if (pg_mem_telemetry_enabled())
+        pg_mem_telemetry_add(PMT_BIND_HEX_ALLOC, hex_len, 1);
 
     return hex;
 }
@@ -323,19 +327,25 @@ int my_sqlite3_bind_text(sqlite3_stmt *pStmt, int idx, const char *val,
             if (contains_binary_bytes((const unsigned char*)val, actual_len)) {
                 LOG_DEBUG("bind_text: detected binary data at idx=%d, len=%zu, converting to hex", idx, actual_len);
                 pg_stmt->param_values[pg_idx] = bytes_to_pg_hex((const unsigned char*)val, actual_len);
+                /* hex telemetry logged inside bytes_to_pg_hex */
             } else if (nBytes < 0) {
                 pg_stmt->param_values[pg_idx] = strdup(val);
+                if (pg_mem_telemetry_enabled())
+                    pg_mem_telemetry_add(PMT_BIND_TEXT_ALLOC, actual_len + 1, 1);
             } else {
                 pg_stmt->param_values[pg_idx] = malloc(nBytes + 1);
                 if (pg_stmt->param_values[pg_idx]) {
                     memcpy(pg_stmt->param_values[pg_idx], val, nBytes);
                     pg_stmt->param_values[pg_idx][nBytes] = '\0';
+                    if (pg_mem_telemetry_enabled())
+                        pg_mem_telemetry_add(PMT_BIND_TEXT_ALLOC, (size_t)nBytes + 1, 1);
                 }
             }
         }
     }
 
     if (pg_stmt) pthread_mutex_unlock(&pg_stmt->mutex);
+    pg_mem_telemetry_maybe_log();
     return rc;
 }
 
@@ -452,17 +462,22 @@ int my_sqlite3_bind_text64(sqlite3_stmt *pStmt, int idx, const char *val,
                 pg_stmt->param_values[pg_idx] = bytes_to_pg_hex((const unsigned char*)val, actual_len);
             } else if (nBytes == (sqlite3_uint64)-1) {
                 pg_stmt->param_values[pg_idx] = strdup(val);
+                if (pg_mem_telemetry_enabled())
+                    pg_mem_telemetry_add(PMT_BIND_TEXT_ALLOC, actual_len + 1, 1);
             } else {
                 pg_stmt->param_values[pg_idx] = malloc((size_t)nBytes + 1);
                 if (pg_stmt->param_values[pg_idx]) {
                     memcpy(pg_stmt->param_values[pg_idx], val, (size_t)nBytes);
                     pg_stmt->param_values[pg_idx][(size_t)nBytes] = '\0';
+                    if (pg_mem_telemetry_enabled())
+                        pg_mem_telemetry_add(PMT_BIND_TEXT_ALLOC, (size_t)nBytes + 1, 1);
                 }
             }
         }
     }
 
     if (pg_stmt) pthread_mutex_unlock(&pg_stmt->mutex);
+    pg_mem_telemetry_maybe_log();
     return rc;
 }
 
@@ -521,6 +536,8 @@ int my_sqlite3_bind_value(sqlite3_stmt *pStmt, int idx, const sqlite3_value *pVa
                         pg_stmt->param_values[pg_idx] = malloc(len);
                         if (pg_stmt->param_values[pg_idx]) {
                             memcpy(pg_stmt->param_values[pg_idx], v, len);
+                            if (pg_mem_telemetry_enabled())
+                                pg_mem_telemetry_add(PMT_BIND_VALUE_BLOB_ALLOC, (size_t)len, 1);
                         }
                         pg_stmt->param_lengths[pg_idx] = len;
                         pg_stmt->param_formats[pg_idx] = 1;  // binary
