@@ -5,6 +5,15 @@ All notable changes to plex-postgresql will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.25] - 2026-02-12
+
+### Added
+- **Optional memory telemetry** — set `PLEX_PG_MEM_TELEMETRY=1` to log per-subsystem allocation stats every 60s. Tracks bind_text, bind_hex, bind_value_blob, column cached_blob, column decoded_blob, and statement sweep frees. Default off, zero overhead when disabled.
+- Telemetry passed through `make run` via `PLEX_PG_MEM_TELEMETRY` env var.
+
+### Confirmed
+- 30-minute production measurement confirmed **shim allocates only 14KB total** under normal Plex load — memory growth is Plex-internal, not shim-caused.
+
 ## [0.9.24] - 2026-02-12
 
 ### Fixed
