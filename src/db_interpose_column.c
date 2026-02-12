@@ -7,6 +7,7 @@
 
 #include "db_interpose.h"
 #include "pg_query_cache.h"
+#include "pg_mem_telemetry.h"
 #include <stdatomic.h>
 #include <sys/time.h>
 
@@ -645,6 +646,9 @@ const void* pg_decode_bytea(pg_stmt_t *pg_stmt, int row, int col, int *out_lengt
     pg_stmt->decoded_blobs[col] = binary;
     pg_stmt->decoded_blob_lens[col] = (int)bin_len;
     *out_length = (int)bin_len;
+
+    if (pg_mem_telemetry_enabled())
+        pg_mem_telemetry_add(PMT_COLUMN_DECODED_BLOB_ALLOC, bin_len + 1, 1);
 
     return binary;
 }
@@ -1881,6 +1885,8 @@ const void* my_sqlite3_column_blob(sqlite3_stmt *pStmt, int idx) {
                 if (pg_stmt->cached_blob[idx]) {
                     memcpy(pg_stmt->cached_blob[idx], pg_value, blob_len);
                     pg_stmt->cached_blob_len[idx] = blob_len;
+                    if (pg_mem_telemetry_enabled())
+                        pg_mem_telemetry_add(PMT_COLUMN_CACHED_BLOB_ALLOC, (size_t)blob_len, 1);
                 } else {
                     LOG_ERROR("COL_BLOB: malloc failed for column %d, len %d", idx, blob_len);
                     pthread_mutex_unlock(&pg_stmt->mutex);
