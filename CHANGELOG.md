@@ -5,6 +5,18 @@ All notable changes to plex-postgresql will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.24] - 2026-02-12
+
+### Fixed
+- **Statement cleanup leak window** in `pg_stmt_free` — captured bind values are now freed across all `MAX_PARAMS` slots, not only up to `param_count`.
+
+### Added
+- **`test_stmt_free_param_sweep`** regression test to verify full parameter slot cleanup at statement teardown.
+- **`test_bind_index_mismatch_cleanup`** regression test to cover cleanup safety when bind index usage diverges from translated `param_count`.
+
+### Changed
+- Included both new regression tests in `unit-test` and `ci-test` targets.
+
 ## [0.9.23] - 2026-02-10
 
 ### Fixed

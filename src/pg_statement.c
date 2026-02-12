@@ -441,7 +441,12 @@ void pg_stmt_free(pg_stmt_t *stmt) {
     if (safe_param_count < 0) safe_param_count = 0;
     if (safe_param_count > MAX_PARAMS) safe_param_count = MAX_PARAMS;
 
-    for (int i = 0; i < safe_param_count; i++) {
+    // Free all captured bind values, not just up to param_count.
+    // Some edge paths can temporarily populate indices beyond param_count
+    // (for example when SQLite index mapping and translated count diverge).
+    // Scanning MAX_PARAMS here is safe and prevents stale heap allocations
+    // from surviving until process exit.
+    for (int i = 0; i < MAX_PARAMS; i++) {
         // Only free if not pointing to pre-allocated buffer
         if (stmt->param_values[i] && !is_preallocated_buffer(stmt, i)) {
             LOG_DEBUG("pg_stmt_free: freeing param_values[%d]=%p", i, (void*)stmt->param_values[i]);

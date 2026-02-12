@@ -61,7 +61,7 @@ else
 endif
 LINUX_OBJECTS = $(SQL_TR_OBJS) $(PG_MODULES) $(DB_INTERPOSE_SHARED) src/db_interpose_core_linux.o
 
-.PHONY: all clean install test macos linux run stop unit-test ci-test test-recursion test-crash test-params test-logging test-soci test-fork test-fts test-buffer test-reaper test-groupby test-upsert test-parity test-uri
+.PHONY: all clean install test macos linux run stop unit-test ci-test test-recursion test-crash test-params test-logging test-soci test-fork test-fts test-buffer test-reaper test-groupby test-upsert test-parity test-uri test-stmt-free test-bind-mismatch
 
 all: $(TARGET)
 
@@ -541,6 +541,26 @@ test-statement: $(TEST_BIN_DIR)/test_statement_helpers
 	@./$(TEST_BIN_DIR)/test_statement_helpers
 	@echo ""
 
+# Statement free sweep regression test (ensures all param slots are freed)
+$(TEST_BIN_DIR)/test_stmt_free_param_sweep: $(TEST_DIR)/test_stmt_free_param_sweep.c src/pg_statement.o src/sql_tr_helpers.o
+	@mkdir -p $(TEST_BIN_DIR)
+	$(CC) -o $@ $< src/pg_statement.o src/sql_tr_helpers.o -Iinclude -Isrc -I$(PG_INCLUDE) -Wall -Wextra $(LDFLAGS) -lpthread
+
+test-stmt-free: $(TEST_BIN_DIR)/test_stmt_free_param_sweep
+	@echo ""
+	@MallocStackLogging=1 leaks -q --atExit -- ./$(TEST_BIN_DIR)/test_stmt_free_param_sweep
+	@echo ""
+
+# Bind index mismatch regression (idx > param_count cleanup safety)
+$(TEST_BIN_DIR)/test_bind_index_mismatch_cleanup: $(TEST_DIR)/test_bind_index_mismatch_cleanup.c src/pg_statement.o src/sql_tr_helpers.o
+	@mkdir -p $(TEST_BIN_DIR)
+	$(CC) -o $@ $< src/pg_statement.o src/sql_tr_helpers.o -Iinclude -Isrc -I$(PG_INCLUDE) -Wall -Wextra $(LDFLAGS) -lpthread
+
+test-bind-mismatch: $(TEST_BIN_DIR)/test_bind_index_mismatch_cleanup
+	@echo ""
+	@MallocStackLogging=1 leaks -q --atExit -- ./$(TEST_BIN_DIR)/test_bind_index_mismatch_cleanup
+	@echo ""
+
 # URI rewrite tests (server:// -> library://)
 $(TEST_BIN_DIR)/test_uri_rewrite: $(TEST_DIR)/test_uri_rewrite.c
 	@mkdir -p $(TEST_BIN_DIR)
@@ -552,11 +572,11 @@ test-uri: $(TEST_BIN_DIR)/test_uri_rewrite
 	@echo ""
 
 # Run all unit tests
-unit-test: test-recursion test-crash test-sql test-groupby test-upsert test-types test-soci test-cache test-tls test-fork test-reaper test-buffer test-api test-expanded test-params test-logging test-exception test-fts test-config test-bind test-common test-statement test-parity test-uri
+unit-test: test-recursion test-crash test-sql test-groupby test-upsert test-types test-soci test-cache test-tls test-fork test-reaper test-buffer test-api test-expanded test-params test-logging test-exception test-fts test-config test-bind test-common test-statement test-stmt-free test-bind-mismatch test-parity test-uri
 	@echo "All unit tests complete."
 
 # CI-safe subset: excludes tests needing LD_PRELOAD + shim (test-api, test-expanded, test-params)
-ci-test: test-recursion test-crash test-sql test-groupby test-upsert test-types test-soci test-cache test-tls test-fork test-reaper test-buffer test-logging test-exception test-fts test-config test-bind test-common test-statement test-parity test-uri
+ci-test: test-recursion test-crash test-sql test-groupby test-upsert test-types test-soci test-cache test-tls test-fork test-reaper test-buffer test-logging test-exception test-fts test-config test-bind test-common test-statement test-stmt-free test-bind-mismatch test-parity test-uri
 	@echo "All CI unit tests complete."
 
 # ============================================================================
