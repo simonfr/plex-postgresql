@@ -93,7 +93,7 @@ static int trace_prepare_sql_ok(const char *sql) {
 static void trace_prepare_pgsql_if_enabled(const char *sqlite_sql, const char *pg_sql) {
     if (!trace_prepare_sql_ok(sqlite_sql)) return;
     if (!pg_sql) return;
-    LOG_ERROR("TRACE_PREPARE_PGSQL: %.900s", pg_sql);
+    LOG_DEBUG("TRACE_PREPARE_PGSQL: %.900s", pg_sql);
 }
 
 // ============================================================================
@@ -305,7 +305,7 @@ int my_sqlite3_prepare_v2_internal(sqlite3 *db, const char *zSql, int nByte,
                                    sqlite3_stmt **ppStmt, const char **pzTail,
                                    int from_worker) {
     if (trace_prepare_sql_ok(zSql)) {
-        LOG_ERROR("TRACE_PREPARE_SQL: %.700s", zSql);
+        LOG_DEBUG("TRACE_PREPARE_SQL: %.700s", zSql);
     }
 
     // SyncCollections compat: two query shapes trigger std::bad_cast in Plex

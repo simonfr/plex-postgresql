@@ -1224,28 +1224,55 @@ static void test_fts_mixed_quotes_and_terms(void) {
 }
 
 // ============================================================================
+// INSTR Function Tests
+// ============================================================================
+
+static void test_function_instr(void) {
+    TEST("Function - instr(a, b) -> STRPOS(a, b)");
+    char *result = sql_translate_functions(
+        "SELECT * FROM t WHERE NOT instr(extra_data, 'pv%3AlastFmBlacklisted=1')");
+    if (result && strstr(result, "STRPOS(extra_data, 'pv%3AlastFmBlacklisted=1')")) {
+        PASS();
+    } else {
+        FAIL("instr should be translated to STRPOS");
+        if (result) printf("    Got: %s\n", result);
+    }
+    free(result);
+}
+
+static void test_function_instr_no_match(void) {
+    TEST("Function - no instr() -> unchanged");
+    char *result = sql_translate_functions("SELECT * FROM t WHERE id = 1");
+    if (result && strstr(result, "SELECT * FROM t WHERE id = 1")) {
+        PASS();
+    } else {
+        FAIL("Query without instr should be unchanged");
+        if (result) printf("    Got: %s\n", result);
+    }
+    free(result);
+}
+
+// ============================================================================
 // JSON Operator Parameter Tests (Bug Fix Tests)
 // Tests that JSON operators with parameter placeholders work correctly
 // ============================================================================
 
 static void test_json_operator_with_parameter(void) {
-    TEST("JSON Op - column ->> '$.key' < $3 should consume parameter");
+    TEST("JSON Op - column ->> '$.key' < $3 -> ::json->>'key' < $3");
     sql_translation_t result = sql_translate(
         "SELECT * FROM t WHERE extra_data ->> '$.pv:version' < $3");
 
-    // The JSON operator should be translated to LIKE pattern
-    // and the $3 parameter should NOT appear dangling in the output
+    // The JSON operator should be translated to ::json->>'key'
+    // and the $3 parameter MUST be preserved (no bind mismatch)
     if (result.success && result.sql) {
-        // Check that we got a LIKE pattern (the fix converts ->> to LIKE)
-        int has_like = strcasestr(result.sql, "LIKE") != NULL;
-        // Check that $3 is NOT dangling (it should be consumed by the LIKE translation)
-        int no_dangling_param = strstr(result.sql, " $3") == NULL;
+        int has_json_cast = strstr(result.sql, "::json->>'pv:version'") != NULL;
+        int has_param = strstr(result.sql, "$3") != NULL;
 
-        if (has_like && no_dangling_param) {
+        if (has_json_cast && has_param) {
             PASS();
         } else {
-            FAIL("JSON operator should consume parameter");
-            printf("    has_like=%d no_dangling_param=%d\n", has_like, no_dangling_param);
+            FAIL("JSON operator should use ::json->> and preserve params");
+            printf("    has_json_cast=%d has_param=%d\n", has_json_cast, has_param);
             printf("    Got: %s\n", result.sql);
         }
     } else {
@@ -1256,16 +1283,17 @@ static void test_json_operator_with_parameter(void) {
 }
 
 static void test_json_operator_with_literal(void) {
-    TEST("JSON Op - column ->> '$.key' < '1' should work");
+    TEST("JSON Op - column ->> '$.key' < '1' -> ::json->>'key' < '1'");
     sql_translation_t result = sql_translate(
         "SELECT * FROM t WHERE extra_data ->> '$.pv:version' < '1'");
 
-    // Should be converted to LIKE pattern
+    // Should be converted to ::json->>'key' with literal preserved
     if (result.success && result.sql &&
-        strcasestr(result.sql, "LIKE")) {
+        strstr(result.sql, "::json->>'pv:version'") &&
+        strstr(result.sql, "< '1'")) {
         PASS();
     } else {
-        FAIL("JSON operator with literal should convert to LIKE");
+        FAIL("JSON operator with literal should use ::json->>");
         if (result.sql) printf("    Got: %s\n", result.sql);
     }
 
@@ -1273,16 +1301,17 @@ static void test_json_operator_with_literal(void) {
 }
 
 static void test_json_operator_is_null(void) {
-    TEST("JSON Op - column ->> '$.key' IS NULL");
+    TEST("JSON Op - column ->> '$.key' IS NULL -> ::json->>'key' IS NULL");
     sql_translation_t result = sql_translate(
         "SELECT * FROM t WHERE extra_data ->> '$.pv:version' IS NULL");
 
-    // Should be converted to NOT LIKE pattern for IS NULL check
+    // Should be converted to ::json->>'key' IS NULL
     if (result.success && result.sql &&
-        strcasestr(result.sql, "NOT LIKE")) {
+        strstr(result.sql, "::json->>'pv:version'") &&
+        strcasestr(result.sql, "IS NULL")) {
         PASS();
     } else {
-        FAIL("JSON IS NULL should convert to NOT LIKE");
+        FAIL("JSON IS NULL should use ::json->>");
         if (result.sql) printf("    Got: %s\n", result.sql);
     }
 
@@ -1301,6 +1330,34 @@ static void test_json_operator_param_position(void) {
     } else {
         FAIL("JSON operator with $N should insert ::json cast");
         if (result.sql) printf("    Got: %s\n", result.sql);
+    }
+
+    sql_translation_free(&result);
+}
+
+static void test_json_operator_plex_vad_query(void) {
+    TEST("JSON Op - real Plex VAD query preserves all 3 params");
+    sql_translation_t result = sql_translate(
+        "SELECT id FROM media_parts WHERE metadata_item_id IN (?, ?) "
+        "AND (extra_data ->> '$.pv:voiceActivityDetectionVersion' IS NULL "
+        "OR extra_data ->> '$.pv:voiceActivityDetectionVersion' < ?)");
+
+    if (result.success && result.sql) {
+        int has_json = strstr(result.sql, "::json->>'pv:voiceActivityDetectionVersion'") != NULL;
+        int has_p1 = strstr(result.sql, "$1") != NULL;
+        int has_p2 = strstr(result.sql, "$2") != NULL;
+        int has_p3 = strstr(result.sql, "$3") != NULL;
+
+        if (has_json && has_p1 && has_p2 && has_p3 && result.param_count == 3) {
+            PASS();
+        } else {
+            FAIL("All 3 params must be preserved");
+            printf("    params=%d has_p1=%d p2=%d p3=%d json=%d\n",
+                   result.param_count, has_p1, has_p2, has_p3, has_json);
+            printf("    Got: %s\n", result.sql);
+        }
+    } else {
+        FAIL("Translation failed");
     }
 
     sql_translation_free(&result);
@@ -3029,6 +3086,11 @@ int main(void) {
     test_json_operator_with_literal();
     test_json_operator_is_null();
     test_json_operator_param_position();
+    test_json_operator_plex_vad_query();
+
+    printf("\n\033[1mFunction - INSTR:\033[0m\n");
+    test_function_instr();
+    test_function_instr_no_match();
 
     printf("\n\033[1mHelper Functions:\033[0m\n");
     test_helper_str_replace();

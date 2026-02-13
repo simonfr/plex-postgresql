@@ -1274,160 +1274,66 @@ char* fix_integer_text_mismatch(const char *sql) {
 
 // ============================================================================
 // Fix JSON operator (->>) on TEXT columns
-// SQLite: column ->> '$.path' works on TEXT with JSON
-// PostgreSQL: Convert to LIKE pattern since data may be malformed JSON
-// Example: extra_data ->> '$.pv:version' < '1'
-//       -> (extra_data LIKE '%"pv:version":"0"%' OR extra_data NOT LIKE '%"pv:version"%')
+// SQLite: column ->> '$.key' extracts JSON field from TEXT column
+// PostgreSQL: column::json->>'key' (cast TEXT to json, then extract)
+//
+// Translates:
+//   column ->> '$.key'   ->  column::json->>'key'
+//   column ->> $N        ->  column::json->>$N
+//
+// All bind parameters are preserved (no param count changes).
 // ============================================================================
 
 char* fix_json_operator_on_text(const char *sql) {
     if (!sql) return NULL;
 
-    // Check if the query contains ->> operator
+    // Fast path: no ->> operator
     if (!strstr(sql, "->>")) {
-        return strdup(sql);
-    }
-
-    // Check for ->> with parameter ($N) - needs column::json cast
-    // Pattern: "column"->>$N or column->>$N
-    // Fix: insert ::json before ->>$N
-    const char *param_pattern = strstr(sql, "->>$");
-    if (param_pattern) {
-        LOG_INFO("Fixing JSON ->> operator with parameter on TEXT columns");
-        char *result = malloc(strlen(sql) * 2 + 256);
-        if (!result) return NULL;
-
-        char *out = result;
-        const char *p = sql;
-
-        while (*p) {
-            // Look for pattern: ->>$N and insert ::json before it
-            if (strncmp(p, "->>$", 4) == 0) {
-                // Insert ::json cast before the ->> operator
-                out += sprintf(out, "::json");
-
-                // Copy ->>$N
-                while (*p && (*p == '-' || *p == '>' || *p == '$' || isdigit(*p))) {
-                    *out++ = *p++;
-                }
-                continue;
-            }
-            *out++ = *p++;
-        }
-        *out = '\0';
-        return result;
-    }
-
-    // Check for ->> with '$.key' pattern
-    if (!strstr(sql, "'$.")) {
         return strdup(sql);
     }
 
     LOG_INFO("Fixing JSON ->> operator on TEXT columns");
 
-    char *result = malloc(strlen(sql) * 4 + 2048);
+    char *result = malloc(strlen(sql) * 2 + 256);
     if (!result) return NULL;
 
     char *out = result;
     const char *p = sql;
 
     while (*p) {
-        // Look for pattern: column ->> '$.key' IS NULL
-        // or: column ->> '$.key' < 'value'
-        const char *scan = p;
-
-        // Try to match: column_name ->> '$.key'
-        if (is_ident_char(*scan) || *scan == '.') {
-            const char *col_start = scan;
-
-            // Find end of column name
-            while (*scan && (is_ident_char(*scan) || *scan == '.')) {
-                scan++;
+        // Look for ->> preceded by an identifier (column name)
+        if (strncmp(p, "->>", 3) == 0) {
+            // Remove trailing whitespace before ->> (e.g. "col ->>")
+            // so we get "col::json->>" not "col ::json->>"
+            while (out > result && isspace(*(out - 1))) {
+                out--;
             }
-            const char *col_end = scan;
 
-            // Skip whitespace
-            while (*scan && isspace(*scan)) scan++;
+            // Insert ::json cast before ->>
+            out += sprintf(out, "::json->>");
+            p += 3;
 
-            // Check for ->>
-            if (strncmp(scan, "->>", 3) == 0) {
-                scan += 3;
-                while (*scan && isspace(*scan)) scan++;
+            // Skip whitespace after ->>
+            while (*p && isspace(*p)) p++;
 
-                // Check for '$.
-                if (*scan == '\'' && scan[1] == '$' && scan[2] == '.') {
-                    // Extract the JSON key
-                    const char *key_start = scan + 3; // skip '$.
-                    const char *key_end = strchr(key_start, '\'');
-
-                    if (key_end) {
-                        // HEAP allocation to prevent stack overflow (Plex uses ~388KB of stack)
-                        char *json_key = malloc(256);
-                        if (!json_key) {
-                            *out++ = *p++;
-                            continue;
-                        }
-
-                        size_t key_len = key_end - key_start;
-                        if (key_len < 256) {
-                            memcpy(json_key, key_start, key_len);
-                            json_key[key_len] = '\0';
-
-                            // Copy column name
-                            size_t col_len = col_end - col_start;
-                            memcpy(out, col_start, col_len);
-                            out += col_len;
-
-                            // Check what comes after the JSON operator
-                            const char *after = key_end + 1;
-                            while (*after && isspace(*after)) after++;
-
-                            // Convert to LIKE pattern based on the comparison
-                            if (strncasecmp(after, "is null", 7) == 0) {
-                                // column ->> '$.key' IS NULL
-                                // -> (column IS NULL OR column NOT LIKE '%"key"%')
-                                out += sprintf(out, " NOT LIKE '%%\"%s\"%%'", json_key);
-                                free(json_key);
-                                p = after + 7;
-                                continue;
-                            } else if (strncmp(after, "<", 1) == 0) {
-                                // column ->> '$.key' < 'value' OR column ->> '$.key' < ?
-                                // -> column LIKE '%"key":"0"%' (simplified for version checking)
-                                out += sprintf(out, " LIKE '%%\"%s\":\"0\"%%'", json_key);
-                                free(json_key);
-
-                                // Skip the < operator
-                                const char *value_start = after + 1;
-                                while (*value_start && isspace(*value_start)) value_start++;
-
-                                // Check if it's a literal value ('...') or a parameter ($N)
-                                if (*value_start == '\'') {
-                                    // Literal value: skip to end of quoted string
-                                    const char *quote2 = strchr(value_start + 1, '\'');
-                                    if (quote2) {
-                                        p = quote2 + 1;
-                                        continue;
-                                    }
-                                } else if (*value_start == '$' && isdigit(value_start[1])) {
-                                    // Parameter placeholder: skip past $N
-                                    const char *param_end = value_start + 1;
-                                    while (*param_end && isdigit(*param_end)) param_end++;
-                                    p = param_end;
-                                    continue;
-                                }
-
-                                // Fallback: skip to after the JSON operator
-                                p = key_end + 1;
-                                continue;
-                            }
-                        }
-                        free(json_key);
-                    }
+            // Check if followed by '$.key' pattern -> convert to 'key'
+            if (*p == '\'' && p[1] == '$' && p[2] == '.') {
+                // Extract key name from '$.key'
+                const char *key_start = p + 3;
+                const char *key_end = strchr(key_start, '\'');
+                if (key_end) {
+                    *out++ = '\'';
+                    memcpy(out, key_start, key_end - key_start);
+                    out += key_end - key_start;
+                    *out++ = '\'';
+                    p = key_end + 1;
+                    continue;
                 }
             }
+            // Otherwise ($N or other), just continue — ::json->> already emitted
+            continue;
         }
 
-        // No match - copy character and continue
         *out++ = *p++;
     }
 

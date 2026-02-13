@@ -186,6 +186,9 @@ char* sql_translate_functions(const char *sql) {
     // 5b. json_each() -> json_array_elements()
     TRANSLATE(translate_json_each);
 
+    // 5c. instr() -> STRPOS()
+    TRANSLATE(translate_instr);
+
     // 6. IFNULL -> COALESCE (only if pattern exists)
     TRANSLATE_REPLACE("IFNULL(", "COALESCE(");
 

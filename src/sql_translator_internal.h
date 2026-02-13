@@ -58,6 +58,7 @@ char* translate_datetime(const char *sql);
 char* translate_last_insert_rowid(const char *sql);
 char* translate_json_each(const char *sql);
 char* simplify_typeof_fixup(const char *sql);
+char* translate_instr(const char *sql);
 
 // ============================================================================
 // Query Structure Translations (sql_tr_query.c)

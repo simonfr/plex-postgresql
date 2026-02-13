@@ -47,14 +47,10 @@ for TABLE in $TABLES; do
     # Get column names
     COLUMNS=$(sqlite3 "$SQLITE_DB" "PRAGMA table_info($TABLE);" | cut -d'|' -f2 | tr '\n' ',' | sed 's/,$//')
 
-    # Export to CSV and import to PostgreSQL
-    sqlite3 -header -csv "$SQLITE_DB" "SELECT * FROM $TABLE;" > "/tmp/plex_migrate_$TABLE.csv"
-
-    if [[ -s "/tmp/plex_migrate_$TABLE.csv" ]]; then
-        $PSQL -c "\\copy $PG_SCHEMA.$TABLE FROM '/tmp/plex_migrate_$TABLE.csv' WITH CSV HEADER" 2>/dev/null || true
-    fi
-
-    rm -f "/tmp/plex_migrate_$TABLE.csv"
+    # Use Python bridge for data transfer (avoids CSV truncation of large TEXT fields)
+    $PSQL -c "TRUNCATE $PG_SCHEMA.$TABLE CASCADE;" 2>/dev/null || true
+    python3 "$(dirname "$0")/migrate_table.py" \
+        "$SQLITE_DB" "$TABLE" "*" "$COLUMNS" "$PG_SCHEMA" 2>/dev/null || true
 done
 
 echo ""

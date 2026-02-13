@@ -423,6 +423,20 @@ char* translate_json_each(const char *sql) {
 }
 
 // ============================================================================
+// instr(haystack, needle) -> STRPOS(haystack, needle)
+// SQLite: returns position (1-based) or 0 if not found
+// PostgreSQL STRPOS: identical semantics
+// ============================================================================
+
+char* translate_instr(const char *sql) {
+    if (!sql) return NULL;
+    if (!strcasestr(sql, "instr(")) {
+        return strdup(sql);
+    }
+    return str_replace_nocase(sql, "instr(", "STRPOS(");
+}
+
+// ============================================================================
 // Simplify typeof-based fixup patterns
 // iif(typeof(x) in ('integer', 'real'), x, strftime('%s', x, 'utc')) -> x
 // ============================================================================
