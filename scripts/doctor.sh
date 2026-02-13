@@ -433,6 +433,34 @@ else
     ok=$((ok + 1))
 fi
 
+# Truncated JSON in extra_data (caused by old CSV migration bug)
+truncated_json=$($PSQL -t -A -c "
+    SELECT sum(cnt)::integer FROM (
+        SELECT count(*) AS cnt FROM $PG_SCHEMA.media_parts
+        WHERE extra_data IS NOT NULL AND extra_data LIKE '{%'
+          AND extra_data !~ '}\s*$'
+        UNION ALL
+        SELECT count(*) FROM $PG_SCHEMA.media_items
+        WHERE extra_data IS NOT NULL AND extra_data LIKE '{%'
+          AND extra_data !~ '}\s*$'
+        UNION ALL
+        SELECT count(*) FROM $PG_SCHEMA.metadata_items
+        WHERE extra_data IS NOT NULL AND extra_data LIKE '{%'
+          AND extra_data !~ '}\s*$'
+        UNION ALL
+        SELECT count(*) FROM $PG_SCHEMA.metadata_item_settings
+        WHERE extra_data IS NOT NULL AND extra_data LIKE '{%'
+          AND extra_data !~ '}\s*$'
+    ) t;
+" 2>/dev/null || echo "0")
+if [[ "$truncated_json" -gt 0 ]]; then
+    printf "  %-50s ${YELLOW}%s rows${NC}\n" "truncated extra_data JSON" "$truncated_json"
+    data_issues=$((data_issues + 1))
+else
+    printf "  %-50s ${GREEN}OK${NC}\n" "truncated extra_data JSON"
+    ok=$((ok + 1))
+fi
+
 # Empty statistics rows (at = 0 or NULL)
 empty_stats=$($PSQL -t -A -c "
     SELECT COUNT(*) FROM $PG_SCHEMA.statistics_media WHERE at IS NULL OR at = 0;
@@ -526,6 +554,25 @@ if [[ $data_issues -gt 0 ]]; then
                 printf "  deleting junk metadata_items... "
                 $PSQL -q -c "DELETE FROM $PG_SCHEMA.metadata_items WHERE metadata_type IS NULL AND library_section_id IS NULL;" 2>/dev/null
                 echo -e "${GREEN}$junk_items rows${NC}"
+                fixes=$((fixes + 1))
+            fi
+            if [[ "$truncated_json" -gt 0 ]]; then
+                printf "  fixing truncated extra_data JSON... "
+                fixed_json=0
+                for repair_table in media_parts media_items metadata_items metadata_item_settings; do
+                    repaired=$($PSQL -t -A -c "
+                        WITH fixed AS (
+                            UPDATE $PG_SCHEMA.$repair_table
+                            SET extra_data = left(extra_data, position('\"url\":\"' in extra_data) - 2) || '}'
+                            WHERE extra_data IS NOT NULL AND extra_data LIKE '{%'
+                              AND extra_data !~ '}\s*$'
+                              AND position('\"url\":\"' in extra_data) > 0
+                            RETURNING 1
+                        ) SELECT count(*) FROM fixed;
+                    " 2>/dev/null || echo "0")
+                    fixed_json=$((fixed_json + repaired))
+                done
+                echo -e "${GREEN}$fixed_json rows${NC}"
                 fixes=$((fixes + 1))
             fi
             if [[ "$empty_stats" -gt 0 ]]; then

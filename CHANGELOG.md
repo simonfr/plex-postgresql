@@ -5,6 +5,23 @@ All notable changes to plex-postgresql will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.26] - 2026-02-13
+
+### Fixed
+- **JSON `->>` operator rewritten correctly** — `col ->> '$.key'` now translates to `col::json->>'key'` (native PostgreSQL JSON extraction). Previous LIKE-based hack consumed bind parameters, causing "bind message supplies N parameters, but prepared statement requires M" errors on Plex v1.43.0.10492 voice-activity-detection queries.
+- **`instr()` function now translated** — SQLite's `instr(haystack, needle)` is translated to PostgreSQL's `STRPOS(haystack, needle)`. Fixes "function instr(text, unknown) does not exist" error on Last.fm blacklist queries.
+- **Migration CSV truncation bug** — the `sqlite3 -csv` export silently truncated TEXT fields larger than ~8KB containing embedded quotes. Replaced with Python bridge (`migrate_table.py`) using `COPY FROM STDIN` with tab-delimited data. Affected 133 rows in `media_parts.extra_data` on a typical library.
+- **CI `leaks` tool on Linux** — `test-stmt-free` and `test-bind-mismatch` targets now skip macOS `leaks` tool on Linux instead of failing with "leaks: not found".
+
+### Added
+- **`scripts/migrate_table.py`** — Python bridge for lossless SQLite-to-PostgreSQL data transfer via COPY protocol.
+- **Truncated JSON detection in `doctor.sh`** — checks `extra_data` columns across media_parts, media_items, metadata_items, metadata_item_settings for invalid JSON and auto-repairs by trimming the redundant `url` field.
+- **Data integrity check in migration** — `migrate_lib.sh` verifies JSON integrity after migration completes.
+- 3 new tests: `instr()` translation (2), real Plex VAD query with 3 bind params (1). Total: 738 tests.
+
+### Changed
+- All `TRACE_BADCAST` and `TRACE_PREPARE` diagnostic messages downgraded from `LOG_ERROR` to `LOG_DEBUG` — they are opt-in debug traces, not errors.
+
 ## [0.9.25] - 2026-02-12
 
 ### Added

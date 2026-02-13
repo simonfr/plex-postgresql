@@ -226,32 +226,21 @@ migrate_sqlite_to_pg() {
                 continue
             fi
 
-            # Export to CSV with quoted columns (handles reserved words like 'index')
-            sqlite3 -header -csv "$SQLITE_DB" "SELECT $sqlite_select FROM \"$table\";" > "/tmp/plex_migrate_$table.csv" 2>/dev/null
+            # Use Python bridge for data transfer (avoids CSV truncation of large TEXT fields)
+            # Python reads from SQLite directly and streams to PostgreSQL via COPY FROM STDIN
+            psql -q -c "ALTER TABLE $schema.\"$table\" DISABLE TRIGGER ALL;" 2>/dev/null || true
+            psql -q -c "TRUNCATE $schema.\"$table\" CASCADE;" 2>/dev/null || true
 
-            if [[ -s "/tmp/plex_migrate_$table.csv" ]]; then
-                # Disable triggers for faster import
-                psql -q -c "ALTER TABLE $schema.\"$table\" DISABLE TRIGGER ALL;" 2>/dev/null || true
-
-                # Truncate existing data (faster than DELETE, handles FK)
-                psql -q -c "TRUNCATE $schema.\"$table\" CASCADE;" 2>/dev/null || true
-
-                # Import with quoted columns (handles reserved words like 'default')
-                if psql -q -c "\\copy $schema.\"$table\"($pg_cols_list) FROM '/tmp/plex_migrate_$table.csv' WITH CSV HEADER" 2>/dev/null; then
-                    echo -e "${GREEN}OK${NC}"
-                    ((migrated++))
-                else
-                    echo -e "${RED}FAIL${NC}"
-                    ((failed++))
-                fi
-
-                # Re-enable triggers
-                psql -q -c "ALTER TABLE $schema.\"$table\" ENABLE TRIGGER ALL;" 2>/dev/null || true
+            if python3 "$(dirname "$0")/migrate_table.py" \
+                "$SQLITE_DB" "$table" "$sqlite_select" "$pg_cols_list" "$schema" 2>/dev/null; then
+                echo -e "${GREEN}OK${NC}"
+                ((migrated++))
             else
-                echo -e "${YELLOW}EMPTY${NC}"
+                echo -e "${RED}FAIL${NC}"
+                ((failed++))
             fi
 
-            rm -f "/tmp/plex_migrate_$table.csv"
+            psql -q -c "ALTER TABLE $schema.\"$table\" ENABLE TRIGGER ALL;" 2>/dev/null || true
         fi
     done
 
@@ -272,6 +261,21 @@ migrate_sqlite_to_pg() {
 
     local pg_total=$(psql -t -c "SELECT COUNT(*) FROM $schema.metadata_items;" 2>/dev/null | tr -d ' ')
     echo "  Total items in PostgreSQL: $pg_total"
+
+    # Verify JSON integrity in extra_data columns (catches truncation bugs)
+    echo ""
+    echo "Verifying data integrity..."
+    local json_tables="media_parts media_items metadata_items metadata_item_settings tags"
+    for jtable in $json_tables; do
+        local invalid=$(psql -t -c "
+            SELECT count(*) FROM $schema.\"$jtable\"
+            WHERE extra_data IS NOT NULL AND extra_data LIKE '{%'
+              AND extra_data !~ '}\s*$';" 2>/dev/null | tr -d ' ')
+        if [[ "$invalid" -gt 0 ]]; then
+            echo -e "  ${RED}WARNING: $jtable has $invalid rows with truncated extra_data${NC}"
+        fi
+    done
+    echo -e "  ${GREEN}Data integrity check complete${NC}"
 
     # =========================================================================
     # Migrate blobs.db (separate database with binary thumbnail data)

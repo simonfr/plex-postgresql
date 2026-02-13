@@ -549,7 +549,11 @@ $(TEST_BIN_DIR)/test_stmt_free_param_sweep: $(TEST_DIR)/test_stmt_free_param_swe
 
 test-stmt-free: $(TEST_BIN_DIR)/test_stmt_free_param_sweep
 	@echo ""
-	@MallocStackLogging=1 leaks -q --atExit -- ./$(TEST_BIN_DIR)/test_stmt_free_param_sweep
+	@if command -v leaks >/dev/null 2>&1; then \
+		MallocStackLogging=1 leaks -q --atExit -- ./$(TEST_BIN_DIR)/test_stmt_free_param_sweep; \
+	else \
+		./$(TEST_BIN_DIR)/test_stmt_free_param_sweep; \
+	fi
 	@echo ""
 
 # Bind index mismatch regression (idx > param_count cleanup safety)
@@ -559,7 +563,11 @@ $(TEST_BIN_DIR)/test_bind_index_mismatch_cleanup: $(TEST_DIR)/test_bind_index_mi
 
 test-bind-mismatch: $(TEST_BIN_DIR)/test_bind_index_mismatch_cleanup
 	@echo ""
-	@MallocStackLogging=1 leaks -q --atExit -- ./$(TEST_BIN_DIR)/test_bind_index_mismatch_cleanup
+	@if command -v leaks >/dev/null 2>&1; then \
+		MallocStackLogging=1 leaks -q --atExit -- ./$(TEST_BIN_DIR)/test_bind_index_mismatch_cleanup; \
+	else \
+		./$(TEST_BIN_DIR)/test_bind_index_mismatch_cleanup; \
+	fi
 	@echo ""
 
 # URI rewrite tests (server:// -> library://)

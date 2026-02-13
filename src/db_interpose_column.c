@@ -837,8 +837,7 @@ static void trace_badcast_log_ctx(pg_stmt_t *pg_stmt,
                                  const char *col_name) {
     if (!pg_stmt) return;
     // Keep this line compact and safe to log (no large values).
-    // Use LOG_ERROR so it still appears even if log level is ERROR.
-    LOG_ERROR("TRACE_BADCAST_CTX: fn=%s phase=%s stmt=%p pg_stmt=%p idx=%d col='%s' oid=%u row=%d/%d cols=%d is_null=%d sql=%.200s",
+    LOG_DEBUG("TRACE_BADCAST_CTX: fn=%s phase=%s stmt=%p pg_stmt=%p idx=%d col='%s' oid=%u row=%d/%d cols=%d is_null=%d sql=%.200s",
              fn ? fn : "?", phase ? phase : "?",
              (void*)pStmt, (void*)pg_stmt, idx,
              col_name ? col_name : "?", (unsigned)oid,
@@ -1080,7 +1079,7 @@ static void validate_type_consistency(sqlite3_stmt *pStmt, int idx, const char *
                                       (col_type == SQLITE_NULL) ? 1 : 0,
                                       oid,
                                       col_name);
-                LOG_ERROR("TRACE_BADCAST_MISMATCH: accessor=%s col='%s' idx=%d oid=%u decltype='%s' expected=%s actual=%s sql=%.200s",
+                LOG_DEBUG("TRACE_BADCAST_MISMATCH: accessor=%s col='%s' idx=%d oid=%u decltype='%s' expected=%s actual=%s sql=%.200s",
                           accessor_name,
                           col_name ? col_name : "?",
                           idx,
@@ -1140,7 +1139,7 @@ int my_sqlite3_column_type(sqlite3_stmt *pStmt, int idx) {
                 if (trace) {
                     // We don't have a PGresult here; still log a consistent context line.
                     trace_badcast_log_ctx(pg_stmt, pStmt, idx, "column_type", "cached", row, 0, oid, cname);
-                    LOG_ERROR("TRACE_BADCAST: column_type (cached) idx=%d col='%s' row=%d oid=%u -> %s sql=%.200s",
+                    LOG_DEBUG("TRACE_BADCAST: column_type (cached) idx=%d col='%s' row=%d oid=%u -> %s sql=%.200s",
                              idx, cname ? cname : "?", row, (unsigned)oid,
                              sqlite_type_name(result), pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
                 }
@@ -1183,7 +1182,7 @@ int my_sqlite3_column_type(sqlite3_stmt *pStmt, int idx) {
                       idx, col_name ? col_name : "?");
             if (trace) {
                 trace_badcast_log_ctx(pg_stmt, pStmt, idx, "column_type", "live", row, 1, oid, col_name);
-                LOG_ERROR("TRACE_BADCAST: column_type idx=%d col='%s' row=%d oid=%u is_null=1 -> NULL sql=%.200s",
+                LOG_DEBUG("TRACE_BADCAST: column_type idx=%d col='%s' row=%d oid=%u is_null=1 -> NULL sql=%.200s",
                          idx, col_name ? col_name : "?", row, (unsigned)oid,
                          pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
             }
@@ -1226,7 +1225,7 @@ int my_sqlite3_column_type(sqlite3_stmt *pStmt, int idx) {
         
         if (trace) {
             trace_badcast_log_ctx(pg_stmt, pStmt, idx, "column_type", "live", row, 0, oid, col_name);
-            LOG_ERROR("TRACE_BADCAST: column_type idx=%d col='%s' row=%d oid=%u is_null=0 -> %s (guess_decltype='%s') sql=%.200s",
+            LOG_DEBUG("TRACE_BADCAST: column_type idx=%d col='%s' row=%d oid=%u is_null=0 -> %s (guess_decltype='%s') sql=%.200s",
                      idx, col_name ? col_name : "?", row, (unsigned)oid,
                      sqlite_type_name(result), col_decltype ? col_decltype : "?",
                      pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
@@ -1301,7 +1300,7 @@ int my_sqlite3_column_int(sqlite3_stmt *pStmt, int idx) {
 
         if (trace && oid == 20) {
             trace_badcast_log_ctx(pg_stmt, pStmt, idx, "column_int", "entry", row, 0, oid, col_name);
-            LOG_ERROR("TRACE_BADCAST_ACCESSOR: column_int called for oid=20 col='%s' idx=%d sql=%.200s",
+            LOG_DEBUG("TRACE_BADCAST_ACCESSOR: column_int called for oid=20 col='%s' idx=%d sql=%.200s",
                       col_name ? col_name : "?", idx, pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
         }
         
@@ -1390,7 +1389,7 @@ sqlite3_int64 my_sqlite3_column_int64(sqlite3_stmt *pStmt, int idx) {
 
         if (trace && oid == 20) {
             trace_badcast_log_ctx(pg_stmt, pStmt, idx, "column_int64", "entry", row, 0, oid, col_name);
-            LOG_ERROR("TRACE_BADCAST_ACCESSOR: column_int64 called for oid=20 col='%s' idx=%d sql=%.200s",
+            LOG_DEBUG("TRACE_BADCAST_ACCESSOR: column_int64 called for oid=20 col='%s' idx=%d sql=%.200s",
                       col_name ? col_name : "?", idx, pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
         }
 
@@ -2035,7 +2034,7 @@ const char* my_sqlite3_column_decltype(sqlite3_stmt *pStmt, int idx) {
                      (void*)pg_stmt->result, idx, pg_stmt->num_cols);
             if (trace_any) {
                 trace_badcast_log_ctx(pg_stmt, pStmt, idx, "column_decltype", "noresult", pg_stmt->current_row, 0, 0, NULL);
-                LOG_ERROR("TRACE_BADCAST: column_decltype idx=%d -> TEXT (no result / oob) sql=%.200s",
+                LOG_DEBUG("TRACE_BADCAST: column_decltype idx=%d -> TEXT (no result / oob) sql=%.200s",
                          idx, pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
             }
             pthread_mutex_unlock(&pg_stmt->mutex);
@@ -2095,7 +2094,7 @@ const char* my_sqlite3_column_decltype(sqlite3_stmt *pStmt, int idx) {
             if (trace) {
                 Oid oid = PQftype(pg_stmt->result, idx);
                 trace_badcast_log_ctx(pg_stmt, pStmt, idx, "column_decltype", "cached", pg_stmt->current_row, 0, oid, col_name);
-                LOG_ERROR("TRACE_BADCAST: column_decltype (cached) idx=%d col='%s' oid=%u -> '%s' sql=%.200s",
+                LOG_DEBUG("TRACE_BADCAST: column_decltype (cached) idx=%d col='%s' oid=%u -> '%s' sql=%.200s",
                          idx, col_name ? col_name : "?", (unsigned)oid,
                          cached_type, pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
             }
@@ -2199,7 +2198,7 @@ const char* my_sqlite3_column_decltype(sqlite3_stmt *pStmt, int idx) {
 
         if (trace) {
             trace_badcast_log_ctx(pg_stmt, pStmt, idx, "column_decltype", "oid", pg_stmt->current_row, 0, oid, col_name);
-            LOG_ERROR("TRACE_BADCAST: column_decltype idx=%d col='%s' oid=%u -> '%s' sql=%.200s",
+            LOG_DEBUG("TRACE_BADCAST: column_decltype idx=%d col='%s' oid=%u -> '%s' sql=%.200s",
                      idx, col_name ? col_name : "?", (unsigned)oid,
                      decltype ? decltype : "(null)", pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
         }
