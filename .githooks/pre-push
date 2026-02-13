@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# pre-push hook: block tag pushes when docs are not updated to match VERSION
+#
+# Checks that all documentation files reference the current version from VERSION.
+# Only runs when pushing a tag (v*). Regular branch pushes are not affected.
+#
+# Install:  git config core.hooksPath .githooks
+# Bypass:   git push --no-verify
+
+set -euo pipefail
+
+# --- Only care about tag pushes ---
+pushing_tag=false
+while read -r local_ref local_oid remote_ref remote_oid; do
+    if [[ "$local_ref" == refs/tags/v* ]]; then
+        pushing_tag=true
+        tag_name="${local_ref#refs/tags/}"
+        break
+    fi
+done
+
+if ! "$pushing_tag"; then
+    exit 0
+fi
+
+# --- Read version from VERSION file ---
+version=$(tr -d '[:space:]' < VERSION)
+if [[ -z "$version" ]]; then
+    echo "ERROR: VERSION file is empty or missing"
+    exit 1
+fi
+
+# Tag name must match VERSION
+if [[ "$tag_name" != "v${version}" ]]; then
+    echo "ERROR: tag $tag_name does not match VERSION file ($version)"
+    exit 1
+fi
+
+# --- Check each doc file for the current version ---
+errors=()
+
+check_file() {
+    local file="$1"
+    local description="$2"
+
+    if [[ ! -f "$file" ]]; then
+        errors+=("MISSING: $file ($description)")
+        return
+    fi
+
+    if ! grep -q "$version" "$file"; then
+        errors+=("OUTDATED: $file — does not contain $version ($description)")
+    fi
+}
+
+check_file "README.md"           "English README"
+check_file "README.es.md"        "Spanish README"
+check_file "CHANGELOG.md"        "Changelog"
+check_file "RELEASE_NOTES.md"    "Release Notes"
+
+# Wiki is a separate repo cloned alongside — check if present
+wiki_dir="wiki"
+if [[ -d "$wiki_dir" ]]; then
+    check_file "$wiki_dir/Home.md"      "Wiki Home"
+    check_file "$wiki_dir/README-ES.md" "Wiki Spanish README"
+else
+    errors+=("WARNING: wiki/ directory not found — cannot verify wiki docs")
+fi
+
+# --- Report ---
+if [[ ${#errors[@]} -gt 0 ]]; then
+    echo ""
+    echo "═══════════════════════════════════════════════════════"
+    echo "  BLOCKED: tag $tag_name push — docs not up to date"
+    echo "═══════════════════════════════════════════════════════"
+    echo ""
+    echo "  VERSION file says: $version"
+    echo ""
+    for err in "${errors[@]}"; do
+        echo "  ✗ $err"
+    done
+    echo ""
+    echo "  Update these files before tagging, or use:"
+    echo "    git push --no-verify    (to bypass this check)"
+    echo ""
+    echo "═══════════════════════════════════════════════════════"
+    exit 1
+fi
+
+echo "✓ All docs reference v${version} — tag push OK"
+exit 0
