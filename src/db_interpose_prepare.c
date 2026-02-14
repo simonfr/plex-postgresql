@@ -308,29 +308,12 @@ int my_sqlite3_prepare_v2_internal(sqlite3 *db, const char *zSql, int nByte,
         LOG_DEBUG("TRACE_PREPARE_SQL: %.700s", zSql);
     }
 
-    // SyncCollections compat: two query shapes trigger std::bad_cast in Plex
-    // (MetadataCollection.cpp) under the PG shim. Return empty result sets so
-    // the fixup skips these paths — Plex logs counts and continues startup.
-    if (zSql && strcasestr(zSql, "blankKeyTaggingId") && strcasestr(zSql, "nonblankKeyId") &&
-        strcasestr(zSql, "otherTags") && strcasestr(zSql, "tags.key = ''")) {
-        LOG_DEBUG("COMPAT: skipping SyncCollections blank-key cleanup (empty result)");
-        if (real_sqlite3_prepare_v2)
-            return real_sqlite3_prepare_v2(db, "SELECT 1 WHERE 0 AND ?1=?1", -1, ppStmt, pzTail);
-        if (ppStmt) *ppStmt = NULL;
-        if (pzTail) *pzTail = NULL;
-        return SQLITE_ERROR;
-    }
-    if (zSql && strcasestr(zSql, "from tags") && strcasestr(zSql, "join taggings") &&
-        strcasestr(zSql, "library_section_id=") && strcasestr(zSql, "metadata_items.metadata_type") &&
-        strcasestr(zSql, "tag_type=2") && strcasestr(zSql, "group by tags.id") &&
-        (strcasestr(zSql, "count(*)") || strcasestr(zSql, "select tags.id from"))) {
-        LOG_DEBUG("COMPAT: skipping SyncCollections tag aggregation (empty result)");
-        if (real_sqlite3_prepare_v2)
-            return real_sqlite3_prepare_v2(db, "SELECT 1 WHERE 0 AND ?1=?1 AND ?2=?2", -1, ppStmt, pzTail);
-        if (ppStmt) *ppStmt = NULL;
-        if (pzTail) *pzTail = NULL;
-        return SQLITE_ERROR;
-    }
+    // SyncCollections: previously skipped with empty results to avoid std::bad_cast.
+    // Now letting them through — the root causes are fixed:
+    //   - dt_integer(8) decltype for OID=20 (bigint) columns
+    //   - Column alias fix for count(*)/min(year)/max(year)
+    // Skipping these caused 200+ "Failed to generate a query" LPE errors per startup
+    // because Plex had no collection data to build hub queries from.
     // HANDLE ALTER TABLE ADD COLUMN: Skip if column already exists
     // This prevents "duplicate column name" errors when Plex reruns migrations
     if (zSql && strcasestr(zSql, "ALTER TABLE") && strcasestr(zSql, " ADD ")) {
