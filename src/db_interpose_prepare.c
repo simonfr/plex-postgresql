@@ -719,6 +719,42 @@ int my_sqlite3_prepare_v2_internal(sqlite3 *db, const char *zSql, int nByte,
         }
     }
 
+    // Add IF NOT EXISTS for CREATE TABLE/INDEX sent to shadow SQLite.
+    // During migrations, PG schema already has these objects from the initial schema dump.
+    // The shadow SQLite may also have them from a previous run. Without IF NOT EXISTS,
+    // SQLite returns "table already exists" which Plex treats as "database corruption".
+    if (!skip_complex_processing && sql_for_sqlite &&
+        (strcasestr(sql_for_sqlite, "CREATE TABLE") || strcasestr(sql_for_sqlite, "CREATE INDEX") ||
+         strcasestr(sql_for_sqlite, "CREATE UNIQUE INDEX")) &&
+        !strcasestr(sql_for_sqlite, "IF NOT EXISTS")) {
+        // Insert "IF NOT EXISTS" after CREATE TABLE/INDEX/UNIQUE INDEX
+        const char *create_pos = strcasestr(sql_for_sqlite, "CREATE ");
+        if (create_pos) {
+            const char *keyword_after_create = create_pos + 7;
+            // Skip UNIQUE if present
+            if (strncasecmp(keyword_after_create, "UNIQUE ", 7) == 0)
+                keyword_after_create += 7;
+            // Skip TABLE or INDEX
+            if (strncasecmp(keyword_after_create, "TABLE ", 6) == 0)
+                keyword_after_create += 6;
+            else if (strncasecmp(keyword_after_create, "INDEX ", 6) == 0)
+                keyword_after_create += 6;
+
+            size_t prefix_len = keyword_after_create - sql_for_sqlite;
+            size_t suffix_len = strlen(keyword_after_create);
+            char *ine_sql = malloc(prefix_len + 14 + suffix_len + 1);  // "IF NOT EXISTS " = 14
+            if (ine_sql) {
+                memcpy(ine_sql, sql_for_sqlite, prefix_len);
+                memcpy(ine_sql + prefix_len, "IF NOT EXISTS ", 14);
+                memcpy(ine_sql + prefix_len + 14, keyword_after_create, suffix_len + 1);
+                if (cleaned_sql) free(cleaned_sql);
+                cleaned_sql = ine_sql;
+                sql_for_sqlite = cleaned_sql;
+                LOG_INFO("Added IF NOT EXISTS for SQLite DDL: %.200s", sql_for_sqlite);
+            }
+        }
+    }
+
     // CRITICAL: Use real_sqlite3_prepare_v2 to bypass DYLD_INTERPOSE
     // Otherwise we get infinite recursion since sqlite3_prepare_v2 calls us again!
     int rc;
@@ -750,9 +786,55 @@ int my_sqlite3_prepare_v2_internal(sqlite3 *db, const char *zSql, int nByte,
     }
 
     if (rc != SQLITE_OK || !*ppStmt) {
-        if (cleaned_sql) free(cleaned_sql);
-        prepare_v2_depth--;  // Decrement before return
-        return rc;
+        // v0.9.29: For READ queries on library.db, shadow SQLite errors are non-fatal.
+        // The query will execute on PostgreSQL only — we just need a valid sqlite3_stmt*
+        // handle as a container for our pg_stmt_t.
+        // Build a dummy with matching parameter count so sqlite3_bind_* calls succeed.
+        if (is_read && pg_conn && pg_conn->is_pg_active && is_library_db_path(pg_conn->db_path) &&
+            real_sqlite3_prepare_v2) {
+            // Count parameters (? and :name) in the original SQL
+            int param_count = 0;
+            if (zSql) {
+                int in_quote = 0;
+                for (const char *p = zSql; *p; p++) {
+                    if (*p == '\'') { in_quote = !in_quote; continue; }
+                    if (in_quote) continue;
+                    if (*p == '?') param_count++;
+                    else if (*p == ':' && p > zSql && (*(p-1) == ' ' || *(p-1) == ',' || *(p-1) == '(' || *(p-1) == '=')) param_count++;
+                }
+            }
+            // Build "SELECT 1 WHERE ?=? AND ?=? ..." to absorb all bind calls
+            // Each ? is one bind slot. Use pairs: ?=? consumes 2, single ? at end with IS NOT NULL
+            char dummy_sql[2048];
+            if (param_count == 0) {
+                snprintf(dummy_sql, sizeof(dummy_sql), "SELECT 1 WHERE 0");
+            } else {
+                int off = snprintf(dummy_sql, sizeof(dummy_sql), "SELECT 1 WHERE ");
+                for (int i = 0; i < param_count; i++) {
+                    if (i > 0) off += snprintf(dummy_sql + off, sizeof(dummy_sql) - off, " AND ");
+                    off += snprintf(dummy_sql + off, sizeof(dummy_sql) - off, "? IS NOT NULL");
+                    if (off >= (int)sizeof(dummy_sql) - 20) break;
+                }
+            }
+            LOG_ERROR("PREPARE: Shadow SQLite failed for READ (rc=%d), using dummy shadow (%d params): %.100s",
+                     rc, param_count, zSql);
+            rc = real_sqlite3_prepare_v2(db, dummy_sql, -1, ppStmt, pzTail);
+            if (rc != SQLITE_OK || !*ppStmt) {
+                LOG_ERROR("PREPARE: Even dummy shadow failed (rc=%d) sql=%.200s", rc, dummy_sql);
+                if (cleaned_sql) free(cleaned_sql);
+                prepare_v2_depth--;
+                return rc;
+            }
+            // Clear any error state from the original failed prepare
+            if (pg_conn_for_clear) {
+                pg_conn_for_clear->last_error_code = SQLITE_OK;
+                pg_conn_for_clear->last_error[0] = '\0';
+            }
+        } else {
+            if (cleaned_sql) free(cleaned_sql);
+            prepare_v2_depth--;  // Decrement before return
+            return rc;
+        }
     }
 
     // v0.9.4.6: Only create pg_stmt for library.db

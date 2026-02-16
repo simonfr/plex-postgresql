@@ -70,15 +70,31 @@ static void preload_decltype_cache(pg_connection_t *pg_conn) {
 
     LOG_INFO("DECLTYPE_CACHE: Preloading SQLite declared types from metadata table...");
 
+    // v0.9.29: CRITICAL FIX — Do NOT use PQexec on a streaming connection!
+    // Get an alternate connection from the pool if necessary.
+    pg_connection_t *cache_conn = pg_conn;
+    if (pg_conn->streaming_active) {
+        LOG_DEBUG("DECLTYPE_CACHE: Connection %p is streaming_active, getting alternate", (void*)pg_conn);
+        pg_connection_t *alt = pg_get_thread_connection(pg_conn->db_path);
+        if (alt && alt->conn && alt != pg_conn && !alt->streaming_active) {
+            cache_conn = alt;
+            LOG_ERROR("DECLTYPE_CACHE: Using alternate connection %p", (void*)cache_conn);
+        } else {
+            LOG_ERROR("DECLTYPE_CACHE: No alternate connection available, deferring load");
+            pthread_mutex_unlock(&decltype_cache_mutex);
+            return;  // Will retry on next call when streaming is done
+        }
+    }
+
     // Query all types from metadata table
-    pthread_mutex_lock(&pg_conn->mutex);
-    PGresult *res = PQexec(pg_conn->conn,
+    pthread_mutex_lock(&cache_conn->mutex);
+    PGresult *res = PQexec(cache_conn->conn,
         "SELECT table_name, column_name, declared_type FROM plex.sqlite_column_types");
-    pthread_mutex_unlock(&pg_conn->mutex);
+    pthread_mutex_unlock(&cache_conn->mutex);
 
     if (!res || PQresultStatus(res) != PGRES_TUPLES_OK) {
         LOG_ERROR("DECLTYPE_CACHE: Failed to load metadata: %s",
-                  res ? PQerrorMessage(pg_conn->conn) : "NULL result");
+                  res ? PQerrorMessage(cache_conn->conn) : "NULL result");
         if (res) PQclear(res);
         decltype_cache_loaded = 1;  // Mark as loaded (even if failed) to avoid retrying
         pthread_mutex_unlock(&decltype_cache_mutex);
@@ -490,9 +506,30 @@ int resolve_column_tables(pg_stmt_t *pg_stmt, pg_connection_t *pg_conn) {
         return -1;
     }
 
-    pthread_mutex_lock(&pg_conn->mutex);
-    PGresult *res = PQexec(pg_conn->conn, query);
-    pthread_mutex_unlock(&pg_conn->mutex);
+    // v0.9.29: CRITICAL FIX — Do NOT use PQexec on a streaming connection!
+    // PQexec on a connection in single-row mode will consume/discard all pending
+    // streaming results, causing the next PQgetResult to return NULL.
+    // Get a separate connection from the pool instead.
+    pg_connection_t *resolve_conn = pg_conn;
+    if (pg_conn->streaming_active) {
+        LOG_DEBUG("RESOLVE_TABLES: Connection %p is streaming_active, getting separate pool connection",
+                 (void*)pg_conn);
+        pg_connection_t *alt_conn = pg_get_thread_connection(pg_conn->db_path);
+        if (alt_conn && alt_conn->conn && alt_conn != pg_conn && !alt_conn->streaming_active) {
+            resolve_conn = alt_conn;
+            LOG_ERROR("RESOLVE_TABLES: Using alternate connection %p for OID lookup", (void*)resolve_conn);
+        } else {
+            // No alternate connection available — skip OID resolution to protect streaming
+            LOG_ERROR("RESOLVE_TABLES: No alternate connection, skipping OID lookup to protect streaming");
+            free(query);
+            pg_stmt->col_tables_resolved = 1;
+            return 0;
+        }
+    }
+
+    pthread_mutex_lock(&resolve_conn->mutex);
+    PGresult *res = PQexec(resolve_conn->conn, query);
+    pthread_mutex_unlock(&resolve_conn->mutex);
     
     // Query buffer no longer needed after PQexec
     free(query);
@@ -500,7 +537,7 @@ int resolve_column_tables(pg_stmt_t *pg_stmt, pg_connection_t *pg_conn) {
 
     if (!res || PQresultStatus(res) != PGRES_TUPLES_OK) {
         LOG_ERROR("RESOLVE_TABLES: Query failed: %s",
-                  res ? PQerrorMessage(pg_conn->conn) : "NULL result");
+                  res ? PQerrorMessage(resolve_conn->conn) : "NULL result");
         if (res) PQclear(res);
         pg_stmt->col_tables_resolved = 1;
         return -1;

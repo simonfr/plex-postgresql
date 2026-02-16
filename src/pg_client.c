@@ -700,8 +700,15 @@ static pg_connection_t* pool_get_connection(const char *db_path) {
 
             pg_connection_t *conn = slot->conn;
             if (conn && conn->conn && PQstatus(conn->conn) == CONNECTION_OK) {
-                slot->last_used = now;
-                return conn;  // Fast path: ~10 instructions
+                // v0.9.29: Skip if connection is busy with streaming mode
+                if (conn->streaming_active) {
+                    LOG_DEBUG("Pool FAST PATH: streaming_active on slot %d, falling through to slow path",
+                             tls_pool_slot);
+                    // Don't return this connection — fall through to find/create another
+                } else {
+                    slot->last_used = now;
+                    return conn;  // Fast path: ~10 instructions
+                }
             }
         }
         // Cached slot invalid - clear and fall through to slow path
@@ -761,14 +768,14 @@ static pg_connection_t* pool_get_connection(const char *db_path) {
 
             pg_connection_t *conn = library_pool[i].conn;
             if (conn && conn->conn && PQstatus(conn->conn) == CONNECTION_OK) {
-                // CRITICAL FIX: Do NOT check for pending data here!
-                // When processing multiple statements, pending data is VALID response
-                // data from queries we're actively executing. Resetting would cause
-                // deadlock: PQexecPrepared waits for response, but we just reset it.
-                //
-                // Orphaned data (from timeouts) will be handled by:
-                // 1. Query errors triggering pg_pool_check_connection_health()
-                // 2. Connection reset when slot is released to another thread (PHASE 2)
+                // v0.9.29: Skip connections that are busy with streaming mode.
+                // When a thread has an active streaming query (PQsetSingleRowMode),
+                // that connection is exclusively owned by the streaming statement.
+                // Other queries on the same thread must use a different connection.
+                if (conn->streaming_active) {
+                    LOG_DEBUG("Pool: slot %d streaming_active, skipping for thread %p", i, (void*)current_thread);
+                    continue;
+                }
                 library_pool[i].last_used = now;
                 // Cache for next call
                 tls_pool_slot = i;

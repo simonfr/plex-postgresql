@@ -421,17 +421,39 @@ void pg_stmt_free(pg_stmt_t *stmt) {
         }
     }
 
-    // v0.9.28: Drain streaming results before freeing
+    // v0.9.29: Cancel + drain streaming results before freeing
+    // Use PQcancel to stop server-side query first, then drain remaining results.
+    // This is MUCH faster than draining thousands of PGRES_SINGLE_TUPLE rows.
     if (stmt->streaming_mode && stmt->streaming_conn) {
         pthread_mutex_lock(&stmt->streaming_conn->mutex);
         if (stmt->streaming_conn->conn) {
+            // Cancel the in-progress query on the server
+            PGcancel *cancel = PQgetCancel(stmt->streaming_conn->conn);
+            if (cancel) {
+                char errbuf[256];
+                if (!PQcancel(cancel, errbuf, sizeof(errbuf))) {
+                    LOG_ERROR("pg_stmt_free: PQcancel failed: %s", errbuf);
+                }
+                PQfreeCancel(cancel);
+            }
+            // Drain remaining results (should be few after cancel)
             PGresult *drain;
+            int drain_count = 0;
             while ((drain = PQgetResult(stmt->streaming_conn->conn)) != NULL) {
+                drain_count++;
                 PQclear(drain);
+                if (drain_count > 1000) {
+                    LOG_ERROR("pg_stmt_free: drain after cancel exceeded 1000 on %p", (void*)stmt->streaming_conn);
+                    break;
+                }
+            }
+            if (drain_count > 0) {
+                LOG_DEBUG("pg_stmt_free: drained %d results after cancel", drain_count);
             }
         }
         pthread_mutex_unlock(&stmt->streaming_conn->mutex);
         stmt->streaming_mode = 0;
+        stmt->streaming_conn->streaming_active = 0;
         stmt->streaming_conn = NULL;
     }
 
@@ -528,17 +550,39 @@ void pg_stmt_free(pg_stmt_t *stmt) {
 void pg_stmt_clear_result(pg_stmt_t *stmt) {
     if (!stmt) return;
 
-    // v0.9.28: If streaming mode is active, drain remaining results before clearing
+    // v0.9.29: Cancel + drain streaming results before clearing
+    // Use PQcancel to stop server-side query first, then drain remaining results.
     if (stmt->streaming_mode && stmt->streaming_conn) {
         pthread_mutex_lock(&stmt->streaming_conn->mutex);
         if (stmt->streaming_conn->conn) {
+            // Cancel the in-progress query on the server
+            PGcancel *cancel = PQgetCancel(stmt->streaming_conn->conn);
+            if (cancel) {
+                char errbuf[256];
+                if (!PQcancel(cancel, errbuf, sizeof(errbuf))) {
+                    LOG_ERROR("pg_stmt_clear_result: PQcancel failed: %s", errbuf);
+                }
+                PQfreeCancel(cancel);
+            }
+            // Drain remaining results (should be few after cancel)
             PGresult *drain;
+            int drain_count = 0;
             while ((drain = PQgetResult(stmt->streaming_conn->conn)) != NULL) {
+                drain_count++;
                 PQclear(drain);
+                if (drain_count > 1000) {
+                    LOG_ERROR("pg_stmt_clear_result: drain after cancel exceeded 1000 on %p", (void*)stmt->streaming_conn);
+                    break;
+                }
+            }
+            if (drain_count > 0) {
+                LOG_ERROR("pg_stmt_clear_result: drained %d results after cancel (sql=%.60s)",
+                         drain_count, stmt->sql ? stmt->sql : "?");
             }
         }
         pthread_mutex_unlock(&stmt->streaming_conn->mutex);
         stmt->streaming_mode = 0;
+        stmt->streaming_conn->streaming_active = 0;
         stmt->streaming_conn = NULL;
     }
 

@@ -594,8 +594,28 @@ test-streaming: $(TEST_BIN_DIR)/test_streaming_mode
 	@./$(TEST_BIN_DIR)/test_streaming_mode
 	@echo ""
 
+# Connection isolation tests (v0.9.29) — streaming_active flag, pool isolation
+$(TEST_BIN_DIR)/test_connection_isolation: $(TEST_DIR)/test_connection_isolation.c
+	@mkdir -p $(TEST_BIN_DIR)
+	$(CC) -o $@ $< -lpthread -Wall -Wextra
+
+test-isolation: $(TEST_BIN_DIR)/test_connection_isolation
+	@echo ""
+	@./$(TEST_BIN_DIR)/test_connection_isolation
+	@echo ""
+
+# Shadow SQLite dummy fallback tests (v0.9.29) — parameter counting, dummy generation
+$(TEST_BIN_DIR)/test_shadow_fallback: $(TEST_DIR)/test_shadow_fallback.c
+	@mkdir -p $(TEST_BIN_DIR)
+	$(CC) -o $@ $< -Wall -Wextra
+
+test-shadow: $(TEST_BIN_DIR)/test_shadow_fallback
+	@echo ""
+	@./$(TEST_BIN_DIR)/test_shadow_fallback
+	@echo ""
+
 # CI-safe subset: excludes tests needing LD_PRELOAD + shim (test-api, test-expanded, test-params)
-ci-test: test-recursion test-crash test-sql test-groupby test-upsert test-types test-soci test-cache test-tls test-fork test-reaper test-buffer test-logging test-exception test-fts test-config test-bind test-common test-statement test-stmt-free test-bind-mismatch test-parity test-uri test-streaming
+ci-test: test-recursion test-crash test-sql test-groupby test-upsert test-types test-soci test-cache test-tls test-fork test-reaper test-buffer test-logging test-exception test-fts test-config test-bind test-common test-statement test-stmt-free test-bind-mismatch test-parity test-uri test-streaming test-isolation test-shadow
 	@echo "All CI unit tests complete."
 
 # ============================================================================

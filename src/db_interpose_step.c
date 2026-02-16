@@ -23,7 +23,7 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
     }
     
     pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
-    
+
     // CRITICAL FIX v0.9.0: Set in_step flag to prevent concurrent bind
     if (pg_stmt) {
         atomic_store(&pg_stmt->in_step, 1);
@@ -178,15 +178,32 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                         return SQLITE_ERROR;
                     }
 
-                    // Drain any pending results before executing
+                    // v0.9.29: Cancel + drain any pending results before executing
                     PQsetnonblocking(cached_exec_conn->conn, 0);
                     while (PQisBusy(cached_exec_conn->conn)) {
                         PQconsumeInput(cached_exec_conn->conn);
                     }
+                    // Cancel any in-progress query first (streaming leftovers)
+                    {
+                        PGcancel *ce_cancel = PQgetCancel(cached_exec_conn->conn);
+                        if (ce_cancel) {
+                            char ce_errbuf[256];
+                            PQcancel(ce_cancel, ce_errbuf, sizeof(ce_errbuf));
+                            PQfreeCancel(ce_cancel);
+                        }
+                    }
                     PGresult *pending;
+                    int drain_ce = 0;
                     while ((pending = PQgetResult(cached_exec_conn->conn)) != NULL) {
-                        LOG_ERROR("CACHED EXEC: Drained orphaned result from connection %p", (void*)cached_exec_conn);
+                        drain_ce++;
+                        if (drain_ce <= 3)
+                            LOG_ERROR("CACHED EXEC: Drained orphaned result from connection %p (status=%d)",
+                                      (void*)cached_exec_conn, PQresultStatus(pending));
                         PQclear(pending);
+                        if (drain_ce > 1000) {
+                            LOG_ERROR("CACHED EXEC: Drain loop exceeded 1000 on %p — aborting drain", (void*)cached_exec_conn);
+                            break;
+                        }
                     }
 
                     // Use prepared statement for better performance (skip parse/plan)
@@ -318,15 +335,32 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                                 return SQLITE_ERROR;
                             }
 
-                            // Drain any pending results before executing
+                            // v0.9.29: Cancel + drain any pending results before executing
                             PQsetnonblocking(cached_read_conn->conn, 0);
                             while (PQisBusy(cached_read_conn->conn)) {
                                 PQconsumeInput(cached_read_conn->conn);
                             }
+                            // Cancel any in-progress query first
+                            {
+                                PGcancel *cr_cancel = PQgetCancel(cached_read_conn->conn);
+                                if (cr_cancel) {
+                                    char cr_errbuf[256];
+                                    PQcancel(cr_cancel, cr_errbuf, sizeof(cr_errbuf));
+                                    PQfreeCancel(cr_cancel);
+                                }
+                            }
                             PGresult *pending_read;
+                            int drain_cr = 0;
                             while ((pending_read = PQgetResult(cached_read_conn->conn)) != NULL) {
-                                LOG_ERROR("CACHED READ: Drained orphaned result from connection %p", (void*)cached_read_conn);
+                                drain_cr++;
+                                if (drain_cr <= 3)
+                                    LOG_ERROR("CACHED READ: Drained orphaned result from connection %p (status=%d)",
+                                              (void*)cached_read_conn, PQresultStatus(pending_read));
                                 PQclear(pending_read);
+                                if (drain_cr > 1000) {
+                                    LOG_ERROR("CACHED READ: Drain loop exceeded 1000 on %p — aborting drain", (void*)cached_read_conn);
+                                    break;
+                                }
                             }
 
                             // Use prepared statement for better performance (skip parse/plan)
@@ -498,7 +532,7 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
             // This matches SQLite's step() memory model: one row in memory.
             // ================================================================
 
-            // === STREAMING: Subsequent step() — fetch next row ===
+             // === STREAMING: Subsequent step() — fetch next row ===
             if (pg_stmt->streaming_mode) {
                 // Clear previous single-row result
                 if (pg_stmt->result) {
@@ -520,8 +554,11 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                 PGresult *row_res = PQgetResult(pg_stmt->streaming_conn->conn);
                 if (!row_res) {
                     // NULL = no more results (shouldn't happen before TUPLES_OK sentinel)
-                    LOG_DEBUG("STREAM: NULL result (connection done) stmt=%p", (void*)pStmt);
+                    LOG_ERROR("STREAM: NULL result (unexpected!) stmt=%p sql=%.100s streaming_conn=%p",
+                             (void*)pStmt, pg_stmt->pg_sql ? pg_stmt->pg_sql : "?",
+                             (void*)pg_stmt->streaming_conn);
                     pg_stmt->streaming_mode = 0;
+                    if (pg_stmt->streaming_conn) pg_stmt->streaming_conn->streaming_active = 0;
                     pg_stmt->streaming_conn = NULL;
                     pg_stmt->read_done = 1;
                     pthread_mutex_unlock(&pg_stmt->mutex);
@@ -543,6 +580,7 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                     PGresult *final_null = PQgetResult(pg_stmt->streaming_conn->conn);
                     if (final_null) PQclear(final_null);  // Should be NULL, but be safe
                     pg_stmt->streaming_mode = 0;
+                    if (pg_stmt->streaming_conn) pg_stmt->streaming_conn->streaming_active = 0;
                     pg_stmt->streaming_conn = NULL;
                     pg_stmt->read_done = 1;
                     pthread_mutex_unlock(&pg_stmt->mutex);
@@ -557,6 +595,7 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                     PGresult *drain;
                     while ((drain = PQgetResult(pg_stmt->streaming_conn->conn)) != NULL) PQclear(drain);
                     pg_stmt->streaming_mode = 0;
+                    if (pg_stmt->streaming_conn) pg_stmt->streaming_conn->streaming_active = 0;
                     pg_stmt->streaming_conn = NULL;
                     pg_stmt->read_done = 1;
                     pthread_mutex_unlock(&pg_stmt->mutex);
@@ -670,15 +709,37 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                     }
                 }
 
-                // Drain any pending data
+                // v0.9.29: Cancel + drain any pending data
                 PQsetnonblocking(exec_conn->conn, 0);
                 while (PQisBusy(exec_conn->conn)) {
                     PQconsumeInput(exec_conn->conn);
                 }
+                // Cancel any in-progress query first (streaming leftovers)
+                {
+                    PGcancel *rd_cancel = PQgetCancel(exec_conn->conn);
+                    if (rd_cancel) {
+                        char rd_errbuf[256];
+                        PQcancel(rd_cancel, rd_errbuf, sizeof(rd_errbuf));
+                        PQfreeCancel(rd_cancel);
+                    }
+                }
                 PGresult *pending;
+                int drain_count_r = 0;
                 while ((pending = PQgetResult(exec_conn->conn)) != NULL) {
-                    LOG_ERROR("STEP: Drained orphaned result from connection %p", (void*)exec_conn);
+                    drain_count_r++;
+                    if (drain_count_r <= 3) {
+                        LOG_ERROR("STEP READ: Drained orphaned result from connection %p (status=%d: %s)",
+                                  (void*)exec_conn, PQresultStatus(pending),
+                                  PQresStatus(PQresultStatus(pending)));
+                    }
                     PQclear(pending);
+                    if (drain_count_r > 1000) {
+                        LOG_ERROR("STEP READ: Drain loop exceeded 1000 on %p — aborting drain", (void*)exec_conn);
+                        break;
+                    }
+                }
+                if (drain_count_r > 3) {
+                    LOG_ERROR("STEP READ: Drained %d orphaned results total from connection %p", drain_count_r, (void*)exec_conn);
                 }
 
                 // ============================================================
@@ -774,6 +835,7 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                 pg_stmt->streaming_mode = 1;
                 pg_stmt->streaming_conn = exec_conn;
                 pg_stmt->result_conn = exec_conn;
+                exec_conn->streaming_active = 1;  // v0.9.29: Mark connection as busy with streaming
                 pg_stmt->metadata_only_result = 0;
 
                 // Unlock connection mutex — streaming mode means we own the
@@ -784,6 +846,7 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                 PGresult *first_res = PQgetResult(exec_conn->conn);
                 if (!first_res) {
                     pg_stmt->streaming_mode = 0;
+                    if (pg_stmt->streaming_conn) pg_stmt->streaming_conn->streaming_active = 0;
                     pg_stmt->streaming_conn = NULL;
                     pg_stmt->read_done = 1;
                     pthread_mutex_unlock(&pg_stmt->mutex);
@@ -791,6 +854,7 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                 }
 
                 ExecStatusType first_status = PQresultStatus(first_res);
+
                 if (first_status == PGRES_SINGLE_TUPLE) {
                     // First row available
                     pg_stmt->result = first_res;
@@ -805,10 +869,13 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                     return SQLITE_ROW;
                 } else if (first_status == PGRES_TUPLES_OK) {
                     // Zero rows — TUPLES_OK sentinel immediately
+                    LOG_ERROR("STREAM: zero rows returned for sql=%.200s",
+                             pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
                     PQclear(first_res);
                     PGresult *final_null = PQgetResult(exec_conn->conn);
                     if (final_null) PQclear(final_null);
                     pg_stmt->streaming_mode = 0;
+                    if (pg_stmt->streaming_conn) pg_stmt->streaming_conn->streaming_active = 0;
                     pg_stmt->streaming_conn = NULL;
                     pg_stmt->num_cols = 0;
                     pg_stmt->num_rows = 0;
@@ -824,6 +891,7 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                     PGresult *drain;
                     while ((drain = PQgetResult(exec_conn->conn)) != NULL) PQclear(drain);
                     pg_stmt->streaming_mode = 0;
+                    if (pg_stmt->streaming_conn) pg_stmt->streaming_conn->streaming_active = 0;
                     pg_stmt->streaming_conn = NULL;
                     pg_pool_check_connection_health(exec_conn);
                     pthread_mutex_unlock(&pg_stmt->mutex);
@@ -1055,15 +1123,37 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                 }
             }
 
-            // CRITICAL: Ensure connection is in blocking mode and consume any pending data
+            // v0.9.29: Cancel + drain any pending data before write
             PQsetnonblocking(exec_conn->conn, 0);
             while (PQisBusy(exec_conn->conn)) {
                 PQconsumeInput(exec_conn->conn);
             }
+            // Cancel any in-progress query first (streaming leftovers)
+            {
+                PGcancel *wr_cancel = PQgetCancel(exec_conn->conn);
+                if (wr_cancel) {
+                    char wr_errbuf[256];
+                    PQcancel(wr_cancel, wr_errbuf, sizeof(wr_errbuf));
+                    PQfreeCancel(wr_cancel);
+                }
+            }
             PGresult *pending;
+            int drain_count = 0;
             while ((pending = PQgetResult(exec_conn->conn)) != NULL) {
-                LOG_ERROR("STEP WRITE: Drained orphaned result from connection %p", (void*)exec_conn);
+                drain_count++;
+                if (drain_count <= 3) {
+                    LOG_ERROR("STEP WRITE: Drained orphaned result from connection %p (status=%d: %s)",
+                              (void*)exec_conn, PQresultStatus(pending),
+                              PQresStatus(PQresultStatus(pending)));
+                }
                 PQclear(pending);
+                if (drain_count > 1000) {
+                    LOG_ERROR("STEP WRITE: Drain loop exceeded 1000 on %p — aborting drain", (void*)exec_conn);
+                    break;
+                }
+            }
+            if (drain_count > 3) {
+                LOG_ERROR("STEP WRITE: Drained %d orphaned results total from connection %p", drain_count, (void*)exec_conn);
             }
 
             // Execute write

@@ -112,6 +112,11 @@ typedef struct pg_connection {
     char last_error[1024];           // Track last PostgreSQL error message
     int last_error_code;             // Track last SQLite-style error code
 
+    // v0.9.29: Streaming mode lock — when 1, this connection is exclusively owned
+    // by a streaming query (PQsetSingleRowMode). Other queries on the same thread
+    // must use a different connection from the pool.
+    volatile int streaming_active;
+
     // Prepared statement cache for this connection
     stmt_cache_t stmt_cache;
 } pg_connection_t;
