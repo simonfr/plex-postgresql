@@ -774,17 +774,12 @@ int my_sqlite3_prepare_v2_internal(sqlite3 *db, const char *zSql, int nByte,
                 }
 
                 // Use parameter count from SQL translator (already counted during placeholder translation)
-                // The translator always returns param_count even if translation failed
-                if (trans.param_count > 0) {
-                    pg_stmt->param_count = trans.param_count;
-                } else {
-                    // Fallback: count ? in original SQL if translator didn't provide count
-                    const char *p = zSql;
-                    while (*p) {
-                        if (*p == '?') pg_stmt->param_count++;
-                        p++;
-                    }
-                }
+                // The translator correctly handles ? inside string literals (returns 0 for those).
+                // CRITICAL FIX: Never fall back to naive ? counting — it doesn't respect
+                // string boundaries and causes "bind message supplies N parameters, but
+                // prepared statement requires 0" errors for queries like:
+                //   UPDATE metadata_items SET guid=REPLACE(guid,'?lang=en','?lang=xn')
+                pg_stmt->param_count = trans.param_count;
 
                 // Store parameter names for mapping named parameters
                 if (trans.param_names && trans.param_count > 0) {
