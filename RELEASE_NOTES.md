@@ -1,3 +1,57 @@
+# Release Notes - v0.9.29
+
+**Release Date:** February 16, 2026
+
+Fixed streaming connection corruption that caused Plex to re-run all migrations and crash with `std::bad_cast`. Added single-row streaming for all READ queries.
+
+## Highlights
+
+### Connection Isolation Fix (v0.9.29)
+
+- **Problem:** `resolve_column_tables()` and `preload_decltype_cache()` called `PQexec()` on the streaming connection, consuming pending results. The next `PQgetResult` returned NULL, making Plex think no migrations had run, triggering a full re-migration and `std::bad_cast` crash.
+- **Fix:** Both functions now acquire an alternate pool connection when the passed connection has `streaming_active=1`. Pool acquisition (fast path + PHASE 1) also skips streaming connections. `PQcancel` is called before all 6 drain loops.
+- **Result:** Plex starts cleanly, continueWatching endpoint returns full JSON.
+
+### Single-Row Streaming Mode (v0.9.28)
+
+- **Feature:** All READ queries now use PostgreSQL's `PQsetSingleRowMode` to stream results row by row instead of loading entire result sets into memory.
+- **Fallback:** If `PQsetSingleRowMode` fails, automatic fallback to eager fetch.
+
+### Dummy Shadow Statement Fallback (v0.9.29)
+
+- **Feature:** When shadow SQLite prepare fails for READ queries, a dummy `SELECT 1 WHERE ? IS NOT NULL AND ...` is built with matching parameter count so `sqlite3_bind_*` calls succeed and the query runs purely on PostgreSQL.
+
+### SQL Translation Fixes (v0.9.28)
+
+- Placeholder counting missed parameters after string literals
+- Upsert translation failed when column list was absent
+- String quoting edge cases
+
+## Testing
+
+798 unit tests across 24 suites, 0 failures. 37 new tests:
+- 17 connection isolation tests (streaming_active lifecycle, pool isolation, resolve/decltype guards, multi-threaded)
+- 20 shadow fallback tests (parameter counting, dummy generation, edge cases, end-to-end)
+
+## Upgrade Notes
+
+1. Re-run `scripts/install_wrappers.sh` (macOS) or restart the service (Linux/Docker) after updating.
+2. No database changes required.
+
+## Files Changed
+
+- `src/pg_types.h` — Added `streaming_active` flag to `pg_connection_t`
+- `src/pg_client.c` — Pool streaming guards (fast path + PHASE 1)
+- `src/pg_statement.c` — PQcancel in free/clear_result, streaming_active clear
+- `src/db_interpose_step.c` — PQcancel in drain loops, streaming_active set/clear
+- `src/db_interpose_column.c` — resolve_column_tables + preload_decltype_cache streaming guards
+- `src/db_interpose_prepare.c` — DDL IF NOT EXISTS + dummy shadow fallback
+- `tests/src/test_connection_isolation.c` — 17 new tests
+- `tests/src/test_shadow_fallback.c` — 20 new tests
+- `Makefile` — Added test-isolation, test-shadow targets
+
+---
+
 # Release Notes - v0.9.27
 
 **Release Date:** February 14, 2026
