@@ -584,8 +584,18 @@ test-uri: $(TEST_BIN_DIR)/test_uri_rewrite
 unit-test: test-recursion test-crash test-sql test-groupby test-upsert test-types test-soci test-cache test-tls test-fork test-reaper test-buffer test-api test-expanded test-params test-logging test-exception test-fts test-config test-bind test-common test-statement test-stmt-free test-bind-mismatch test-parity test-uri
 	@echo "All unit tests complete."
 
+# Single-row streaming mode tests (v0.9.28)
+$(TEST_BIN_DIR)/test_streaming_mode: $(TEST_DIR)/test_streaming_mode.c
+	@mkdir -p $(TEST_BIN_DIR)
+	$(CC) -o $@ $< -lpthread -Wall -Wextra
+
+test-streaming: $(TEST_BIN_DIR)/test_streaming_mode
+	@echo ""
+	@./$(TEST_BIN_DIR)/test_streaming_mode
+	@echo ""
+
 # CI-safe subset: excludes tests needing LD_PRELOAD + shim (test-api, test-expanded, test-params)
-ci-test: test-recursion test-crash test-sql test-groupby test-upsert test-types test-soci test-cache test-tls test-fork test-reaper test-buffer test-logging test-exception test-fts test-config test-bind test-common test-statement test-stmt-free test-bind-mismatch test-parity test-uri
+ci-test: test-recursion test-crash test-sql test-groupby test-upsert test-types test-soci test-cache test-tls test-fork test-reaper test-buffer test-logging test-exception test-fts test-config test-bind test-common test-statement test-stmt-free test-bind-mismatch test-parity test-uri test-streaming
 	@echo "All CI unit tests complete."
 
 # ============================================================================
