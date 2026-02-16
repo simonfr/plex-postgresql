@@ -313,7 +313,11 @@ The speed difference is small. The main win is fewer database locks.
 
 ## How It Works
 
-The shim catches `sqlite3_*` calls, rewrites SQLite SQL to PostgreSQL SQL, and runs it through libpq. More technical details are in **[wiki/How It Works](https://github.com/cgnl/plex-postgresql/wiki/How-It-Works)**.
+The shim catches `sqlite3_*` calls, rewrites SQLite SQL to PostgreSQL SQL, and runs it through libpq.
+
+**Streaming mode** (v0.9.28+): READ queries use PostgreSQL's single-row streaming (`PQsetSingleRowMode`) to fetch results row by row instead of loading the entire result set into memory. This is always on with automatic fallback to eager fetch if streaming fails. Each streaming query gets exclusive use of its connection — other queries automatically use a different connection from the pool.
+
+More technical details are in **[wiki/How It Works](https://github.com/cgnl/plex-postgresql/wiki/How-It-Works)**.
 
 ## Testing
 
