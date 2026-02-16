@@ -2972,6 +2972,161 @@ static void test_nulls_first_ordering(void) {
 }
 
 // ============================================================================
+// Placeholder Bug Fix Tests - ? inside string literals
+// ============================================================================
+
+static void test_placeholder_question_in_string_literal(void) {
+    TEST("Placeholder - ? inside single-quoted string -> not a param");
+    char **names = NULL;
+    int count = 0;
+    char *result = sql_translate_placeholders(
+        "UPDATE metadata_items SET guid=REPLACE(guid,'?lang=en','?lang=xn') "
+        "WHERE guid LIKE 'com.plexapp.agents.none%'", &names, &count);
+    if (result && count == 0) {
+        PASS();
+    } else {
+        FAIL("Expected 0 params (? is inside string)");
+        if (result) printf("    Got: %s (count=%d)\n", result, count);
+    }
+    if (result) free(result);
+    if (names) {
+        for (int i = 0; i < count; i++) if (names[i]) free(names[i]);
+        free(names);
+    }
+}
+
+static void test_placeholder_question_in_string_mixed(void) {
+    TEST("Placeholder - ? in string + real ? param -> 1 param");
+    char **names = NULL;
+    int count = 0;
+    char *result = sql_translate_placeholders(
+        "UPDATE t SET c=REPLACE(c,'?old','?new') WHERE id=?", &names, &count);
+    if (result && count == 1 && strstr(result, "$1")) {
+        PASS();
+    } else {
+        FAIL("Expected 1 param");
+        if (result) printf("    Got: %s (count=%d)\n", result, count);
+    }
+    if (result) free(result);
+    if (names) {
+        for (int i = 0; i < count; i++) if (names[i]) free(names[i]);
+        free(names);
+    }
+}
+
+static void test_placeholder_backslash_in_string(void) {
+    TEST("Placeholder - backslash before closing quote is literal (SQL standard)");
+    char **names = NULL;
+    int count = 0;
+    // In standard SQL, backslash is literal. 'abc\' is a complete string.
+    // The ? after should be a real parameter.
+    char *result = sql_translate_placeholders(
+        "SELECT * FROM t WHERE path='C:\\Users\\' AND id=?", &names, &count);
+    if (result && count == 1 && strstr(result, "$1")) {
+        PASS();
+    } else {
+        FAIL("Expected 1 param (backslash is literal in SQL strings)");
+        if (result) printf("    Got: %s (count=%d)\n", result, count);
+    }
+    if (result) free(result);
+    if (names) {
+        for (int i = 0; i < count; i++) if (names[i]) free(names[i]);
+        free(names);
+    }
+}
+
+static void test_placeholder_doubled_quote_with_question(void) {
+    TEST("Placeholder - doubled quotes ('it''s a ?test') -> 0 params");
+    char **names = NULL;
+    int count = 0;
+    char *result = sql_translate_placeholders(
+        "INSERT INTO t VALUES('it''s a ?test')", &names, &count);
+    if (result && count == 0) {
+        PASS();
+    } else {
+        FAIL("Expected 0 params");
+        if (result) printf("    Got: %s (count=%d)\n", result, count);
+    }
+    if (result) free(result);
+    if (names) {
+        for (int i = 0; i < count; i++) if (names[i]) free(names[i]);
+        free(names);
+    }
+}
+
+static void test_placeholder_four_quotes_with_question(void) {
+    TEST("Placeholder - four quotes ('''?''') -> 0 params");
+    char **names = NULL;
+    int count = 0;
+    // '''' is an escaped single quote inside a string = string containing one quote
+    // '''?''' = string with quote, then outside ?, then string with quote?
+    // Actually: ' '' ' ? ' '' ' — that's three separate strings with ? between
+    // No wait: SQL parser: ' (start) '' (escaped ') ? (still in string) '' (escaped ') ' (end)
+    // So the whole thing is one string: 'escaped-quote ? escaped-quote'
+    char *result = sql_translate_placeholders(
+        "INSERT INTO t VALUES('''?''')", &names, &count);
+    if (result && count == 0) {
+        PASS();
+    } else {
+        FAIL("Expected 0 params");
+        if (result) printf("    Got: %s (count=%d)\n", result, count);
+    }
+    if (result) free(result);
+    if (names) {
+        for (int i = 0; i < count; i++) if (names[i]) free(names[i]);
+        free(names);
+    }
+}
+
+// ============================================================================
+// Upsert Translation Tests - INSERT OR REPLACE without column list
+// ============================================================================
+
+static void test_upsert_tags_without_column_list(void) {
+    TEST("Upsert - INSERT OR REPLACE INTO tags VALUES(...) uses implicit columns");
+    char *result = translate_insert_or_replace(
+        "INSERT OR REPLACE INTO tags VALUES(1, 100, 'Drama', 1, '', '', '', 1000, 2000, 0, '', 'genre-drama', NULL)");
+    if (result && strstr(result, "ON CONFLICT") && strstr(result, "DO UPDATE SET") &&
+        strstr(result, "metadata_item_id = EXCLUDED.metadata_item_id") &&
+        strstr(result, "tag = EXCLUDED.tag") &&
+        !strstr(result, "id = EXCLUDED.id")) {  // id should be skipped (conflict column)
+        PASS();
+    } else {
+        FAIL("Expected ON CONFLICT with implicit column SET clause");
+        if (result) printf("    Got: %.200s\n", result);
+    }
+    if (result) free(result);
+}
+
+static void test_upsert_tags_with_column_list(void) {
+    TEST("Upsert - INSERT OR REPLACE INTO tags (id, tag) VALUES(...) works");
+    char *result = translate_insert_or_replace(
+        "INSERT OR REPLACE INTO tags (id, tag, tag_type) VALUES(1, 'Drama', 1)");
+    if (result && strstr(result, "ON CONFLICT") && strstr(result, "DO UPDATE SET") &&
+        strstr(result, "tag = EXCLUDED.tag")) {
+        PASS();
+    } else {
+        FAIL("Expected ON CONFLICT clause");
+        if (result) printf("    Got: %.200s\n", result);
+    }
+    if (result) free(result);
+}
+
+static void test_upsert_unknown_table_no_columns(void) {
+    TEST("Upsert - INSERT OR REPLACE INTO unknown_tbl VALUES(...) -> fallback");
+    char *result = translate_insert_or_replace(
+        "INSERT OR REPLACE INTO unknown_tbl VALUES(1, 'test')");
+    // Without column list and no implicit mapping, should fall back to plain INSERT
+    if (result && strstr(result, "INSERT INTO") && !strstr(result, "OR REPLACE")) {
+        PASS();
+    } else {
+        FAIL("Expected fallback to plain INSERT");
+        if (result) printf("    Got: %.200s\n", result);
+    }
+    if (result) free(result);
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 
@@ -3257,6 +3412,18 @@ int main(void) {
     test_nulls_first_existing_orderby();
     test_nulls_first_no_orderby();
     test_nulls_first_before_limit();
+
+    printf("\n\033[1mPlaceholder Bug Fix (? in string literals):\033[0m\n");
+    test_placeholder_question_in_string_literal();
+    test_placeholder_question_in_string_mixed();
+    test_placeholder_backslash_in_string();
+    test_placeholder_doubled_quote_with_question();
+    test_placeholder_four_quotes_with_question();
+
+    printf("\n\033[1mUpsert (INSERT OR REPLACE without column list):\033[0m\n");
+    test_upsert_tags_without_column_list();
+    test_upsert_tags_with_column_list();
+    test_upsert_unknown_table_no_columns();
 
     // Cleanup
     sql_translator_cleanup();

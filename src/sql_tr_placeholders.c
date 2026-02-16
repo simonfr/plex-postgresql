@@ -31,14 +31,29 @@ char* sql_translate_placeholders(const char *sql, char ***param_names_out, int *
         // NOTE: Double quotes are identifier quotes in SQL, not string delimiters.
         // At this stage input still uses backticks for identifiers (not double quotes),
         // but we only track single quotes regardless to avoid issues with either format.
-        if (*p == '\'' && (p == sql || *(p-1) != '\\')) {
+        //
+        // SQL escaping: In standard SQL (and PostgreSQL with standard_conforming_strings=on,
+        // the default since PG 9.1), backslash is a LITERAL character inside strings.
+        // Only doubled quotes ('') escape a quote. We must NOT treat \' as an escape.
+        if (*p == '\'') {
             if (!in_string) {
                 in_string = 1;
                 string_char = *p;
+                *out++ = *p++;
             } else if (*p == string_char) {
-                in_string = 0;
+                // Check for SQL-standard escaped quote ('')
+                if (*(p+1) == '\'') {
+                    // Doubled quote — stays inside string, copy both
+                    *out++ = *p++;
+                    *out++ = *p++;
+                } else {
+                    // End of string
+                    in_string = 0;
+                    *out++ = *p++;
+                }
+            } else {
+                *out++ = *p++;
             }
-            *out++ = *p++;
             continue;
         }
 
