@@ -421,6 +421,20 @@ void pg_stmt_free(pg_stmt_t *stmt) {
         }
     }
 
+    // v0.9.28: Drain streaming results before freeing
+    if (stmt->streaming_mode && stmt->streaming_conn) {
+        pthread_mutex_lock(&stmt->streaming_conn->mutex);
+        if (stmt->streaming_conn->conn) {
+            PGresult *drain;
+            while ((drain = PQgetResult(stmt->streaming_conn->conn)) != NULL) {
+                PQclear(drain);
+            }
+        }
+        pthread_mutex_unlock(&stmt->streaming_conn->mutex);
+        stmt->streaming_mode = 0;
+        stmt->streaming_conn = NULL;
+    }
+
     LOG_DEBUG("pg_stmt_free: START stmt=%p sql=%p pg_sql=%p",
               (void*)stmt, (void*)stmt->sql, (void*)stmt->pg_sql);
 
@@ -513,6 +527,21 @@ void pg_stmt_free(pg_stmt_t *stmt) {
 
 void pg_stmt_clear_result(pg_stmt_t *stmt) {
     if (!stmt) return;
+
+    // v0.9.28: If streaming mode is active, drain remaining results before clearing
+    if (stmt->streaming_mode && stmt->streaming_conn) {
+        pthread_mutex_lock(&stmt->streaming_conn->mutex);
+        if (stmt->streaming_conn->conn) {
+            PGresult *drain;
+            while ((drain = PQgetResult(stmt->streaming_conn->conn)) != NULL) {
+                PQclear(drain);
+            }
+        }
+        pthread_mutex_unlock(&stmt->streaming_conn->mutex);
+        stmt->streaming_mode = 0;
+        stmt->streaming_conn = NULL;
+    }
+
     if (stmt->result) {
         PQclear(stmt->result);
         stmt->result = NULL;
