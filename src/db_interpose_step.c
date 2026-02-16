@@ -491,48 +491,108 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                 pg_stmt->current_row = -1;
             }
 
-            if (!pg_stmt->result) {
-                // ============================================================
-                // QUERY RESULT CACHE: Check if we have cached results
-                // This is critical for Plex's OnDeck which runs 2000+ identical queries
-                // ============================================================
-                #if 0  // DISABLED: Cache causes infinite loop on continueWatching
-                LOG_DEBUG("CACHE_LOOKUP: checking cache for sql=%.60s", pg_stmt->pg_sql ? pg_stmt->pg_sql : "NULL");
-                cached_result_t *cached = pg_query_cache_lookup(pg_stmt);
-                LOG_DEBUG("CACHE_LOOKUP: result=%p", (void*)cached);
-                if (cached) {
-                    // Cache hit! Use cached result instead of hitting PostgreSQL
-                    // Store cache metadata in pg_stmt for column access
-                    pg_stmt->num_rows = cached->num_rows;
-                    pg_stmt->num_cols = cached->num_cols;
-                    pg_stmt->current_row = 0;
-                    pg_stmt->result_conn = NULL;  // No real PGresult
+            // ================================================================
+            // v0.9.28: SINGLE-ROW STREAMING MODE
+            // Instead of fetching entire PGresult eagerly, we use
+            // PQsetSingleRowMode to fetch one row at a time.
+            // This matches SQLite's step() memory model: one row in memory.
+            // ================================================================
 
-                    // Store pointer to cached result for column_* functions
-                    // We'll use a special marker to indicate cached result
-                    pg_stmt->cached_result = cached;
-
-                    pthread_mutex_unlock(&pg_stmt->mutex);
-                    return (cached->num_rows > 0) ? SQLITE_ROW : SQLITE_DONE;
+            // === STREAMING: Subsequent step() — fetch next row ===
+            if (pg_stmt->streaming_mode) {
+                // Clear previous single-row result
+                if (pg_stmt->result) {
+                    PQclear(pg_stmt->result);
+                    pg_stmt->result = NULL;
                 }
-                #endif
 
+                // Clear cached text/blob for previous row
+                for (int i = 0; i < MAX_PARAMS; i++) {
+                    if (pg_stmt->cached_text[i]) { free(pg_stmt->cached_text[i]); pg_stmt->cached_text[i] = NULL; }
+                    if (pg_stmt->cached_blob[i]) { free(pg_stmt->cached_blob[i]); pg_stmt->cached_blob[i] = NULL; pg_stmt->cached_blob_len[i] = 0; }
+                    if (pg_stmt->decoded_blobs[i]) { free(pg_stmt->decoded_blobs[i]); pg_stmt->decoded_blobs[i] = NULL; pg_stmt->decoded_blob_lens[i] = 0; }
+                }
+                pg_stmt->cached_row = -1;
+                pg_stmt->decoded_blob_row = -1;
+
+                // Fetch next row (connection mutex NOT held — single-row mode
+                // means the connection is exclusively ours until we drain all results)
+                PGresult *row_res = PQgetResult(pg_stmt->streaming_conn->conn);
+                if (!row_res) {
+                    // NULL = no more results (shouldn't happen before TUPLES_OK sentinel)
+                    LOG_DEBUG("STREAM: NULL result (connection done) stmt=%p", (void*)pStmt);
+                    pg_stmt->streaming_mode = 0;
+                    pg_stmt->streaming_conn = NULL;
+                    pg_stmt->read_done = 1;
+                    pthread_mutex_unlock(&pg_stmt->mutex);
+                    return SQLITE_DONE;
+                }
+
+                ExecStatusType row_status = PQresultStatus(row_res);
+                if (row_status == PGRES_SINGLE_TUPLE) {
+                    // Got a row
+                    pg_stmt->result = row_res;
+                    pg_stmt->current_row = 0;  // Always row 0 in single-row result
+                    pg_stmt->num_rows = 1;
+                    pg_stmt->num_cols = PQnfields(row_res);
+                    pthread_mutex_unlock(&pg_stmt->mutex);
+                    return SQLITE_ROW;
+                } else if (row_status == PGRES_TUPLES_OK) {
+                    // Empty sentinel = end of rows. Drain final NULL.
+                    PQclear(row_res);
+                    PGresult *final_null = PQgetResult(pg_stmt->streaming_conn->conn);
+                    if (final_null) PQclear(final_null);  // Should be NULL, but be safe
+                    pg_stmt->streaming_mode = 0;
+                    pg_stmt->streaming_conn = NULL;
+                    pg_stmt->read_done = 1;
+                    pthread_mutex_unlock(&pg_stmt->mutex);
+                    return SQLITE_DONE;
+                } else {
+                    // Error during streaming
+                    const char *err = PQerrorMessage(pg_stmt->streaming_conn->conn);
+                    LOG_ERROR("STREAM ERROR: %s (status=%d) sql=%.100s",
+                             err ? err : "(null)", (int)row_status, pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
+                    PQclear(row_res);
+                    // Drain remaining results to free connection
+                    PGresult *drain;
+                    while ((drain = PQgetResult(pg_stmt->streaming_conn->conn)) != NULL) PQclear(drain);
+                    pg_stmt->streaming_mode = 0;
+                    pg_stmt->streaming_conn = NULL;
+                    pg_stmt->read_done = 1;
+                    pthread_mutex_unlock(&pg_stmt->mutex);
+                    return SQLITE_DONE;  // Treat as empty result rather than error
+                }
+            }
+
+            // === NON-STREAMING: Subsequent step() on eager result — advance row ===
+            if (pg_stmt->result) {
+                pg_stmt->current_row++;
+                if (pg_stmt->current_row >= pg_stmt->num_rows) {
+                    PQclear(pg_stmt->result);
+                    pg_stmt->result = NULL;
+                    pg_stmt->result_conn = NULL;
+                    pg_stmt->read_done = 1;
+                    pthread_mutex_unlock(&pg_stmt->mutex);
+                    return SQLITE_DONE;
+                }
+                pthread_mutex_unlock(&pg_stmt->mutex);
+                return SQLITE_ROW;
+            }
+
+            // === FIRST step() — send query and decide streaming vs eager ===
+            if (!pg_stmt->result) {
                 // Track which thread is executing this statement
                 pthread_t current = pthread_self();
                 pg_stmt->executing_thread = current;
 
                 // CRITICAL FIX v0.9.4: Lock connection BEFORE status check to prevent TOCTOU race
-                // Another thread could PQfinish() between the check and use, causing SIGSEGV
                 if (!exec_conn || !exec_conn->conn) {
-                    // v0.9.17: Retry once — pool may have all slots in ERROR/RECONNECTING
-                    // after a PG restart; a brief wait lets the pool recover
                     LOG_ERROR("STEP SELECT: NULL connection, retrying in 500ms (exec_conn=%p)",
                              (void*)exec_conn);
                     pthread_mutex_unlock(&pg_stmt->mutex);
-                    usleep(500000);  // 500ms
+                    usleep(500000);
                     pthread_mutex_lock(&pg_stmt->mutex);
 
-                    // Re-resolve connection from pool
                     sqlite3 *retry_db = sqlite3_db_handle(pg_stmt->shadow_stmt);
                     pg_connection_t *retry_handle = pg_find_connection(retry_db);
                     if (retry_handle && retry_handle->db_path[0]) {
@@ -546,15 +606,9 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                     LOG_ERROR("STEP SELECT: reconnect retry succeeded (exec_conn=%p)", (void*)exec_conn);
                 }
 
-                // CRITICAL: Touch connection to prevent pool from releasing it during long queries
                 pg_pool_touch_connection(exec_conn);
-
-                // CRITICAL: Lock connection mutex BEFORE checking status (TOCTOU fix)
-                // This prevents protocol desync and prevents other threads from freeing conn
                 pthread_mutex_lock(&exec_conn->mutex);
 
-                // TOCTOU FIX v0.9.4.2: Re-check conn after acquiring lock
-                // Another thread may have freed/corrupted conn between initial check and lock
                 if (!exec_conn->conn) {
                     LOG_ERROR("STEP SELECT: conn became NULL after lock (TOCTOU race)");
                     pthread_mutex_unlock(&exec_conn->mutex);
@@ -562,10 +616,9 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                     return SQLITE_ERROR;
                 }
 
-                // Now check connection status while holding the lock
+                // Connection recovery (same as before)
                 ConnStatusType conn_status = PQstatus(exec_conn->conn);
                 if (conn_status != CONNECTION_OK) {
-                    // Enhanced diagnostics for CONNECTION_BAD (v0.9.4.3)
                     const char *pg_err = PQerrorMessage(exec_conn->conn);
                     LOG_ERROR("=== CONNECTION_BAD DIAGNOSTIC (READ) ===");
                     LOG_ERROR("  Status: %d, Thread: %p", (int)conn_status, (void*)pthread_self());
@@ -606,20 +659,19 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                     } else {
                         LOG_ERROR("STEP READ: PQreset succeeded, connection recovered");
                     }
-                    // Re-apply settings after reset
                     pg_conn_config_t *cfg = pg_config_get();
                     if (cfg) {
                         char schema_cmd[256];
                         snprintf(schema_cmd, sizeof(schema_cmd), "SET search_path TO %s, public", cfg->schema);
                         PGresult *r = PQexec(exec_conn->conn, schema_cmd);
                         PQclear(r);
-                        r = PQexec(exec_conn->conn, "SET statement_timeout = '10s'");
+                        r = PQexec(exec_conn->conn, "SET statement_timeout = '5min'");
                         PQclear(r);
                     }
                 }
 
-                // Ensure connection is in blocking mode and consume any pending data
-                PQsetnonblocking(exec_conn->conn, 0);  // Force blocking mode
+                // Drain any pending data
+                PQsetnonblocking(exec_conn->conn, 0);
                 while (PQisBusy(exec_conn->conn)) {
                     PQconsumeInput(exec_conn->conn);
                 }
@@ -629,152 +681,154 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                     PQclear(pending);
                 }
 
-                // Use prepared statements for better performance (skip parse/plan overhead)
-                // v0.9.7: Re-enabled with better error handling
-                // Planning overhead (2ms/query) causes 48s delay on 24k queries
+                // ============================================================
+                // v0.9.28: Send query asynchronously for single-row streaming
+                // ============================================================
+
+                // v0.9.28: Raise statement_timeout for streaming queries.
+                // The default 60s was too aggressive — some Plex migration/scan queries
+                // legitimately take longer on large libraries.
+                {
+                    PGresult *to_res = PQexec(exec_conn->conn, "SET statement_timeout = '5min'");
+                    PQclear(to_res);
+                }
+
+                int send_ok = 0;
+
+                // Ensure prepared statement exists
                 LOG_DEBUG("PREPARED CHECK: use_prepared=%d stmt_name[0]=%d pg_sql=%p",
                          pg_stmt->use_prepared, (int)pg_stmt->stmt_name[0], (void*)pg_stmt->pg_sql);
                 if (pg_stmt->use_prepared && pg_stmt->stmt_name[0] && pg_stmt->pg_sql) {
-                    LOG_DEBUG("PREPARED PATH: stmt_name=%s sql=%.60s",
-                             pg_stmt->stmt_name, pg_stmt->pg_sql);
                     const char *cached_name = NULL;
                     int is_cached = pg_stmt_cache_lookup(exec_conn, pg_stmt->sql_hash, &cached_name);
 
                     if (!is_cached) {
-                        // Prepare statement on this connection (mutex already held)
                         PGresult *prep_res = PQprepare(exec_conn->conn, pg_stmt->stmt_name,
                                                         pg_stmt->pg_sql, pg_stmt->param_count, NULL);
                         if (PQresultStatus(prep_res) == PGRES_COMMAND_OK) {
                             pg_stmt_cache_add(exec_conn, pg_stmt->sql_hash, pg_stmt->stmt_name, pg_stmt->param_count);
                             cached_name = pg_stmt->stmt_name;
                             is_cached = 1;
-                            LOG_DEBUG("PREPARED_STMT: New statement %s (params=%d)", pg_stmt->stmt_name, pg_stmt->param_count);
                         } else {
-                            // Prepare failed - fall back to PQexecParams
                             LOG_ERROR("PQprepare failed for %s: %s", pg_stmt->stmt_name, PQerrorMessage(exec_conn->conn));
                         }
                         PQclear(prep_res);
-                    } else {
-                        LOG_DEBUG("PREPARED_STMT: Cache hit for %s", cached_name);
                     }
 
                     if (is_cached && cached_name) {
-                        // Execute prepared statement
-                        LOG_DEBUG("EXEC_PREPARED: stmt=%s params=%d",
-                                 cached_name, pg_stmt->param_count);
-                        pg_stmt->result = PQexecPrepared(exec_conn->conn, cached_name,
+                        send_ok = PQsendQueryPrepared(exec_conn->conn, cached_name,
                             pg_stmt->param_count, paramValues, NULL, NULL, 0);
-                        LOG_DEBUG("EXEC_PREPARED DONE: result=%p status=%d",
-                                 (void*)pg_stmt->result,
-                                 pg_stmt->result ? (int)PQresultStatus(pg_stmt->result) : -1);
                     } else {
-                        // Fallback to PQexecParams
-                        pg_stmt->result = PQexecParams(exec_conn->conn, pg_stmt->pg_sql,
+                        send_ok = PQsendQueryParams(exec_conn->conn, pg_stmt->pg_sql,
                             pg_stmt->param_count, NULL, paramValues, NULL, NULL, 0);
                     }
                 } else {
-                    // No prepared statement support for this query
-                    LOG_DEBUG("EXEC_PARAMS READ: conn=%p params=%d sql=%.60s",
-                             (void*)exec_conn, pg_stmt->param_count, pg_stmt->pg_sql);
-                    pg_stmt->result = PQexecParams(exec_conn->conn, pg_stmt->pg_sql,
+                    send_ok = PQsendQueryParams(exec_conn->conn, pg_stmt->pg_sql,
                         pg_stmt->param_count, NULL, paramValues, NULL, NULL, 0);
-                    LOG_DEBUG("EXEC_PARAMS READ DONE: conn=%p result=%p",
-                             (void*)exec_conn, (void*)pg_stmt->result);
                 }
 
-                pthread_mutex_unlock(&exec_conn->mutex);
-                LOG_DEBUG("MUTEX_UNLOCKED: checking result status");
-
-                // Check for query errors
-                ExecStatusType status = PQresultStatus(pg_stmt->result);
-                LOG_DEBUG("RESULT_STATUS: status=%d tuples=%d", (int)status, pg_stmt->result ? PQntuples(pg_stmt->result) : -1);
-                if (status != PGRES_TUPLES_OK && status != PGRES_COMMAND_OK) {
-                    const char *err = (exec_conn && exec_conn->conn) ? PQerrorMessage(exec_conn->conn) : "NULL connection";
-                    LOG_ERROR("PostgreSQL query failed: %s", err);
-                    LOG_ERROR("Failed query: %.500s", pg_stmt->pg_sql);
-                }
-                LOG_DEBUG("RESULT_CHECK DONE");
-
-                if (PQresultStatus(pg_stmt->result) == PGRES_TUPLES_OK) {
-                    pg_stmt->num_rows = PQntuples(pg_stmt->result);
-                    pg_stmt->num_cols = PQnfields(pg_stmt->result);
-                    LOG_DEBUG("TUPLES_OK: rows=%d cols=%d", pg_stmt->num_rows, pg_stmt->num_cols);
-                    pg_stmt->current_row = 0;
-                    pg_stmt->result_conn = exec_conn;  // Track which connection owns this result
-
-                    // Resolve source table names for bare column lookup in decltype
-                    if (resolve_column_tables(pg_stmt, exec_conn) < 0) {
-                        LOG_ERROR("Failed to resolve column tables, cleaning up");
-                    }
-
-                    // v0.8.9: Clear metadata-only flag now that we have a real result
-                    pg_stmt->metadata_only_result = 0;
-
-                    // QUERY RESULT CACHE: Store result for potential reuse
-                    // DISABLED: Cache causes infinite loop on continueWatching
-                    // pg_query_cache_store(pg_stmt, pg_stmt->result);
-                } else {
-                    const char *err = (exec_conn && exec_conn->conn) ? PQerrorMessage(exec_conn->conn) : "NULL connection";
-                    log_sql_fallback(pg_stmt->sql, pg_stmt->pg_sql,
-                                     err, "PREPARED READ");
-                    PQclear(pg_stmt->result);
-                    pg_stmt->result = NULL;
-                    pg_stmt->result_conn = NULL;
-                    // CRITICAL: Check if connection is corrupted and needs reset
+                if (!send_ok) {
+                    const char *err = PQerrorMessage(exec_conn->conn);
+                    LOG_ERROR("PQsend* failed: %s sql=%.200s", err ? err : "(null)", pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
+                    pthread_mutex_unlock(&exec_conn->mutex);
                     pg_pool_check_connection_health(exec_conn);
-                }
-            } else {
-                // Subsequent step() call - advance to next row
-                pg_stmt->current_row++;
-            }
-
-            // NOTE: cached_result handling moved to top of is_pg==2 block
-            // to prevent re-entering cache lookup on subsequent step() calls
-
-            // Handle real PGresult
-            if (pg_stmt->result) {
-                LOG_DEBUG("PG_RESULT: current_row=%d num_rows=%d", pg_stmt->current_row, pg_stmt->num_rows);
-                
-                // STEP TRACE: Log iteration for media_items/media_streams queries
-                // This helps debug MDE file analysis issues
-                if (pg_stmt->sql && (strstr(pg_stmt->sql, "media_items") || strstr(pg_stmt->sql, "media_streams"))) {
-                    LOG_DEBUG("STEP_TRACE: media query row=%d/%d stmt=%p sql=%.80s",
-                             pg_stmt->current_row, pg_stmt->num_rows, (void*)pStmt,
-                             pg_stmt->sql ? pg_stmt->sql : "?");
-                }
-                
-                if (pg_stmt->current_row >= pg_stmt->num_rows) {
-                    // CRITICAL FIX: Free PGresult immediately when done
-                    // Prevents memory accumulation when Plex doesn't call reset()
-                    LOG_DEBUG("DONE_PENDING: calling PQclear result=%p", (void*)pg_stmt->result);
-                    
-                    // STEP TRACE: Log when done iterating media queries
-                    if (pg_stmt->sql && (strstr(pg_stmt->sql, "media_items") || strstr(pg_stmt->sql, "media_streams"))) {
-                        LOG_DEBUG("STEP_DONE: media query complete total_rows=%d stmt=%p",
-                                 pg_stmt->num_rows, (void*)pStmt);
-                    }
-                    
-                    PQclear(pg_stmt->result);
-                    LOG_DEBUG("DONE_PENDING: PQclear complete");
-                    pg_stmt->result = NULL;
-                    pg_stmt->result_conn = NULL;
-                    pg_stmt->read_done = 1;  // Prevent re-execution on next step() call
                     pthread_mutex_unlock(&pg_stmt->mutex);
-                    LOG_DEBUG("RETURNING SQLITE_DONE");
+                    return SQLITE_ERROR;
+                }
+
+                // Activate single-row mode
+                if (!PQsetSingleRowMode(exec_conn->conn)) {
+                    LOG_ERROR("PQsetSingleRowMode failed, falling back to eager fetch");
+                    // Fallback: collect full result eagerly (old behavior)
+                    pg_stmt->result = PQgetResult(exec_conn->conn);
+                    // Drain final NULL
+                    PGresult *trail;
+                    while ((trail = PQgetResult(exec_conn->conn)) != NULL) PQclear(trail);
+                    pthread_mutex_unlock(&exec_conn->mutex);
+
+                    if (pg_stmt->result && PQresultStatus(pg_stmt->result) == PGRES_TUPLES_OK) {
+                        pg_stmt->num_rows = PQntuples(pg_stmt->result);
+                        pg_stmt->num_cols = PQnfields(pg_stmt->result);
+                        pg_stmt->current_row = 0;
+                        pg_stmt->result_conn = exec_conn;
+                        pg_stmt->metadata_only_result = 0;
+                        resolve_column_tables(pg_stmt, exec_conn);
+                        if (pg_stmt->num_rows > 0) {
+                            pthread_mutex_unlock(&pg_stmt->mutex);
+                            return SQLITE_ROW;
+                        }
+                    } else if (pg_stmt->result) {
+                        const char *err2 = PQerrorMessage(exec_conn->conn);
+                        log_sql_fallback(pg_stmt->sql, pg_stmt->pg_sql, err2 ? err2 : "?", "EAGER FALLBACK");
+                        PQclear(pg_stmt->result);
+                        pg_stmt->result = NULL;
+                        pg_pool_check_connection_health(exec_conn);
+                    }
+                    pg_stmt->read_done = 1;
+                    pthread_mutex_unlock(&pg_stmt->mutex);
                     return SQLITE_DONE;
                 }
-                pthread_mutex_unlock(&pg_stmt->mutex);
-                
-                // STEP TRACE: Log ROW return for media queries
-                if (pg_stmt->sql && (strstr(pg_stmt->sql, "media_items") || strstr(pg_stmt->sql, "media_streams"))) {
-                    LOG_DEBUG("STEP_ROW: media query returning row=%d/%d stmt=%p",
-                             pg_stmt->current_row, pg_stmt->num_rows, (void*)pStmt);
+
+                // Single-row mode activated. Connection is now exclusively ours
+                // until we drain all results.
+                pg_stmt->streaming_mode = 1;
+                pg_stmt->streaming_conn = exec_conn;
+                pg_stmt->result_conn = exec_conn;
+                pg_stmt->metadata_only_result = 0;
+
+                // Unlock connection mutex — streaming mode means we own the
+                // connection exclusively (each thread has its own pool connection).
+                pthread_mutex_unlock(&exec_conn->mutex);
+
+                // Fetch first row
+                PGresult *first_res = PQgetResult(exec_conn->conn);
+                if (!first_res) {
+                    pg_stmt->streaming_mode = 0;
+                    pg_stmt->streaming_conn = NULL;
+                    pg_stmt->read_done = 1;
+                    pthread_mutex_unlock(&pg_stmt->mutex);
+                    return SQLITE_DONE;
                 }
-                
-                LOG_DEBUG("RETURNING SQLITE_ROW for stmt=%p pg_stmt=%p thread=%p sql=%.50s",
-                          (void*)pStmt, (void*)pg_stmt, (void*)pthread_self(), pg_stmt->sql ? pg_stmt->sql : "NULL");
-                // NOTE: Removed fflush(NULL) - it caused deadlock with log mutex and was root cause of kernel panic
-                return SQLITE_ROW;
+
+                ExecStatusType first_status = PQresultStatus(first_res);
+                if (first_status == PGRES_SINGLE_TUPLE) {
+                    // First row available
+                    pg_stmt->result = first_res;
+                    pg_stmt->current_row = 0;
+                    pg_stmt->num_rows = 1;
+                    pg_stmt->num_cols = PQnfields(first_res);
+
+                    // Resolve column tables from the first row result
+                    resolve_column_tables(pg_stmt, exec_conn);
+
+                    pthread_mutex_unlock(&pg_stmt->mutex);
+                    return SQLITE_ROW;
+                } else if (first_status == PGRES_TUPLES_OK) {
+                    // Zero rows — TUPLES_OK sentinel immediately
+                    PQclear(first_res);
+                    PGresult *final_null = PQgetResult(exec_conn->conn);
+                    if (final_null) PQclear(final_null);
+                    pg_stmt->streaming_mode = 0;
+                    pg_stmt->streaming_conn = NULL;
+                    pg_stmt->num_cols = 0;
+                    pg_stmt->num_rows = 0;
+                    pg_stmt->read_done = 1;
+                    pthread_mutex_unlock(&pg_stmt->mutex);
+                    return SQLITE_DONE;
+                } else {
+                    // Error on first fetch
+                    const char *err = PQerrorMessage(exec_conn->conn);
+                    LOG_ERROR("STREAM first fetch error: %s (status=%d) sql=%.200s",
+                             err ? err : "(null)", (int)first_status, pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
+                    PQclear(first_res);
+                    PGresult *drain;
+                    while ((drain = PQgetResult(exec_conn->conn)) != NULL) PQclear(drain);
+                    pg_stmt->streaming_mode = 0;
+                    pg_stmt->streaming_conn = NULL;
+                    pg_pool_check_connection_health(exec_conn);
+                    pthread_mutex_unlock(&pg_stmt->mutex);
+                    return SQLITE_ERROR;
+                }
             }
         } else if (pg_stmt->is_pg == 1) {  // WRITE
             // CRITICAL FIX: Prevent duplicate execution of the same write

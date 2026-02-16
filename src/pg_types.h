@@ -172,6 +172,12 @@ typedef struct pg_stmt {
     pthread_t executing_thread;      // Thread currently executing this statement (for debug)
     pg_connection_t *result_conn;    // Connection that the current result belongs to
 
+    // Single-row streaming mode (v0.9.28)
+    // Instead of fetching entire PGresult eagerly, use PQsetSingleRowMode
+    // to fetch one row at a time — matching SQLite's step() memory model.
+    int streaming_mode;              // 1 = single-row streaming active on this stmt
+    pg_connection_t *streaming_conn; // Connection claimed for streaming (must drain before reuse)
+
     char *param_values[MAX_PARAMS];
     int param_lengths[MAX_PARAMS];
     int param_formats[MAX_PARAMS];   // 0 = text, 1 = binary
