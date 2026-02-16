@@ -9,14 +9,13 @@ A small shim library that catches Plex SQLite calls and sends them to PostgreSQL
 
 ## 🎉 Latest Release: v0.9.29
 
-**Connection isolation fix:** resolved streaming connection corruption that caused Plex to re-run all migrations and crash with `std::bad_cast`.
+**Single-row streaming and connection isolation** — READ queries now stream results row by row for lower memory usage, with full connection isolation to prevent concurrent access.
 
-- ✅ **Fixed:** `resolve_column_tables()` and `preload_decltype_cache()` no longer corrupt streaming connections by running `PQexec()` on them — they now use alternate pool connections when the passed connection is streaming
-- ✅ **Fixed:** Pool connection acquisition skips connections with active streaming queries (`streaming_active` flag)
-- ✅ **Fixed:** `PQcancel` called before drain loops to prevent hanging on large result sets
-- ✅ **Added:** Dummy shadow statement fallback for failed READ prepares — eliminates dependency on shadow SQLite for query execution
-- ✅ **Added:** DDL `IF NOT EXISTS` injection for shadow SQLite schema operations
-- ✅ **Added:** 37 new unit tests (connection isolation + shadow fallback)
+- 🆕 **Streaming mode:** All READ queries use PostgreSQL's `PQsetSingleRowMode` to stream results one row at a time instead of loading entire result sets into memory. Automatic fallback to eager fetch if needed.
+- 🆕 **Connection isolation:** Streaming connections are protected by a `streaming_active` flag — pool acquisition, `resolve_column_tables()`, and `preload_decltype_cache()` automatically use alternate connections
+- 🆕 **Dummy shadow fallback:** When shadow SQLite prepare fails for READ queries, a dummy statement absorbs bind calls so the query runs purely on PostgreSQL
+- 🆕 **DDL `IF NOT EXISTS`:** Shadow SQLite schema operations no longer fail on existing tables/indices
+- ✅ **37 new unit tests** (connection isolation + shadow fallback) — 798 total across 24 suites
 
 [📥 Download v0.9.29](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.29) | [📋 Full Release Notes](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.29)
 
