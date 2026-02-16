@@ -7,7 +7,7 @@
 
 A small shim library that catches Plex SQLite calls and sends them to PostgreSQL. You do not need to change Plex source code.
 
-## 🎉 Latest Release: v0.9.30
+## 🎉 Latest Release: v0.9.31
 
 **Single-row streaming and connection isolation** — READ queries now stream results row by row for lower memory usage, with full connection isolation to prevent concurrent access.
 
@@ -17,7 +17,7 @@ A small shim library that catches Plex SQLite calls and sends them to PostgreSQL
 - 🆕 **DDL `IF NOT EXISTS`:** Shadow SQLite schema operations no longer fail on existing tables/indices
 - ✅ **37 new unit tests** (connection isolation + shadow fallback) — 798 total across 24 suites
 
-[📥 Download v0.9.30](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.30) | [📋 Full Release Notes](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.30)
+[📥 Download v0.9.31](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.31) | [📋 Full Release Notes](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.31)
 
 Linux and macOS release zips are built by GitHub Actions on tag push via `.github/workflows/release-linux-artifacts.yml` and `.github/workflows/release-macos-artifacts.yml`.
 Pull requests and `main` pushes run `.github/workflows/ci.yml` (script validation + Linux amd64 build check + **798 unit tests**).
@@ -31,7 +31,7 @@ Docker images are published to GHCR on release tags via `.github/workflows/docke
 
 **macOS:**
 ```bash
-curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.30/plex-postgresql-v0.9.30-macos.zip \
+curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.31/plex-postgresql-v0.9.31-macos.zip \
   -o /tmp/plex-pg-macos.zip
 mkdir -p /tmp/plex-pg-macos && cd /tmp/plex-pg-macos
 unzip /tmp/plex-pg-macos.zip
@@ -41,7 +41,7 @@ pkill -f "Plex Media Server" 2>/dev/null || true
 
 **Linux (x86_64):**
 ```bash
-sudo curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.30/plex-postgresql-v0.9.30-linux.zip \
+sudo curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.31/plex-postgresql-v0.9.31-linux.zip \
   -o /tmp/plex-postgresql-linux.zip
 sudo unzip -j /tmp/plex-postgresql-linux.zip db_interpose_pg-linux-x86_64.so -d /usr/local/lib
 sudo mv /usr/local/lib/db_interpose_pg-linux-x86_64.so /usr/local/lib/db_interpose_pg.so
@@ -215,7 +215,7 @@ volumes:
 Use the latest macOS zip and run the wrapper installer. The installer copies the shim dylib into `Plex Media Server.app`, patches the binaries, and sets up the wrapper script. Everything lives inside the Plex app bundle.
 
 ```bash
-curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.30/plex-postgresql-v0.9.30-macos.zip -o /tmp/plex-pg-macos.zip
+curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.31/plex-postgresql-v0.9.31-macos.zip -o /tmp/plex-pg-macos.zip
 mkdir -p /tmp/plex-pg-macos && cd /tmp/plex-pg-macos
 unzip /tmp/plex-pg-macos.zip
 
@@ -238,7 +238,7 @@ pkill -f "Plex Media Server" 2>/dev/null || true
 Use the latest Linux zip and install the binary for your CPU.
 
 ```bash
-curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.30/plex-postgresql-v0.9.30-linux.zip -o /tmp/plex-pg-linux.zip
+curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.31/plex-postgresql-v0.9.31-linux.zip -o /tmp/plex-pg-linux.zip
 mkdir -p /tmp/plex-pg-linux
 cd /tmp/plex-pg-linux
 unzip /tmp/plex-pg-linux.zip

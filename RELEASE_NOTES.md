@@ -1,3 +1,29 @@
+# Release Notes - v0.9.31
+
+**Release Date:** February 16, 2026
+
+Docker build fix: added missing source files and enforced LF line endings for Windows compatibility.
+
+## Highlights
+
+### Docker Build Fix
+
+- **Problem:** `Dockerfile` and `build_shim_musl.sh` were missing 5 source files added in v0.9.27–v0.9.30 (`db_interpose_value.c`, `db_interpose_common.c`, `platform_backtrace.c`, `pg_mem_telemetry.c`, `shim_alloc.c`). The shim compiled but failed at runtime with `symbol not found` errors.
+- **Fix:** Added all missing source files to both build scripts. Verified Docker container starts cleanly.
+
+### Windows CRLF Fix (Issue #6)
+
+- **Problem:** Cloning on Windows converted LF→CRLF, breaking shell script shebangs (`#!/usr/bin/with-contenv bash\r`) inside Docker containers.
+- **Fix:** Added `.gitattributes` to enforce LF line endings for all scripts, Dockerfiles, and source files.
+
+## Files Changed
+
+- `Dockerfile` — Added 5 missing source files to gcc compile step
+- `build_shim_musl.sh` — Added 5 missing source files to compile and link steps
+- `.gitattributes` — New: enforces LF line endings across platforms
+
+---
+
 # Release Notes - v0.9.30
 
 **Release Date:** February 16, 2026

@@ -13,7 +13,7 @@ Una librería shim pequeña que captura las llamadas SQLite de Plex y las envía
 | Linux (Docker) | ✅ Funciona (init y ejecución probados, no probado en producción) |
 | Linux (Nativo) | ⚠️ No probado |
 
-## Última versión: v0.9.30
+## Última versión: v0.9.31
 
 **Corrección SyncCollections:** eliminados workarounds COMPAT que causaban 223 errores LPE por inicio.
 
@@ -21,7 +21,7 @@ Una librería shim pequeña que captura las llamadas SQLite de Plex y las envía
 - ✅ **Corregido:** elimina los 223 errores "Failed to generate a query" LPE al inicio — Plex ahora tiene datos completos de colecciones para consultas hub
 - ℹ️ Los problemas subyacentes de std::bad_cast ya fueron corregidos en v0.9.23
 
-Descarga: https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.30
+Descarga: https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.31
 
 ## ¿Por qué PostgreSQL?
 
@@ -90,7 +90,7 @@ psql -d plex -c "ALTER USER plex PASSWORD 'plex';"
 ### 2. Instalar (ZIP recomendado)
 
 ```bash
-curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.30/plex-postgresql-v0.9.30-macos.zip -o /tmp/plex-pg-macos.zip
+curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.31/plex-postgresql-v0.9.31-macos.zip -o /tmp/plex-pg-macos.zip
 mkdir -p /tmp/plex-pg-macos && cd /tmp/plex-pg-macos
 unzip /tmp/plex-pg-macos.zip
 
@@ -141,7 +141,7 @@ psql -U plex -d plex -c "CREATE SCHEMA plex;"
 ### 2. Instalar (ZIP recomendado)
 
 ```bash
-curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.30/plex-postgresql-v0.9.30-linux.zip -o /tmp/plex-pg-linux.zip
+curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.31/plex-postgresql-v0.9.31-linux.zip -o /tmp/plex-pg-linux.zip
 mkdir -p /tmp/plex-pg && cd /tmp/plex-pg
 unzip /tmp/plex-pg-linux.zip
 

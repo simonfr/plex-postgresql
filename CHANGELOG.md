@@ -5,6 +5,12 @@ All notable changes to plex-postgresql will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.31] - 2026-02-16
+
+### Fixed
+- **Docker build: missing source files** — `Dockerfile` and `build_shim_musl.sh` were missing `db_interpose_value.c`, `db_interpose_common.c`, `platform_backtrace.c`, `pg_mem_telemetry.c`, and `shim_alloc.c`, causing symbol lookup errors at runtime in Docker containers.
+- **Windows Docker: CRLF line endings** — added `.gitattributes` to enforce LF line endings for shell scripts, Dockerfiles, and source files. Windows git converts LF→CRLF by default, breaking shebangs inside containers (fixes #6).
+
 ## [0.9.30] - 2026-02-16
 
 ### Added
