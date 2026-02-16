@@ -59,6 +59,40 @@ static const conflict_target_t conflict_targets[] = {
 };
 
 // ============================================================================
+// Implicit Column Lists for INSERT ... VALUES(...) without column names
+// When Plex sends "INSERT OR REPLACE INTO table VALUES(...)" without specifying
+// columns, we need to know the column order to generate the ON CONFLICT SET clause.
+// These lists match the SQLite column order (excluding PG-only columns like search_vector).
+// ============================================================================
+
+typedef struct {
+    const char *table_name;
+    const char *columns;  // Comma-separated, in ordinal order (matching SQLite schema)
+} implicit_columns_t;
+
+static const implicit_columns_t implicit_column_lists[] = {
+    {"tags", "id, metadata_item_id, tag, tag_type, user_thumb_url, user_art_url, "
+             "user_music_url, created_at, updated_at, tag_value, extra_data, key, parent_id"},
+    {"taggings", "id, metadata_item_id, tag_id, index, text, time_offset, "
+                 "end_time_offset, thumb_url, created_at, extra_data"},
+    {NULL, NULL}  // Sentinel
+};
+
+static const char* find_implicit_columns(const char *table_name) {
+    if (!table_name) return NULL;
+
+    const char *dot = strchr(table_name, '.');
+    if (dot) table_name = dot + 1;
+
+    for (int i = 0; implicit_column_lists[i].table_name; i++) {
+        if (strcasecmp(table_name, implicit_column_lists[i].table_name) == 0) {
+            return implicit_column_lists[i].columns;
+        }
+    }
+    return NULL;
+}
+
+// ============================================================================
 // Helper: Find conflict target for table
 // ============================================================================
 
@@ -347,6 +381,14 @@ char* translate_insert_or_replace(const char *sql) {
     if (col_list_str) {
         columns = parse_columns(col_list_str);
         free(col_list_str);
+    } else {
+        // No explicit column list — look up implicit columns for known tables
+        // This handles "INSERT OR REPLACE INTO tags VALUES(...)" without column names
+        const char *implicit = find_implicit_columns(table_name);
+        if (implicit) {
+            LOG_INFO("Using implicit column list for table: %s", bare_table);
+            columns = parse_columns(implicit);
+        }
     }
 
     // Generate ON CONFLICT clause
@@ -355,7 +397,7 @@ char* translate_insert_or_replace(const char *sql) {
     free_column_list(&columns);
 
     if (!on_conflict) {
-        LOG_ERROR("Failed to generate ON CONFLICT clause for table: %s", table_name);
+        LOG_ERROR("Failed to generate ON CONFLICT clause for table: %s sql=%.200s", table_name, sql ? sql : "NULL");
         free(table_name);
         // Fallback: just remove OR REPLACE (will likely fail but at least tries)
         char *result = str_replace_nocase(sql, "INSERT OR REPLACE INTO", "INSERT INTO");
