@@ -248,9 +248,44 @@ verify_plex_shim() {
     fi
 }
 
+# Check if PLEX_CLAIM is set and warn if not
+check_plex_claim() {
+    if [ -z "$PLEX_CLAIM" ]; then
+        echo ""
+        echo "==========================================================="
+        echo "  WARNING: PLEX_CLAIM token is not set!"
+        echo "==========================================================="
+        echo ""
+        echo "  Your Plex server will start UNCLAIMED. This means:"
+        echo "  - The web UI will not be accessible remotely"
+        echo "  - Libraries and settings cannot be configured"
+        echo "  - All database queries will return empty results"
+        echo ""
+        echo "  To fix this:"
+        echo "  1. Go to https://plex.tv/claim"
+        echo "  2. Copy your claim token (starts with 'claim-')"
+        echo "  3. Add it to your docker-compose.yml:"
+        echo ""
+        echo "     environment:"
+        echo "       - PLEX_CLAIM=claim-xxxxxxxxxxxxxxxxxxxx"
+        echo ""
+        echo "  4. Recreate the container:"
+        echo ""
+        echo "     docker compose down"
+        echo "     docker compose up -d"
+        echo ""
+        echo "  Note: Claim tokens expire after 4 minutes!"
+        echo "  Generate a fresh one right before running docker compose up."
+        echo "==========================================================="
+        echo ""
+    fi
+}
+
 # Main
 echo "=== plex-postgresql entrypoint ==="
 echo "PostgreSQL: ${PLEX_PG_USER}@${PLEX_PG_HOST}:${PLEX_PG_PORT}/${PLEX_PG_DATABASE}"
+
+check_plex_claim
 
 if [ -n "$PLEX_PG_HOST" ]; then
     wait_for_postgres

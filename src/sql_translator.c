@@ -30,6 +30,7 @@ typedef struct {
     char *input_sql;         // Original SQLite SQL (for collision check)
     char *output_sql;        // Translated PostgreSQL SQL
     int param_count;         // Number of parameters
+    char **param_names;      // Named parameter names (e.g., ["C1", "C2", ...])
 } trans_cache_entry_t;
 
 // Thread-local cache - no locks needed!
@@ -63,7 +64,7 @@ static sql_translation_t* cache_lookup(const char *sql, uint64_t hash) {
         if (entry->hash == hash && entry->input_sql && strcmp(entry->input_sql, sql) == 0) {
             // Found! Return cached result
             cached_result.sql = entry->output_sql;  // Note: caller must NOT free this
-            cached_result.param_names = NULL;       // Not cached (rarely needed)
+            cached_result.param_names = entry->param_names;  // Cached (needed for dummy shadow prepare)
             cached_result.param_count = entry->param_count;
             cached_result.success = 1;
             cached_result.error[0] = '\0';
@@ -74,8 +75,34 @@ static sql_translation_t* cache_lookup(const char *sql, uint64_t hash) {
     return NULL;
 }
 
+// Free cached param_names array in a cache entry
+static void cache_free_param_names(trans_cache_entry_t *entry) {
+    if (entry->param_names) {
+        for (int i = 0; i < entry->param_count; i++) {
+            free(entry->param_names[i]);
+        }
+        free(entry->param_names);
+        entry->param_names = NULL;
+    }
+}
+
+// Deep-copy param_names array into a cache entry
+static void cache_store_param_names(trans_cache_entry_t *entry, char **param_names, int param_count) {
+    cache_free_param_names(entry);
+    entry->param_count = param_count;
+    if (param_names && param_count > 0) {
+        entry->param_names = malloc(param_count * sizeof(char*));
+        if (entry->param_names) {
+            for (int i = 0; i < param_count; i++) {
+                entry->param_names[i] = param_names[i] ? strdup(param_names[i]) : NULL;
+            }
+        }
+    }
+}
+
 // Add to thread-local cache
-static void cache_store(const char *input_sql, uint64_t hash, const char *output_sql, int param_count) {
+static void cache_store(const char *input_sql, uint64_t hash, const char *output_sql,
+                        int param_count, char **param_names) {
     int start_idx = (int)(hash & TRANS_CACHE_MASK);
     int oldest_idx = start_idx;
     
@@ -88,7 +115,7 @@ static void cache_store(const char *input_sql, uint64_t hash, const char *output
             entry->hash = hash;
             entry->input_sql = strdup(input_sql);
             entry->output_sql = strdup(output_sql);
-            entry->param_count = param_count;
+            cache_store_param_names(entry, param_names, param_count);
             return;
         }
         
@@ -96,7 +123,7 @@ static void cache_store(const char *input_sql, uint64_t hash, const char *output
             // Already exists - update it
             free(entry->output_sql);
             entry->output_sql = strdup(output_sql);
-            entry->param_count = param_count;
+            cache_store_param_names(entry, param_names, param_count);
             return;
         }
         
@@ -107,10 +134,11 @@ static void cache_store(const char *input_sql, uint64_t hash, const char *output
     trans_cache_entry_t *entry = &trans_cache[oldest_idx];
     free(entry->input_sql);
     free(entry->output_sql);
+    cache_free_param_names(entry);
     entry->hash = hash;
     entry->input_sql = strdup(input_sql);
     entry->output_sql = strdup(output_sql);
-    entry->param_count = param_count;
+    cache_store_param_names(entry, param_names, param_count);
 }
 
 // Standard translation: call function, swap result
@@ -349,7 +377,17 @@ sql_translation_t sql_translate(const char *sqlite_sql) {
         // Cache hit - return copy of cached result
         result.sql = strdup(cached->sql);  // Caller expects to free this
         result.param_count = cached->param_count;
-        result.param_names = NULL;  // Not cached
+        // Deep-copy param_names so caller can free them via sql_translation_free()
+        if (cached->param_names && cached->param_count > 0) {
+            result.param_names = malloc(cached->param_count * sizeof(char*));
+            if (result.param_names) {
+                for (int i = 0; i < cached->param_count; i++) {
+                    result.param_names[i] = cached->param_names[i] ? strdup(cached->param_names[i]) : NULL;
+                }
+            }
+        } else {
+            result.param_names = NULL;
+        }
         result.success = 1;
         return result;
     }
@@ -447,7 +485,7 @@ sql_translation_t sql_translate(const char *sqlite_sql) {
     result.success = 1;
 
     // Store in thread-local cache for future lookups
-    cache_store(sqlite_sql, hash, step10, result.param_count);
+    cache_store(sqlite_sql, hash, step10, result.param_count, result.param_names);
 
     return result;
 }

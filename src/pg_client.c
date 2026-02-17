@@ -702,7 +702,7 @@ static pg_connection_t* pool_get_connection(const char *db_path) {
             pg_connection_t *conn = slot->conn;
             if (conn && conn->conn && PQstatus(conn->conn) == CONNECTION_OK) {
                 // v0.9.29: Skip if connection is busy with streaming mode
-                if (conn->streaming_active) {
+                if (atomic_load(&conn->streaming_active)) {
                     LOG_DEBUG("Pool FAST PATH: streaming_active on slot %d, falling through to slow path",
                              tls_pool_slot);
                     // Don't return this connection — fall through to find/create another
@@ -739,6 +739,13 @@ static pg_connection_t* pool_get_connection(const char *db_path) {
             }
 
             // Thread is dead → safe to reclaim zombie connection
+            // v0.9.33: Do NOT reclaim if connection is streaming — the streaming
+            // stmt still holds a pointer and will PQgetResult on it.
+            pg_connection_t *zombie_conn = library_pool[i].conn;
+            if (zombie_conn && atomic_load(&zombie_conn->streaming_active)) {
+                LOG_INFO("Pool PHASE 0: slot %d owner dead but streaming_active, skipping reclaim", i);
+                continue;
+            }
             pool_slot_state_t expected = SLOT_READY;
             if (atomic_compare_exchange_strong(&library_pool[i].state, &expected, SLOT_FREE)) {
                 LOG_INFO("Pool PHASE 0: Freed zombie slot %d (owner thread dead, idle %ld sec)",
@@ -773,7 +780,7 @@ static pg_connection_t* pool_get_connection(const char *db_path) {
                 // When a thread has an active streaming query (PQsetSingleRowMode),
                 // that connection is exclusively owned by the streaming statement.
                 // Other queries on the same thread must use a different connection.
-                if (conn->streaming_active) {
+                if (atomic_load(&conn->streaming_active)) {
                     LOG_DEBUG("Pool: slot %d streaming_active, skipping for thread %p", i, (void*)current_thread);
                     continue;
                 }
@@ -806,6 +813,13 @@ static pg_connection_t* pool_get_connection(const char *db_path) {
     for (int i = 0; i < configured_pool_size; i++) {
         // Only try slots that have an existing connection we can reuse
         if (library_pool[i].conn == NULL) continue;
+
+        // v0.9.33: Skip slots whose connection is still streaming — the owning
+        // thread may have died but the streaming stmt still needs this connection.
+        // PQreset would destroy the streaming state on the server.
+        if (library_pool[i].conn && atomic_load(&library_pool[i].conn->streaming_active)) {
+            continue;
+        }
 
         pool_slot_state_t expected = SLOT_FREE;
         if (atomic_compare_exchange_strong(&library_pool[i].state,

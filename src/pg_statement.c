@@ -444,7 +444,7 @@ void pg_stmt_free(pg_stmt_t *stmt) {
                 drain_count++;
                 PQclear(drain);
                 if (drain_count > 1000) {
-                    LOG_ERROR("pg_stmt_free: drain after cancel exceeded 1000 on %p", (void*)stmt->streaming_conn);
+                    LOG_INFO("pg_stmt_free: drain after cancel exceeded 1000 on %p", (void*)stmt->streaming_conn);
                     break;
                 }
             }
@@ -454,7 +454,7 @@ void pg_stmt_free(pg_stmt_t *stmt) {
         }
         pthread_mutex_unlock(&stmt->streaming_conn->mutex);
         stmt->streaming_mode = 0;
-        stmt->streaming_conn->streaming_active = 0;
+        atomic_store(&stmt->streaming_conn->streaming_active, 0);
         stmt->streaming_conn = NULL;
     }
 
@@ -584,7 +584,7 @@ void pg_stmt_clear_result(pg_stmt_t *stmt) {
                 drain_count++;
                 PQclear(drain);
                 if (drain_count > 1000) {
-                    LOG_ERROR("pg_stmt_clear_result: drain after cancel exceeded 1000 on %p", (void*)stmt->streaming_conn);
+                    LOG_INFO("pg_stmt_clear_result: drain after cancel exceeded 1000 on %p", (void*)stmt->streaming_conn);
                     break;
                 }
             }
@@ -595,7 +595,7 @@ void pg_stmt_clear_result(pg_stmt_t *stmt) {
         }
         pthread_mutex_unlock(&stmt->streaming_conn->mutex);
         stmt->streaming_mode = 0;
-        stmt->streaming_conn->streaming_active = 0;
+        atomic_store(&stmt->streaming_conn->streaming_active, 0);
         stmt->streaming_conn = NULL;
     }
 

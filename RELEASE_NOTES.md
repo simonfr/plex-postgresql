@@ -1,3 +1,84 @@
+# Release Notes - v0.9.33
+
+**Release Date:** February 18, 2026
+
+Docker reliability release: fixes fresh-install crash, claim flow, and migration issues. Also fixes SQL translation bugs for non-SELECT statements.
+
+## Highlights
+
+### Docker Fresh-Install Crash Fix
+
+- **Problem:** Starting Plex in Docker with a clean (empty) PostgreSQL database caused an immediate crash loop. The shim log showed `real_sqlite3_prepare_v2 failed: no such table: schema_migrations`.
+- **Root cause:** `blobs.db` was excluded from the PG dummy-shadow path by `!is_blobs_db_path()` in `db_interpose_prepare.c:691`. On fresh install, the shadow SQLite had no `schema_migrations` table, and the real SQLite prepare failed. Additionally, `rewrite_blobs_schema_migrations()` renamed `schema_migrations` to `blobs_schema_migrations` which doesn't exist in PG — both databases share the same `schema_migrations` table.
+- **Fix:** Removed the `!is_blobs_db_path()` exclusion so blobs.db uses the PG dummy shadow like all other databases. Disabled `rewrite_blobs_schema_migrations()` with `#if 0`.
+
+### Docker Claim Flow Fix (linuxserver)
+
+- **Problem:** The linuxserver/plex image uses s6-overlay v3's `init-plex-claim` script, which starts Plex temporarily to apply the claim token. This temporary start happened WITHOUT `LD_PRELOAD`, so the shim wasn't loaded, causing an immediate crash because PG schema was expected.
+- **Fix:** Patched `init-plex-claim` at Docker build time to include `LD_PRELOAD` and the shim dependency. The standalone (plexinc) image uses `40-plex-first-run` which creates `Preferences.xml` via xmlstarlet without starting Plex, so no patch is needed there.
+
+### Docker Migration Fixes
+
+Four issues fixed in `migrate_lib.sh` for reliable Docker migration:
+
+1. **Generated columns** — PG `subtype` on `metadata_items` is a generated column; COPY fails. Fixed: filter `is_generated = 'ALWAYS'` columns from the COPY target list.
+2. **Check constraints** — `chk_not_orphan` blocked COPY for records with NULL `library_section_id` and `metadata_type`. Fixed: drop constraints before COPY, restore with `NOT VALID` after.
+3. **Script path resolution** — `$(dirname "$0")` resolved wrong in standalone container. Fixed: `SHIM_DIR` environment variable fallback.
+4. **Missing dependencies** — python3 and `migrate_table.py` were missing from both Docker images.
+
+### SQL Translation Fix: Non-SELECT Corruption
+
+- **Problem:** `add_nulls_first_ordering()` and `fix_group_by_strict_complete()` appended ORDER BY/GROUP BY clauses to DELETE and UPDATE statements, corrupting them.
+- **Fix:** Both functions now check for SELECT before rewriting. Affects `sql_tr_groupby.c`.
+
+### Log Noise Reduction
+
+- "Result from different connection" downgraded to DEBUG
+- "finalize: BUG" downgraded to INFO
+- "LOOP DETECTED" downgraded to INFO
+- Removed PREPARE INSERT debug dump
+
+### Atomic streaming_active
+
+- Changed `streaming_active` from `volatile int` to `_Atomic int` for correct cross-thread visibility on ARM64. Updated connection isolation tests to match.
+
+## Testing
+
+278 unit tests (220 SQL translator + 41 shadow elimination + 17 connection isolation), 0 failures.
+
+**Docker verification:**
+- linuxserver: fresh install, claim, migration (32/32 tables, 89776 items)
+- standalone (plexinc): fresh install, claim, migration (32/32 tables)
+- Local macOS Plex: running clean, 0 errors
+
+## Upgrade Notes
+
+1. **Docker users:** rebuild your image (`docker-compose build`) to pick up all fixes.
+2. Re-run `scripts/install_wrappers.sh` (macOS) or restart the service (Linux) after updating.
+3. No database changes required.
+
+## Files Changed
+
+- `src/db_interpose_prepare.c` — Removed `!is_blobs_db_path()` exclusion; diagnostic logging for SQLite prepare failures; LOOP DETECTED log fix
+- `src/db_interpose_common.c` — Disabled `rewrite_blobs_schema_migrations()` with `#if 0`
+- `src/db_interpose_step.c` — Log level fixes
+- `src/db_interpose_column.c` — `_Atomic` streaming_active load
+- `src/sql_tr_groupby.c` — Skip non-SELECT in nulls_first and group_by_strict
+- `src/sql_translator.c` — param_names cache fix
+- `src/pg_types.h` — `_Atomic int streaming_active`
+- `src/pg_client.c` — streaming_active atomic guards
+- `src/pg_statement.c` — streaming_active atomic_store
+- `Dockerfile` — python3; migrate_table.py COPY; init-plex-claim LD_PRELOAD patch
+- `Dockerfile.standalone` — Synced gcc sources; python3; migrate_table.py COPY
+- `docker-compose.yml` — PLEX_CLAIM example comment
+- `docker-compose.standalone.yml` — Cleaned test values
+- `scripts/docker-entrypoint.sh` — `check_plex_claim()` function
+- `scripts/migrate_lib.sh` — Generated column filter; check constraint handling; SHIM_DIR fallback
+- `tests/src/test_connection_isolation.c` — `_Atomic int` update
+- `VERSION`, `CHANGELOG.md`, `README.md`, `README.es.md`, `RELEASE_NOTES.md`
+
+---
+
 # Release Notes - v0.9.32
 
 **Release Date:** February 17, 2026

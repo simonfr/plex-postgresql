@@ -13,16 +13,17 @@ Una librería shim pequeña que captura las llamadas SQLite de Plex y las envía
 | Linux (Docker) | ✅ Funciona (init y ejecución probados, no probado en producción) |
 | Linux (Nativo) | ⚠️ No probado |
 
-## Última versión: v0.9.32
+## Última versión: v0.9.33
 
-**Eliminación de shadow SQLite** — el shim está eliminando la dependencia de shadow SQLite para decltype y metadatos de columnas. Corrige crashes `std::bad_cast` al devolver NULL de `column_decltype()` para expresiones agregadas, igualando el comportamiento real de SQLite.
+**Release de fiabilidad Docker** — corrige crash en instalación limpia, flujo de claim y problemas de migración. También corrige bugs de traducción SQL en sentencias no-SELECT.
 
-- ✅ **Corregido:** `count(*)`, `sum()`, `min()`, `max()`, `avg()` ahora devuelven NULL desde `column_decltype()` — corrige `std::bad_cast` en SyncCollections y historial de actividades
-- ✅ **Nuevo:** prepare dummy con parámetros nombrados — las consultas PG ya no necesitan prepare real de SQLite
-- ✅ **Nuevo:** metadatos via PQdescribePrepared — count/name de columnas desde PostgreSQL en lugar de shadow SQLite
-- ✅ **Nuevo:** auto-quoting de alias camelCase — aliases como `blankKeyTaggingId` se entrecomillan automáticamente
+- ✅ **Docker instalación limpia:** eliminada exclusión de shadow para blobs.db — ya no hay crash loop al primer inicio
+- ✅ **Docker flujo de claim:** el script de claim de linuxserver ahora carga el shim correctamente
+- ✅ **Docker migración:** columnas generadas, check constraints, rutas de scripts, dependencias faltantes
+- ✅ **SQL:** GROUP BY / NULLS FIRST ya no corrompen sentencias DELETE/UPDATE
+- ✅ **278 tests unitarios** (220 SQL + 41 shadow elimination + 17 connection isolation)
 
-Descarga: https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.32
+Descarga: https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.33
 
 ## ¿Por qué PostgreSQL?
 
@@ -91,7 +92,7 @@ psql -d plex -c "ALTER USER plex PASSWORD 'plex';"
 ### 2. Instalar (ZIP recomendado)
 
 ```bash
-curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.31/plex-postgresql-v0.9.31-macos.zip -o /tmp/plex-pg-macos.zip
+curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.33/plex-postgresql-v0.9.33-macos.zip -o /tmp/plex-pg-macos.zip
 mkdir -p /tmp/plex-pg-macos && cd /tmp/plex-pg-macos
 unzip /tmp/plex-pg-macos.zip
 
@@ -142,7 +143,7 @@ psql -U plex -d plex -c "CREATE SCHEMA plex;"
 ### 2. Instalar (ZIP recomendado)
 
 ```bash
-curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.31/plex-postgresql-v0.9.31-linux.zip -o /tmp/plex-pg-linux.zip
+curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.33/plex-postgresql-v0.9.33-linux.zip -o /tmp/plex-pg-linux.zip
 mkdir -p /tmp/plex-pg && cd /tmp/plex-pg
 unzip /tmp/plex-pg-linux.zip
 

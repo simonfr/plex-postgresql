@@ -179,8 +179,8 @@ migrate_sqlite_to_pg() {
                 continue
             fi
 
-            # Get PostgreSQL columns
-            local pg_cols=$(psql -t -c "SELECT string_agg(column_name, ',') FROM information_schema.columns WHERE table_schema = '$schema' AND table_name = '$table';" 2>/dev/null | tr -d ' ')
+            # Get PostgreSQL columns (exclude generated columns — COPY can't write to them)
+            local pg_cols=$(psql -t -c "SELECT string_agg(column_name, ',') FROM information_schema.columns WHERE table_schema = '$schema' AND table_name = '$table' AND (is_generated = 'NEVER' OR is_generated IS NULL);" 2>/dev/null | tr -d ' ')
 
             if [[ -z "$pg_cols" ]]; then
                 echo -e "${YELLOW}SKIP (no PG table)${NC}"
@@ -228,10 +228,34 @@ migrate_sqlite_to_pg() {
 
             # Use Python bridge for data transfer (avoids CSV truncation of large TEXT fields)
             # Python reads from SQLite directly and streams to PostgreSQL via COPY FROM STDIN
+            # Disable ALL constraints: triggers, foreign keys, AND check constraints
+            # Check constraints can't be disabled with DISABLE TRIGGER, so we drop them
+            # temporarily and re-create after import
             psql -q -c "ALTER TABLE $schema.\"$table\" DISABLE TRIGGER ALL;" 2>/dev/null || true
+
+            # Save and drop check constraints (COPY fails on check constraints for dirty data)
+            local check_constraints=$(psql -t -c "
+                SELECT conname || '|' || pg_get_constraintdef(oid)
+                FROM pg_constraint
+                WHERE conrelid = '$schema.\"$table\"'::regclass AND contype = 'c';" 2>/dev/null)
+            while IFS='|' read -r cname cdef; do
+                cname=$(echo "$cname" | xargs)
+                [ -z "$cname" ] && continue
+                psql -q -c "ALTER TABLE $schema.\"$table\" DROP CONSTRAINT \"$cname\";" 2>/dev/null || true
+            done <<< "$check_constraints"
+
             psql -q -c "TRUNCATE $schema.\"$table\" CASCADE;" 2>/dev/null || true
 
-            if python3 "$(dirname "$0")/migrate_table.py" \
+            # Find migrate_table.py: check SHIM_DIR first, then script dir, then PATH
+            local migrate_py="${SHIM_DIR:-}/migrate_table.py"
+            if [ ! -f "$migrate_py" ]; then
+                migrate_py="$(dirname "$0")/migrate_table.py"
+            fi
+            if [ ! -f "$migrate_py" ]; then
+                migrate_py="/usr/local/lib/plex-postgresql/migrate_table.py"
+            fi
+
+            if python3 "$migrate_py" \
                 "$SQLITE_DB" "$table" "$sqlite_select" "$pg_cols_list" "$schema" 2>/dev/null; then
                 echo -e "${GREEN}OK${NC}"
                 ((migrated++))
@@ -240,6 +264,12 @@ migrate_sqlite_to_pg() {
                 ((failed++))
             fi
 
+            # Restore check constraints and triggers
+            while IFS='|' read -r cname cdef; do
+                cname=$(echo "$cname" | xargs)
+                [ -z "$cname" ] && continue
+                psql -q -c "ALTER TABLE $schema.\"$table\" ADD CONSTRAINT \"$cname\" $cdef NOT VALID;" 2>/dev/null || true
+            done <<< "$check_constraints"
             psql -q -c "ALTER TABLE $schema.\"$table\" ENABLE TRIGGER ALL;" 2>/dev/null || true
         fi
     done

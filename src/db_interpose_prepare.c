@@ -156,8 +156,8 @@ static int detect_query_loop(const char *sql) {
                 // Only log every 10th detection to reduce spam
                 static __thread int log_counter = 0;
                 if (log_counter++ % 10 == 0) {
-                    LOG_ERROR("LOOP DETECTED: query called %d times in %llu ms (logged 1/10)",
-                             entry->count, (unsigned long long)(now - entry->first_seen_ms));
+                    LOG_INFO("High-frequency query: %d calls in %llu ms (likely batch operation with different params) sql=%.200s",
+                             entry->count, (unsigned long long)(now - entry->first_seen_ms), sql);
                 }
                 // Reset for next detection
                 entry->count = 0;
@@ -685,10 +685,10 @@ int my_sqlite3_prepare_v2_internal(sqlite3 *db, const char *zSql, int nByte,
 
     // Determine if this query will be routed to PostgreSQL
     // If so, use dummy shadow prepare — no need for real SQL on shadow.
-    // Exclude blobs.db — it shares the PG schema but uses different tables;
-    // blobs queries go through the normal (real SQL) shadow prepare path.
+    // Both library.db AND blobs.db go through PG with dummy shadow.
+    // blobs.db queries get schema_migrations -> blobs_schema_migrations rewrite
+    // in the pg_stmt creation path below.
     if (pg_conn && pg_conn->is_pg_active && is_library_db_path(pg_conn->db_path) &&
-        !is_blobs_db_path(pg_conn->db_path) &&
         (is_read || is_write) && !should_skip_sql(zSql)) {
         use_dummy_shadow = 1;
     }
@@ -828,6 +828,13 @@ int my_sqlite3_prepare_v2_internal(sqlite3 *db, const char *zSql, int nByte,
         }
 
         if (rc != SQLITE_OK || !*ppStmt) {
+            // Log the failure for debugging — especially important for fresh Docker installs
+            // where blobs.db schema_migrations queries can fail unexpectedly
+            const char *sqlite_err = orig_sqlite3_errmsg ? orig_sqlite3_errmsg(db) : "unknown";
+            int sqlite_errcode = orig_sqlite3_errcode ? orig_sqlite3_errcode(db) : -1;
+            LOG_ERROR("PREPARE_REAL_SQLITE FAILED: rc=%d errcode=%d errmsg='%s' sql=%.200s",
+                     rc, sqlite_errcode, sqlite_err ? sqlite_err : "NULL",
+                     sql_for_sqlite ? sql_for_sqlite : "NULL");
             if (cleaned_sql) free(cleaned_sql);
             prepare_v2_depth--;
             return rc;
@@ -878,18 +885,7 @@ int my_sqlite3_prepare_v2_internal(sqlite3 *db, const char *zSql, int nByte,
                             pg_stmt->param_names[i] = trans.param_names[i] ? strdup(trans.param_names[i]) : NULL;
                         }
                     }
-                    // Debug: log parameter names for metadata_items INSERT
-                    if (strcasestr(zSql, "INSERT") && strcasestr(zSql, "metadata_items")) {
-                        LOG_ERROR("PREPARE INSERT metadata_items: param_count=%d", trans.param_count);
-                        LOG_ERROR("  First 15 params in SQL order:");
-                        for (int i = 0; i < trans.param_count && i < 15; i++) {
-                            LOG_ERROR("    pg_idx[%d] = param_name='%s'", i, trans.param_names[i] ? trans.param_names[i] : "NULL");
-                        }
-                        if (trans.param_count > 15) {
-                            LOG_ERROR("  ... (%d total params)", trans.param_count);
-                        }
-                        LOG_ERROR("  Original SQL (first 500 chars): %.500s", zSql);
-                    }
+
                 }
 
                 if (trans.success && trans.sql) {

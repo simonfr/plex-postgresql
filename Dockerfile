@@ -88,10 +88,12 @@ RUN mkdir -p /libs && \
 # Runtime stage
 FROM linuxserver/plex:latest
 
-# Install PostgreSQL client for health checks, sqlite3 for schema fixes, gdb for debugging
+# Install PostgreSQL client for health checks, sqlite3 for schema fixes,
+# python3 for data migration, gdb for debugging
 RUN apt-get update && apt-get install -y --no-install-recommends \
     postgresql-client \
     sqlite3 \
+    python3 \
     gdb \
     && rm -rf /var/lib/apt/lists/*
 
@@ -122,6 +124,7 @@ COPY schema/plex_schema.sql /usr/local/lib/plex-postgresql/
 COPY schema/sqlite_schema.sql /usr/local/lib/plex-postgresql/
 COPY schema/sqlite_column_types.sql /usr/local/lib/plex-postgresql/
 COPY scripts/migrate_lib.sh /usr/local/lib/plex-postgresql/
+COPY scripts/migrate_table.py /usr/local/lib/plex-postgresql/
 
 # Copy the initialization script for s6-overlay
 # This will run BEFORE Plex starts as part of the init sequence
@@ -137,6 +140,17 @@ RUN mkdir -p /etc/s6-overlay/s6-rc.d/init-plex-postgresql && \
     touch /etc/s6-overlay/s6-rc.d/user/contents.d/init-plex-postgresql && \
     mkdir -p /etc/s6-overlay/s6-rc.d/svc-plex/dependencies.d && \
     touch /etc/s6-overlay/s6-rc.d/svc-plex/dependencies.d/init-plex-postgresql
+
+# Fix claim script: inject LD_PRELOAD into the temporary Plex start during claim
+# The base image's init-plex-claim starts Plex without our shim, which crashes
+# because the SQLite shadow DB has no schema. We patch it to use the shim.
+RUN if [ -f /etc/s6-overlay/s6-rc.d/init-plex-claim/run ]; then \
+        sed -i 's|LD_LIBRARY_PATH=/usr/lib/plexmediaserver:/usr/lib/plexmediaserver/lib|LD_PRELOAD=/usr/local/lib/plex-postgresql/db_interpose_pg.so LD_LIBRARY_PATH=/usr/local/lib/plex-postgresql:/usr/lib/plexmediaserver:/usr/lib/plexmediaserver/lib|' \
+            /etc/s6-overlay/s6-rc.d/init-plex-claim/run && \
+        mkdir -p /etc/s6-overlay/s6-rc.d/init-plex-claim/dependencies.d && \
+        touch /etc/s6-overlay/s6-rc.d/init-plex-claim/dependencies.d/init-plex-postgresql && \
+        echo "Patched init-plex-claim for PostgreSQL shim"; \
+    fi
 
 # Replace CrashUploader with no-op to prevent SIGCHLD crashes
 # When CrashUploader exits, it sends SIGCHLD to Plex. With LD_PRELOAD active,

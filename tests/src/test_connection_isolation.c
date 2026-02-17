@@ -46,7 +46,7 @@ static int tests_failed = 0;
 
 typedef struct sim_connection {
     int id;                       // Unique connection identifier
-    volatile int streaming_active; // v0.9.29: Set when in single-row streaming mode
+    _Atomic int streaming_active;  // v0.9.33: Atomic for proper ARM memory ordering
     int is_pg_active;
     pthread_mutex_t mutex;
     char db_path[256];

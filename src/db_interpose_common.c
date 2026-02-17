@@ -233,8 +233,13 @@ int is_blobs_db_path(const char *path) {
 }
 
 // Helper: rewrite schema_migrations -> blobs_schema_migrations for blobs.db connections.
-// Returns a malloc'd string (caller must free) or NULL if no rewrite needed.
+// DISABLED: blobs.db and library.db share the same schema_migrations table in PG.
+// The blobs_schema_migrations table doesn't exist and isn't needed — both databases
+// use identical migration versions.
 char* rewrite_blobs_schema_migrations(const char *sql, const char *db_path) {
+    (void)sql; (void)db_path;
+    return NULL;  // No rewrite needed — shared schema_migrations table
+#if 0  // Original code kept for reference
     if (!sql || !db_path) return NULL;
     if (!is_blobs_db_path(db_path)) return NULL;
     if (!strcasestr(sql, "schema_migrations")) return NULL;
@@ -282,6 +287,7 @@ char* rewrite_blobs_schema_migrations(const char *sql, const char *db_path) {
 
     LOG_INFO("BLOBS_REWRITE: %s", result);
     return result;
+#endif
 }
 
 // Simple string replace helper

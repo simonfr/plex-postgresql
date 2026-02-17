@@ -33,6 +33,9 @@ services:
       - PGID=1000
       - TZ=Europe/Amsterdam
       - VERSION=docker
+      # REQUIRED for first run: Get your claim token at https://plex.tv/claim
+      # Tokens expire after 4 minutes — generate one right before running 'docker compose up'
+      # - PLEX_CLAIM=claim-xxxxxxxxxxxxxxxxxxxx
       # PostgreSQL configuration (Unix socket for ~7% better performance)
       - PLEX_PG_HOST=/var/run/postgresql
       # Fallback to TCP: uncomment these and comment out the socket line above

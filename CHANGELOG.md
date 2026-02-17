@@ -5,6 +5,30 @@ All notable changes to plex-postgresql will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.33] - 2026-02-18
+
+### Fixed
+- **Docker fresh-install crash** — `blobs.db` was excluded from the PG dummy-shadow path by `!is_blobs_db_path()`, causing a "no such table: schema_migrations" crash on first start. Removed the exclusion so blobs.db uses the PG dummy shadow like all other databases.
+- **Docker blobs schema_migrations rewrite** — `rewrite_blobs_schema_migrations()` renamed the table to `blobs_schema_migrations` which doesn't exist in PG. Disabled with `#if 0` since both databases share the same `schema_migrations` table.
+- **Docker claim flow crash (linuxserver)** — `init-plex-claim` started Plex temporarily without `LD_PRELOAD`, causing immediate crash. Fixed by patching the claim script at build time to include the shim.
+- **Docker migration: generated columns** — PG `subtype` on `metadata_items` is a generated column; COPY fails. Fixed: filter `is_generated = 'ALWAYS'` columns from COPY target list.
+- **Docker migration: check constraints** — `chk_not_orphan` blocked COPY for orphaned records. Fixed: drop constraints before COPY, restore with NOT VALID after.
+- **Docker migration: script path** — `$(dirname "$0")` resolved wrong in standalone container. Fixed: `SHIM_DIR` fallback.
+- **Docker: missing python3 + migrate_table.py** in both Docker images. Added to Dockerfile and Dockerfile.standalone.
+- **Docker: missing source files in Dockerfile.standalone** — gcc command was out of sync. Synced with Dockerfile.
+- **SQL: GROUP BY / NULLS FIRST corrupted non-SELECT** — `add_nulls_first_ordering()` and `fix_group_by_strict_complete()` added ORDER BY/GROUP BY rewrites to DELETE/UPDATE statements. Both now skip non-SELECT statements.
+- **`streaming_active` race condition** — Changed from `volatile int` to `_Atomic int` for correct cross-thread visibility.
+
+### Added
+- **Docker claim detection** — `check_plex_claim()` in docker-entrypoint.sh warns if PLEX_CLAIM is set but server is already claimed.
+- **PLEX_CLAIM example** in docker-compose.yml.
+- **Diagnostic logging** for real SQLite prepare failures (helps debug shadow issues).
+- **17 connection isolation tests** updated for `_Atomic int` semantics.
+- Total: 278 tests (220 SQL + 41 shadow elimination + 17 connection isolation).
+
+### Changed
+- Log level fixes: "Result from different connection" → DEBUG, "finalize: BUG" → INFO, "LOOP DETECTED" → INFO. Removed PREPARE INSERT debug dump.
+
 ## [0.9.32] - 2026-02-17
 
 ### Fixed

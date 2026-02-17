@@ -135,10 +135,10 @@ static void preload_decltype_cache(pg_connection_t *pg_conn) {
 
     // v0.9.29: CRITICAL FIX — Do NOT use PQexec on a streaming connection!
     pg_connection_t *cache_conn = pg_conn;
-    if (pg_conn->streaming_active) {
+    if (atomic_load(&pg_conn->streaming_active)) {
         LOG_DEBUG("DECLTYPE_CACHE: Connection %p is streaming_active, getting alternate", (void*)pg_conn);
         pg_connection_t *alt = pg_get_thread_connection(pg_conn->db_path);
-        if (alt && alt->conn && alt != pg_conn && !alt->streaming_active) {
+        if (alt && alt->conn && alt != pg_conn && !atomic_load(&alt->streaming_active)) {
             cache_conn = alt;
             LOG_DEBUG("DECLTYPE_CACHE: Using alternate connection %p", (void*)cache_conn);
         } else {
@@ -566,11 +566,11 @@ int resolve_column_tables(pg_stmt_t *pg_stmt, pg_connection_t *pg_conn) {
     // streaming results, causing the next PQgetResult to return NULL.
     // Get a separate connection from the pool instead.
     pg_connection_t *resolve_conn = pg_conn;
-    if (pg_conn->streaming_active) {
+    if (atomic_load(&pg_conn->streaming_active)) {
         LOG_DEBUG("RESOLVE_TABLES: Connection %p is streaming_active, getting separate pool connection",
                  (void*)pg_conn);
         pg_connection_t *alt_conn = pg_get_thread_connection(pg_conn->db_path);
-        if (alt_conn && alt_conn->conn && alt_conn != pg_conn && !alt_conn->streaming_active) {
+        if (alt_conn && alt_conn->conn && alt_conn != pg_conn && !atomic_load(&alt_conn->streaming_active)) {
             resolve_conn = alt_conn;
             LOG_DEBUG("RESOLVE_TABLES: Using alternate connection %p for OID lookup", (void*)resolve_conn);
         } else {
@@ -776,10 +776,25 @@ static int ensure_pg_result_for_metadata(pg_stmt_t *pg_stmt) {
         exec_conn = thread_conn;
     }
 
+    // CRITICAL: If the connection is busy with streaming for another statement,
+    // we must NOT touch it — draining would steal results from the streaming stmt.
+    // Return 0 to let caller fall back to SQLite or cached metadata.
+    if (atomic_load(&exec_conn->streaming_active)) {
+        LOG_DEBUG("METADATA: skipping — connection %p is streaming_active", (void*)exec_conn);
+        return 0;
+    }
+
     // Lock the connection mutex
     pthread_mutex_lock(&exec_conn->mutex);
 
-    // Drain any pending results
+    // Double-check after acquiring lock (another thread may have started streaming)
+    if (atomic_load(&exec_conn->streaming_active)) {
+        LOG_DEBUG("METADATA: skipping after lock — connection %p is streaming_active", (void*)exec_conn);
+        pthread_mutex_unlock(&exec_conn->mutex);
+        return 0;
+    }
+
+    // Drain any pending results (safe now — no streaming active)
     PQsetnonblocking(exec_conn->conn, 0);
     while (PQisBusy(exec_conn->conn)) {
         PQconsumeInput(exec_conn->conn);
@@ -2310,29 +2325,22 @@ const char* my_sqlite3_column_decltype(sqlite3_stmt *pStmt, int idx) {
             }
         }
         
-        // SPECIAL CASE: Aggregate function expressions (count, sum, max, min, avg)
-        // Real SQLite returns NULL from column_decltype() for expressions —
-        // only actual table columns get a decltype. SOCI handles NULL decltype
-        // by falling back to column_type() for runtime type detection.
-        // Returning "INTEGER" instead of NULL changes SOCI's code path and
-        // causes std::bad_cast in MetadataCollection.cpp:522.
-        if (col_name) {
-            const int is_aggregate_expr =
-                strcmp(col_name, "count") == 0 ||
-                strcmp(col_name, "cnt") == 0 ||
-                strcmp(col_name, "sum") == 0 ||
-                strcmp(col_name, "avg") == 0 ||
-                strstr(col_name, "count(") != NULL ||
-                strstr(col_name, "COUNT(") != NULL ||
-                strncmp(col_name, "sum(", 4) == 0 ||
-                strncmp(col_name, "max(", 4) == 0 ||
-                strncmp(col_name, "min(", 4) == 0 ||
-                strncmp(col_name, "avg(", 4) == 0;
-            if (is_aggregate_expr) {
-                // Return NULL to match real SQLite behavior for expressions.
-                // SOCI will fall back to column_type() which returns
-                // SQLITE_INTEGER — this is the correct code path.
-                LOG_DEBUG("DECLTYPE_AGGREGATE: col='%s' -> returning NULL (matching SQLite behavior)", col_name);
+        // DYNAMIC EXPRESSION DETECTION using PQftable()
+        // PQftable() returns the OID of the source table for a column.
+        // For expressions (count, max, CASE, COALESCE, subqueries, etc.)
+        // it returns InvalidOid (0). Real SQLite returns NULL from
+        // column_decltype() for expressions — only actual table columns
+        // get a decltype. SOCI handles NULL decltype by falling back to
+        // column_type() for runtime type detection. Returning a type
+        // instead of NULL causes SOCI to take the wrong code path →
+        // std::bad_cast.
+        {
+            Oid table_oid = PQftable(pg_stmt->result, idx);
+            if (table_oid == InvalidOid) {
+                // This column is an expression, not a real table column.
+                // Return NULL to match real SQLite behavior.
+                LOG_DEBUG("DECLTYPE_EXPR: col='%s' idx=%d -> returning NULL (PQftable=InvalidOid, expression column)",
+                         col_name ? col_name : "?", idx);
                 pthread_mutex_unlock(&pg_stmt->mutex);
                 return NULL;
             }

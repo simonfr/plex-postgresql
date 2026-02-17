@@ -435,6 +435,14 @@ static int parse_group_by_columns(const char *group_by_start, const char *group_
 char* fix_group_by_strict_complete(const char *sql) {
     if (!sql) return NULL;
 
+    // Skip non-SELECT statements — GROUP BY rewriting only applies to top-level SELECT
+    // DELETE/UPDATE/INSERT with subqueries containing GROUP BY should not be rewritten
+    const char *start = sql;
+    while (*start && isspace(*start)) start++;
+    if (strncasecmp(start, "select", 6) != 0) {
+        return strdup(sql);
+    }
+
     // Quick check: does query have GROUP BY?
     const char *group_by_pos = strcasestr(sql, "group by");
     if (!group_by_pos) {
@@ -601,6 +609,13 @@ char* fix_group_by_strict_complete(const char *sql) {
 
 char* add_nulls_first_ordering(const char *sql) {
     if (!sql) return NULL;
+    
+    // Skip non-SELECT statements — ORDER BY is invalid in DELETE/UPDATE/INSERT
+    const char *p = sql;
+    while (*p && isspace(*p)) p++;
+    if (strncasecmp(p, "select", 6) != 0) {
+        return strdup(sql);
+    }
     
     // Quick check: must have GROUP BY
     const char *group_by_pos = strcasestr(sql, "group by");

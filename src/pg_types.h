@@ -115,7 +115,10 @@ typedef struct pg_connection {
     // v0.9.29: Streaming mode lock — when 1, this connection is exclusively owned
     // by a streaming query (PQsetSingleRowMode). Other queries on the same thread
     // must use a different connection from the pool.
-    volatile int streaming_active;
+    // v0.9.33: Changed from volatile int to _Atomic int for proper memory ordering
+    // on ARM (Apple Silicon). volatile only prevents compiler reordering, not CPU
+    // store-buffer visibility across cores.
+    _Atomic int streaming_active;
 
     // Prepared statement cache for this connection
     stmt_cache_t stmt_cache;
