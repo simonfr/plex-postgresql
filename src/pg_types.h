@@ -177,6 +177,11 @@ typedef struct pg_stmt {
     pthread_t executing_thread;      // Thread currently executing this statement (for debug)
     pg_connection_t *result_conn;    // Connection that the current result belongs to
 
+    // Column names from PQdescribePrepared (when no result/cached_result yet)
+    // Used by dummy prepare path: column metadata is available before step()
+    char **col_names;                // Array of column name strings (NULL if not set)
+    int num_col_names;               // Number of entries in col_names
+
     // Single-row streaming mode (v0.9.28)
     // Instead of fetching entire PGresult eagerly, use PQsetSingleRowMode
     // to fetch one row at a time — matching SQLite's step() memory model.

@@ -670,172 +670,175 @@ int my_sqlite3_prepare_v2_internal(sqlite3 *db, const char *zSql, int nByte,
     int is_write = is_write_operation(zSql);
     int is_read = is_read_operation(zSql);
 
-    // Clean SQL for SQLite (remove icu_root and FTS references)
+    // =========================================================================
+    // Shadow SQLite Prepare: DUMMY for PG-routed, REAL for non-PG
+    // =========================================================================
+    // For queries routed to PostgreSQL, prepare a dummy SQL on the shadow
+    // SQLite that absorbs all bind calls. Column metadata comes from PG
+    // via PQdescribePrepared (no need for real SQL on shadow).
+    // For non-PG queries (DDL, PRAGMA, non-library), use real SQL.
+
     char *cleaned_sql = NULL;
     const char *sql_for_sqlite = zSql;
+    int use_dummy_shadow = 0;
+    int rc;
 
-    // ALWAYS simplify FTS queries for SQLite, even without PG connection
-    // because SQLite shadow DB doesn't have FTS virtual tables
-    // BUT skip if we're in deep recursion to save stack
-    if (!skip_complex_processing && strcasestr(zSql, "fts4_")) {
-        cleaned_sql = simplify_fts_for_sqlite(zSql);
-        if (cleaned_sql) {
-            sql_for_sqlite = cleaned_sql;
-            LOG_INFO("FTS query ORIGINAL: %.500s", zSql);
-            LOG_INFO("FTS query SIMPLIFIED: %.500s", cleaned_sql);
-        }
+    // Determine if this query will be routed to PostgreSQL
+    // If so, use dummy shadow prepare — no need for real SQL on shadow.
+    // Exclude blobs.db — it shares the PG schema but uses different tables;
+    // blobs queries go through the normal (real SQL) shadow prepare path.
+    if (pg_conn && pg_conn->is_pg_active && is_library_db_path(pg_conn->db_path) &&
+        !is_blobs_db_path(pg_conn->db_path) &&
+        (is_read || is_write) && !should_skip_sql(zSql)) {
+        use_dummy_shadow = 1;
     }
 
-    // ALWAYS remove "collate icu_root" since SQLite shadow DB doesn't support it
-    // BUT skip if we're in deep recursion to save stack
-    if (!skip_complex_processing && strcasestr(sql_for_sqlite, "collate icu_root")) {
-        char *temp = malloc(strlen(sql_for_sqlite) + 1);
-        if (temp) {
-            strcpy(temp, sql_for_sqlite);
-            char *pos;
-            // First try with leading space
-            while ((pos = strcasestr(temp, " collate icu_root")) != NULL) {
-                memmove(pos, pos + 17, strlen(pos + 17) + 1);
-            }
-            // Also try without leading space (e.g. after parens)
-            while ((pos = strcasestr(temp, "collate icu_root")) != NULL) {
-                memmove(pos, pos + 16, strlen(pos + 16) + 1);
-            }
-            if (cleaned_sql) free(cleaned_sql);
-            cleaned_sql = temp;
-            sql_for_sqlite = cleaned_sql;
-        }
-    }
+    // Pre-translate once; reused for both dummy shadow and pg_stmt creation
+    sql_translation_t pre_trans = {0};
+    int have_pre_trans = 0;
 
-    // CRITICAL FIX: If query still contains FTS after simplification, use empty result
-    // SQLite's FTS virtual tables use ICU tokenizer which isn't available
-    // This causes "unknown tokenizer: collating" error
-    if (strcasestr(sql_for_sqlite, "fts4_") || strcasestr(sql_for_sqlite, " match ")) {
-        LOG_INFO("FTS query blocked from SQLite (tokenizer not available): %.100s", sql_for_sqlite);
+    if (use_dummy_shadow) {
+        // PG-routed query: prepare dummy SQL on shadow SQLite
+        // Translate once — result is reused later for pg_stmt creation
+        pre_trans = sql_translate(zSql);
+        have_pre_trans = 1;
+        int param_count = pre_trans.param_count;
+
+        // Build dummy SQL that absorbs all bind calls.
+        // Use named params (:name) when available so that
+        // sqlite3_bind_parameter_index(":name") returns the correct index.
+        // Fall back to positional ? when names are not available.
+        char dummy_sql[4096];
+        if (param_count == 0) {
+            snprintf(dummy_sql, sizeof(dummy_sql), "SELECT 1 WHERE 0");
+        } else {
+            int has_names = (pre_trans.param_names != NULL);
+            int off = snprintf(dummy_sql, sizeof(dummy_sql), "SELECT 1 WHERE ");
+            for (int i = 0; i < param_count; i++) {
+                if (i > 0) off += snprintf(dummy_sql + off, sizeof(dummy_sql) - off, " AND ");
+                if (has_names && pre_trans.param_names[i]) {
+                    // Use :<name> so SQLite registers the named parameter
+                    off += snprintf(dummy_sql + off, sizeof(dummy_sql) - off,
+                                    ":%s IS NOT NULL", pre_trans.param_names[i]);
+                } else {
+                    off += snprintf(dummy_sql + off, sizeof(dummy_sql) - off, "? IS NOT NULL");
+                }
+                if (off >= (int)sizeof(dummy_sql) - 40) break;
+            }
+        }
+
         if (real_sqlite3_prepare_v2) {
-            int rc = real_sqlite3_prepare_v2(db, "SELECT 1 WHERE 0", -1, ppStmt, pzTail);
+            rc = real_sqlite3_prepare_v2(db, dummy_sql, -1, ppStmt, pzTail);
+        } else {
+            LOG_ERROR("CRITICAL: real_sqlite3_prepare_v2 not initialized!");
+            rc = SQLITE_ERROR;
+            if (ppStmt) *ppStmt = NULL;
+        }
+
+        if (rc != SQLITE_OK || !*ppStmt) {
+            LOG_ERROR("PREPARE: Dummy shadow prepare failed (rc=%d, params=%d): %.100s dummy=%.200s",
+                     rc, param_count, zSql, dummy_sql);
+            sql_translation_free(&pre_trans);
+            prepare_v2_depth--;
+            return rc;
+        }
+
+        LOG_DEBUG("PREPARE: Dummy shadow OK (%d params) for PG query: %.100s", param_count, zSql);
+    } else {
+        // Non-PG query: prepare real SQL on shadow SQLite
+        // Clean SQL for SQLite (remove icu_root and FTS references)
+
+        // ALWAYS simplify FTS queries for SQLite, even without PG connection
+        // because SQLite shadow DB doesn't have FTS virtual tables
+        if (!skip_complex_processing && strcasestr(zSql, "fts4_")) {
+            cleaned_sql = simplify_fts_for_sqlite(zSql);
+            if (cleaned_sql) {
+                sql_for_sqlite = cleaned_sql;
+                LOG_INFO("FTS query ORIGINAL: %.500s", zSql);
+                LOG_INFO("FTS query SIMPLIFIED: %.500s", cleaned_sql);
+            }
+        }
+
+        // ALWAYS remove "collate icu_root" since SQLite shadow DB doesn't support it
+        if (!skip_complex_processing && strcasestr(sql_for_sqlite, "collate icu_root")) {
+            char *temp = malloc(strlen(sql_for_sqlite) + 1);
+            if (temp) {
+                strcpy(temp, sql_for_sqlite);
+                char *pos;
+                while ((pos = strcasestr(temp, " collate icu_root")) != NULL) {
+                    memmove(pos, pos + 17, strlen(pos + 17) + 1);
+                }
+                while ((pos = strcasestr(temp, "collate icu_root")) != NULL) {
+                    memmove(pos, pos + 16, strlen(pos + 16) + 1);
+                }
+                if (cleaned_sql) free(cleaned_sql);
+                cleaned_sql = temp;
+                sql_for_sqlite = cleaned_sql;
+            }
+        }
+
+        // Block remaining FTS queries from shadow SQLite
+        if (strcasestr(sql_for_sqlite, "fts4_") || strcasestr(sql_for_sqlite, " match ")) {
+            LOG_INFO("FTS query blocked from SQLite (tokenizer not available): %.100s", sql_for_sqlite);
+            if (real_sqlite3_prepare_v2) {
+                int rc = real_sqlite3_prepare_v2(db, "SELECT 1 WHERE 0", -1, ppStmt, pzTail);
+                if (cleaned_sql) free(cleaned_sql);
+                prepare_v2_depth--;
+                return rc;
+            }
+        }
+
+        // Add IF NOT EXISTS for CREATE TABLE/INDEX sent to shadow SQLite
+        if (!skip_complex_processing && sql_for_sqlite &&
+            (strcasestr(sql_for_sqlite, "CREATE TABLE") || strcasestr(sql_for_sqlite, "CREATE INDEX") ||
+             strcasestr(sql_for_sqlite, "CREATE UNIQUE INDEX")) &&
+            !strcasestr(sql_for_sqlite, "IF NOT EXISTS")) {
+            const char *create_pos = strcasestr(sql_for_sqlite, "CREATE ");
+            if (create_pos) {
+                const char *keyword_after_create = create_pos + 7;
+                if (strncasecmp(keyword_after_create, "UNIQUE ", 7) == 0)
+                    keyword_after_create += 7;
+                if (strncasecmp(keyword_after_create, "TABLE ", 6) == 0)
+                    keyword_after_create += 6;
+                else if (strncasecmp(keyword_after_create, "INDEX ", 6) == 0)
+                    keyword_after_create += 6;
+
+                size_t prefix_len = keyword_after_create - sql_for_sqlite;
+                size_t suffix_len = strlen(keyword_after_create);
+                char *ine_sql = malloc(prefix_len + 14 + suffix_len + 1);
+                if (ine_sql) {
+                    memcpy(ine_sql, sql_for_sqlite, prefix_len);
+                    memcpy(ine_sql + prefix_len, "IF NOT EXISTS ", 14);
+                    memcpy(ine_sql + prefix_len + 14, keyword_after_create, suffix_len + 1);
+                    if (cleaned_sql) free(cleaned_sql);
+                    cleaned_sql = ine_sql;
+                    sql_for_sqlite = cleaned_sql;
+                    LOG_INFO("Added IF NOT EXISTS for SQLite DDL: %.200s", sql_for_sqlite);
+                }
+            }
+        }
+
+        // Prepare real SQL on shadow SQLite
+        if (real_sqlite3_prepare_v2) {
+            rc = real_sqlite3_prepare_v2(db, sql_for_sqlite, cleaned_sql ? -1 : nByte, ppStmt, pzTail);
+        } else {
+            LOG_ERROR("CRITICAL: real_sqlite3_prepare_v2 not initialized!");
+            rc = SQLITE_ERROR;
+            if (ppStmt) *ppStmt = NULL;
+        }
+
+        if (rc != SQLITE_OK || !*ppStmt) {
             if (cleaned_sql) free(cleaned_sql);
             prepare_v2_depth--;
             return rc;
         }
     }
 
-    // Add IF NOT EXISTS for CREATE TABLE/INDEX sent to shadow SQLite.
-    // During migrations, PG schema already has these objects from the initial schema dump.
-    // The shadow SQLite may also have them from a previous run. Without IF NOT EXISTS,
-    // SQLite returns "table already exists" which Plex treats as "database corruption".
-    if (!skip_complex_processing && sql_for_sqlite &&
-        (strcasestr(sql_for_sqlite, "CREATE TABLE") || strcasestr(sql_for_sqlite, "CREATE INDEX") ||
-         strcasestr(sql_for_sqlite, "CREATE UNIQUE INDEX")) &&
-        !strcasestr(sql_for_sqlite, "IF NOT EXISTS")) {
-        // Insert "IF NOT EXISTS" after CREATE TABLE/INDEX/UNIQUE INDEX
-        const char *create_pos = strcasestr(sql_for_sqlite, "CREATE ");
-        if (create_pos) {
-            const char *keyword_after_create = create_pos + 7;
-            // Skip UNIQUE if present
-            if (strncasecmp(keyword_after_create, "UNIQUE ", 7) == 0)
-                keyword_after_create += 7;
-            // Skip TABLE or INDEX
-            if (strncasecmp(keyword_after_create, "TABLE ", 6) == 0)
-                keyword_after_create += 6;
-            else if (strncasecmp(keyword_after_create, "INDEX ", 6) == 0)
-                keyword_after_create += 6;
-
-            size_t prefix_len = keyword_after_create - sql_for_sqlite;
-            size_t suffix_len = strlen(keyword_after_create);
-            char *ine_sql = malloc(prefix_len + 14 + suffix_len + 1);  // "IF NOT EXISTS " = 14
-            if (ine_sql) {
-                memcpy(ine_sql, sql_for_sqlite, prefix_len);
-                memcpy(ine_sql + prefix_len, "IF NOT EXISTS ", 14);
-                memcpy(ine_sql + prefix_len + 14, keyword_after_create, suffix_len + 1);
-                if (cleaned_sql) free(cleaned_sql);
-                cleaned_sql = ine_sql;
-                sql_for_sqlite = cleaned_sql;
-                LOG_INFO("Added IF NOT EXISTS for SQLite DDL: %.200s", sql_for_sqlite);
-            }
-        }
-    }
-
-    // CRITICAL: Use real_sqlite3_prepare_v2 to bypass DYLD_INTERPOSE
-    // Otherwise we get infinite recursion since sqlite3_prepare_v2 calls us again!
-    int rc;
-    if (real_sqlite3_prepare_v2) {
-        rc = real_sqlite3_prepare_v2(db, sql_for_sqlite, cleaned_sql ? -1 : nByte, ppStmt, pzTail);
-    } else {
-        // Fallback - this will likely cause recursion but better than crash
-        LOG_ERROR("CRITICAL: real_sqlite3_prepare_v2 not initialized!");
-        rc = SQLITE_ERROR;
-        if (ppStmt) *ppStmt = NULL;
-    }
-
     // CRITICAL FIX: Clear our tracked error state on success
-    // This ensures sqlite3_errmsg/errcode return correct values
     pg_connection_t *pg_conn_for_clear = pg_find_connection(db);
     if (pg_conn_for_clear) {
-        if (rc == SQLITE_OK) {
-            pg_conn_for_clear->last_error_code = SQLITE_OK;
-            pg_conn_for_clear->last_error[0] = '\0';
-        } else {
-            // Track actual SQLite error for consistency
-            pg_conn_for_clear->last_error_code = rc;
-            const char *sqlite_err = sqlite3_errmsg(db);
-            if (sqlite_err) {
-                snprintf(pg_conn_for_clear->last_error, sizeof(pg_conn_for_clear->last_error),
-                         "%s", sqlite_err);
-            }
-        }
-    }
-
-    if (rc != SQLITE_OK || !*ppStmt) {
-        // v0.9.29: For READ queries on library.db, shadow SQLite errors are non-fatal.
-        // The query will execute on PostgreSQL only — we just need a valid sqlite3_stmt*
-        // handle as a container for our pg_stmt_t.
-        // Build a dummy with matching parameter count so sqlite3_bind_* calls succeed.
-        if (is_read && pg_conn && pg_conn->is_pg_active && is_library_db_path(pg_conn->db_path) &&
-            real_sqlite3_prepare_v2) {
-            // Count parameters (? and :name) in the original SQL
-            int param_count = 0;
-            if (zSql) {
-                int in_quote = 0;
-                for (const char *p = zSql; *p; p++) {
-                    if (*p == '\'') { in_quote = !in_quote; continue; }
-                    if (in_quote) continue;
-                    if (*p == '?') param_count++;
-                    else if (*p == ':' && p > zSql && (*(p-1) == ' ' || *(p-1) == ',' || *(p-1) == '(' || *(p-1) == '=')) param_count++;
-                }
-            }
-            // Build "SELECT 1 WHERE ?=? AND ?=? ..." to absorb all bind calls
-            // Each ? is one bind slot. Use pairs: ?=? consumes 2, single ? at end with IS NOT NULL
-            char dummy_sql[2048];
-            if (param_count == 0) {
-                snprintf(dummy_sql, sizeof(dummy_sql), "SELECT 1 WHERE 0");
-            } else {
-                int off = snprintf(dummy_sql, sizeof(dummy_sql), "SELECT 1 WHERE ");
-                for (int i = 0; i < param_count; i++) {
-                    if (i > 0) off += snprintf(dummy_sql + off, sizeof(dummy_sql) - off, " AND ");
-                    off += snprintf(dummy_sql + off, sizeof(dummy_sql) - off, "? IS NOT NULL");
-                    if (off >= (int)sizeof(dummy_sql) - 20) break;
-                }
-            }
-            LOG_ERROR("PREPARE: Shadow SQLite failed for READ (rc=%d), using dummy shadow (%d params): %.100s",
-                     rc, param_count, zSql);
-            rc = real_sqlite3_prepare_v2(db, dummy_sql, -1, ppStmt, pzTail);
-            if (rc != SQLITE_OK || !*ppStmt) {
-                LOG_ERROR("PREPARE: Even dummy shadow failed (rc=%d) sql=%.200s", rc, dummy_sql);
-                if (cleaned_sql) free(cleaned_sql);
-                prepare_v2_depth--;
-                return rc;
-            }
-            // Clear any error state from the original failed prepare
-            if (pg_conn_for_clear) {
-                pg_conn_for_clear->last_error_code = SQLITE_OK;
-                pg_conn_for_clear->last_error[0] = '\0';
-            }
-        } else {
-            if (cleaned_sql) free(cleaned_sql);
-            prepare_v2_depth--;  // Decrement before return
-            return rc;
-        }
+        pg_conn_for_clear->last_error_code = SQLITE_OK;
+        pg_conn_for_clear->last_error[0] = '\0';
     }
 
     // v0.9.4.6: Only create pg_stmt for library.db
@@ -851,17 +854,20 @@ int my_sqlite3_prepare_v2_internal(sqlite3 *db, const char *zSql, int nByte,
             } else {
                 pg_stmt->is_pg = is_write ? 1 : 2;
 
-                sql_translation_t trans = sql_translate(zSql);
+                // Reuse pre_trans from dummy path, or translate now for non-dummy path
+                sql_translation_t trans;
+                if (have_pre_trans) {
+                    trans = pre_trans;
+                    // Clear so we don't double-free later
+                    memset(&pre_trans, 0, sizeof(pre_trans));
+                    have_pre_trans = 0;
+                } else {
+                    trans = sql_translate(zSql);
+                }
                 if (!trans.success) {
                        LOG_ERROR("Translation failed for SQL: %s. Error: %s", zSql, trans.error);
                 }
 
-                // Use parameter count from SQL translator (already counted during placeholder translation)
-                // The translator correctly handles ? inside string literals (returns 0 for those).
-                // CRITICAL FIX: Never fall back to naive ? counting — it doesn't respect
-                // string boundaries and causes "bind message supplies N parameters, but
-                // prepared statement requires 0" errors for queries like:
-                //   UPDATE metadata_items SET guid=REPLACE(guid,'?lang=en','?lang=xn')
                 pg_stmt->param_count = trans.param_count;
 
                 // Store parameter names for mapping named parameters
@@ -887,21 +893,21 @@ int my_sqlite3_prepare_v2_internal(sqlite3 *db, const char *zSql, int nByte,
                 }
 
                 if (trans.success && trans.sql) {
-                    char *aliased = maybe_alias_collection_sync_aggregates(zSql, trans.sql);
-                    pg_stmt->pg_sql = strdup(aliased ? aliased : trans.sql);
+                    // Rewrite blobs.db schema_migrations → blobs_schema_migrations
+                    char *blobs_rewrite = rewrite_blobs_schema_migrations(trans.sql, pg_conn->db_path);
+                    const char *effective_sql = blobs_rewrite ? blobs_rewrite : trans.sql;
+
+                    char *aliased = maybe_alias_collection_sync_aggregates(zSql, effective_sql);
+                    pg_stmt->pg_sql = strdup(aliased ? aliased : effective_sql);
                     if (aliased) free(aliased);
+                    if (blobs_rewrite) free(blobs_rewrite);
                     trace_prepare_pgsql_if_enabled(zSql, pg_stmt->pg_sql);
                      
                     // PERFORMANCE FIX: Cache count query detection at prepare time (not per-row)
-                    // This avoids expensive strstr() calls in my_sqlite3_column_text()
                     pg_stmt->is_count_query = (pg_stmt->pg_sql && 
                                                 strstr(pg_stmt->pg_sql, "parents.parent_id,count(*)")) ? 1 : 0;
 
                     // CRITICAL FIX: Add ON CONFLICT DO NOTHING for schema_migrations INSERTs
-                    // The PG schema dump includes pre-loaded migration versions.
-                    // When Plex runs migrations, it INSERTs the version after each migration.
-                    // If the version already exists, this prevents UNIQUE violation errors
-                    // that cause "Unable to set up server" crashes.
                     if (is_write && strncasecmp(zSql, "INSERT", 6) == 0 &&
                         pg_stmt->pg_sql && strcasestr(pg_stmt->pg_sql, "schema_migrations") &&
                         !strcasestr(pg_stmt->pg_sql, "ON CONFLICT")) {
@@ -916,7 +922,6 @@ int my_sqlite3_prepare_v2_internal(sqlite3 *db, const char *zSql, int nByte,
                     }
 
                     // Add RETURNING id to INSERT statements for proper ID retrieval
-                    // Skip schema_migrations (no auto-increment id needed)
                     if (is_write && strncasecmp(zSql, "INSERT", 6) == 0 &&
                         pg_stmt->pg_sql && !strstr(pg_stmt->pg_sql, "RETURNING") &&
                         !strcasestr(pg_stmt->pg_sql, "schema_migrations")) {
@@ -937,7 +942,7 @@ int my_sqlite3_prepare_v2_internal(sqlite3 *db, const char *zSql, int nByte,
                         pg_stmt->sql_hash = pg_hash_sql(pg_stmt->pg_sql);
                         snprintf(pg_stmt->stmt_name, sizeof(pg_stmt->stmt_name),
                                  "ps_%llx", (unsigned long long)pg_stmt->sql_hash);
-                        pg_stmt->use_prepared = 1;  // Use prepared statements for better caching
+                        pg_stmt->use_prepared = 1;
                     }
                 }
                 sql_translation_free(&trans);
@@ -947,6 +952,7 @@ int my_sqlite3_prepare_v2_internal(sqlite3 *db, const char *zSql, int nByte,
         }
     }
 
+    if (have_pre_trans) sql_translation_free(&pre_trans);
     if (cleaned_sql) free(cleaned_sql);
     prepare_v2_depth--;  // Decrement before return
     return rc;

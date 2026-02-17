@@ -25,7 +25,7 @@
 // to return the exact original SQLite types (e.g., "boolean", "dt_integer(8)")
 // instead of PostgreSQL-derived types (e.g., "INTEGER", "TEXT").
 
-#define DECLTYPE_CACHE_SIZE 1024
+#define DECLTYPE_CACHE_SIZE 2048
 #define DECLTYPE_MAX_KEY_LEN 128
 #define DECLTYPE_MAX_TYPE_LEN 64
 
@@ -50,7 +50,69 @@ static unsigned int decltype_hash(const char *str) {
     return hash;
 }
 
-// Preload all SQLite declared types from metadata table into cache
+// Map PostgreSQL udt_name to SQLite declared type
+// This replaces the sqlite_column_types metadata table — types come directly from PG
+static const char* pg_udt_to_sqlite_decltype(const char *udt_name) {
+    if (!udt_name) return "TEXT";
+    
+    // Integer types
+    if (strcmp(udt_name, "int4") == 0) return "INTEGER";
+    if (strcmp(udt_name, "int2") == 0) return "INTEGER";
+    if (strcmp(udt_name, "int8") == 0) return "dt_integer(8)";  // BIGINT — Plex's 8-byte marker
+    if (strcmp(udt_name, "bool") == 0) return "INTEGER";        // SQLite has no native boolean
+    if (strcmp(udt_name, "oid") == 0)  return "INTEGER";
+    
+    // Real/float types
+    if (strcmp(udt_name, "float4") == 0) return "REAL";
+    if (strcmp(udt_name, "float8") == 0) return "REAL";
+    if (strcmp(udt_name, "numeric") == 0) return "REAL";
+    
+    // Text types
+    if (strcmp(udt_name, "text") == 0) return "TEXT";
+    if (strcmp(udt_name, "varchar") == 0) return "TEXT";
+    if (strcmp(udt_name, "bpchar") == 0) return "TEXT";  // char(n)
+    if (strcmp(udt_name, "name") == 0) return "TEXT";
+    if (strcmp(udt_name, "tsvector") == 0) return "TEXT";
+    if (strcmp(udt_name, "interval") == 0) return "TEXT";
+    
+    // Timestamp types — stored as INTEGER (unix epoch) in SQLite
+    if (strcmp(udt_name, "timestamp") == 0) return "INTEGER";
+    if (strcmp(udt_name, "timestamptz") == 0) return "INTEGER";
+    
+    // Binary types
+    if (strcmp(udt_name, "bytea") == 0) return "BLOB";
+    
+    return "TEXT";  // Safe default
+}
+
+// Insert a single entry into the decltype cache (linear probing, max 16 probes)
+// Returns 1 on success, 0 on collision overflow
+static int decltype_cache_insert(const char *key, const char *decltype_val) {
+    unsigned int hash = decltype_hash(key);
+    int start_idx = hash % DECLTYPE_CACHE_SIZE;
+
+    for (int probe = 0; probe < 16; probe++) {
+        int idx = (start_idx + probe) % DECLTYPE_CACHE_SIZE;
+        if (!decltype_cache[idx].valid) {
+            strncpy(decltype_cache[idx].key, key, DECLTYPE_MAX_KEY_LEN - 1);
+            decltype_cache[idx].key[DECLTYPE_MAX_KEY_LEN - 1] = '\0';
+            strncpy(decltype_cache[idx].decltype_val, decltype_val, DECLTYPE_MAX_TYPE_LEN - 1);
+            decltype_cache[idx].decltype_val[DECLTYPE_MAX_TYPE_LEN - 1] = '\0';
+            decltype_cache[idx].valid = 1;
+            return 1;
+        }
+        // If key already exists, update it (PG source wins over legacy)
+        if (strcmp(decltype_cache[idx].key, key) == 0) {
+            strncpy(decltype_cache[idx].decltype_val, decltype_val, DECLTYPE_MAX_TYPE_LEN - 1);
+            decltype_cache[idx].decltype_val[DECLTYPE_MAX_TYPE_LEN - 1] = '\0';
+            return 1;
+        }
+    }
+    return 0;  // overflow
+}
+
+// Preload all column types from PostgreSQL information_schema into cache
+// This is the sole source of truth — no shadow SQLite dependency
 // Called once on first decltype request
 static void preload_decltype_cache(pg_connection_t *pg_conn) {
     if (decltype_cache_loaded || !pg_conn || !pg_conn->conn) {
@@ -69,17 +131,16 @@ static void preload_decltype_cache(pg_connection_t *pg_conn) {
         decltype_cache_initialized = 1;
     }
 
-    LOG_INFO("DECLTYPE_CACHE: Preloading SQLite declared types from metadata table...");
+    LOG_INFO("DECLTYPE_CACHE: Loading column types from PostgreSQL information_schema...");
 
     // v0.9.29: CRITICAL FIX — Do NOT use PQexec on a streaming connection!
-    // Get an alternate connection from the pool if necessary.
     pg_connection_t *cache_conn = pg_conn;
     if (pg_conn->streaming_active) {
         LOG_DEBUG("DECLTYPE_CACHE: Connection %p is streaming_active, getting alternate", (void*)pg_conn);
         pg_connection_t *alt = pg_get_thread_connection(pg_conn->db_path);
         if (alt && alt->conn && alt != pg_conn && !alt->streaming_active) {
             cache_conn = alt;
-            LOG_ERROR("DECLTYPE_CACHE: Using alternate connection %p", (void*)cache_conn);
+            LOG_DEBUG("DECLTYPE_CACHE: Using alternate connection %p", (void*)cache_conn);
         } else {
             LOG_ERROR("DECLTYPE_CACHE: No alternate connection available, deferring load");
             pthread_mutex_unlock(&decltype_cache_mutex);
@@ -87,17 +148,22 @@ static void preload_decltype_cache(pg_connection_t *pg_conn) {
         }
     }
 
-    // Query all types from metadata table
+    // Query all column types directly from PostgreSQL
+    // Skip internal tables and PG-only columns (tsvector search columns)
     pthread_mutex_lock(&cache_conn->mutex);
     PGresult *res = PQexec(cache_conn->conn,
-        "SELECT table_name, column_name, declared_type FROM plex.sqlite_column_types");
+        "SELECT table_name, column_name, udt_name "
+        "FROM information_schema.columns "
+        "WHERE table_schema = 'plex' "
+        "AND table_name NOT IN ('sqlite_column_types', 'sqlite_sequence') "
+        "ORDER BY table_name, ordinal_position");
     pthread_mutex_unlock(&cache_conn->mutex);
 
     if (!res || PQresultStatus(res) != PGRES_TUPLES_OK) {
-        LOG_ERROR("DECLTYPE_CACHE: Failed to load metadata: %s",
+        LOG_ERROR("DECLTYPE_CACHE: Failed to query information_schema: %s",
                   res ? PQerrorMessage(cache_conn->conn) : "NULL result");
         if (res) PQclear(res);
-        decltype_cache_loaded = 1;  // Mark as loaded (even if failed) to avoid retrying
+        decltype_cache_loaded = 1;
         pthread_mutex_unlock(&decltype_cache_mutex);
         return;
     }
@@ -109,35 +175,20 @@ static void preload_decltype_cache(pg_connection_t *pg_conn) {
     for (int i = 0; i < num_rows; i++) {
         const char *table = PQgetvalue(res, i, 0);
         const char *column = PQgetvalue(res, i, 1);
-        const char *decltype_str = PQgetvalue(res, i, 2);
+        const char *udt_name = PQgetvalue(res, i, 2);
 
-        if (!table || !column || !decltype_str) continue;
+        if (!table || !column || !udt_name) continue;
+
+        // Map PG type to SQLite declared type
+        const char *sqlite_type = pg_udt_to_sqlite_decltype(udt_name);
 
         // Create cache key: "table_column"
         char key[DECLTYPE_MAX_KEY_LEN];
         snprintf(key, sizeof(key), "%s_%s", table, column);
 
-        // Compute hash and find slot
-        unsigned int hash = decltype_hash(key);
-        int start_idx = hash % DECLTYPE_CACHE_SIZE;
-
-        // Linear probing for collision resolution
-        int found_slot = 0;
-        for (int probe = 0; probe < 8; probe++) {
-            int idx = (start_idx + probe) % DECLTYPE_CACHE_SIZE;
-            if (!decltype_cache[idx].valid) {
-                // Empty slot - use it
-                strncpy(decltype_cache[idx].key, key, DECLTYPE_MAX_KEY_LEN - 1);
-                decltype_cache[idx].key[DECLTYPE_MAX_KEY_LEN - 1] = '\0';
-                strncpy(decltype_cache[idx].decltype_val, decltype_str, DECLTYPE_MAX_TYPE_LEN - 1);
-                decltype_cache[idx].decltype_val[DECLTYPE_MAX_TYPE_LEN - 1] = '\0';
-                decltype_cache[idx].valid = 1;
-                loaded++;
-                found_slot = 1;
-                break;
-            }
-        }
-        if (!found_slot) {
+        if (decltype_cache_insert(key, sqlite_type)) {
+            loaded++;
+        } else {
             collisions++;
         }
     }
@@ -146,7 +197,8 @@ static void preload_decltype_cache(pg_connection_t *pg_conn) {
     decltype_cache_loaded = 1;
     pthread_mutex_unlock(&decltype_cache_mutex);
 
-    LOG_INFO("DECLTYPE_CACHE: Loaded %d types (%d collisions/overflows)", loaded, collisions);
+    LOG_INFO("DECLTYPE_CACHE: Loaded %d column types from PG (%d collisions/overflows, cache_size=%d)",
+             loaded, collisions, DECLTYPE_CACHE_SIZE);
 }
 
 // Normalize Plex custom type annotations to standard SQLite types
@@ -273,13 +325,15 @@ static const char* lookup_decltype_direct(pg_connection_t *pg_conn, const char *
     unsigned int hash = decltype_hash(cache_key);
     int start_idx = hash % DECLTYPE_CACHE_SIZE;
 
-    for (int probe = 0; probe < 8; probe++) {
+    for (int probe = 0; probe < 16; probe++) {
         int idx = (start_idx + probe) % DECLTYPE_CACHE_SIZE;
         if (!decltype_cache[idx].valid) {
             break;  // Empty slot - not found
         }
         if (strcmp(decltype_cache[idx].key, cache_key) == 0) {
             const char *raw_type = decltype_cache[idx].decltype_val;
+            // Cache already stores normalized types from pg_udt_to_sqlite_decltype(),
+            // but normalize again for safety (idempotent)
             const char *normalized = normalize_sqlite_decltype(raw_type);
             LOG_DEBUG("DECLTYPE_DIRECT: found '%s' -> '%s' (normalized to '%s')",
                      cache_key, raw_type, normalized);
@@ -518,10 +572,10 @@ int resolve_column_tables(pg_stmt_t *pg_stmt, pg_connection_t *pg_conn) {
         pg_connection_t *alt_conn = pg_get_thread_connection(pg_conn->db_path);
         if (alt_conn && alt_conn->conn && alt_conn != pg_conn && !alt_conn->streaming_active) {
             resolve_conn = alt_conn;
-            LOG_ERROR("RESOLVE_TABLES: Using alternate connection %p for OID lookup", (void*)resolve_conn);
+            LOG_DEBUG("RESOLVE_TABLES: Using alternate connection %p for OID lookup", (void*)resolve_conn);
         } else {
             // No alternate connection available — skip OID resolution to protect streaming
-            LOG_ERROR("RESOLVE_TABLES: No alternate connection, skipping OID lookup to protect streaming");
+            LOG_DEBUG("RESOLVE_TABLES: No alternate connection, skipping OID lookup to protect streaming");
             free(query);
             pg_stmt->col_tables_resolved = 1;
             return 0;
@@ -702,6 +756,9 @@ static int ensure_pg_result_for_metadata(pg_stmt_t *pg_stmt) {
     if (pg_stmt->result || pg_stmt->cached_result) {
         return 1;  // Already have result
     }
+    if (pg_stmt->num_cols > 0) {
+        return 1;  // Already have metadata from describe
+    }
     if (!pg_stmt->pg_sql || !pg_stmt->conn || !pg_stmt->conn->conn) {
         return 0;  // Can't execute - missing query or connection
     }
@@ -719,8 +776,6 @@ static int ensure_pg_result_for_metadata(pg_stmt_t *pg_stmt) {
         exec_conn = thread_conn;
     }
 
-    LOG_INFO("METADATA_EXEC: Executing query for column metadata access: %.100s", pg_stmt->pg_sql);
-
     // Lock the connection mutex
     pthread_mutex_lock(&exec_conn->mutex);
 
@@ -733,6 +788,80 @@ static int ensure_pg_result_for_metadata(pg_stmt_t *pg_stmt) {
     while ((pending = PQgetResult(exec_conn->conn)) != NULL) {
         PQclear(pending);
     }
+
+    // If query has parameters that aren't bound yet, use PQdescribePrepared
+    // to get column metadata without executing the query.
+    // This is critical for the dummy prepare path where column_count is
+    // called before bind/step.
+    int has_unbound_params = 0;
+    if (pg_stmt->param_count > 0) {
+        has_unbound_params = 1;
+        for (int i = 0; i < pg_stmt->param_count; i++) {
+            if (pg_stmt->param_values[i] != NULL) {
+                has_unbound_params = 0;
+                break;
+            }
+        }
+    }
+
+    if (has_unbound_params && pg_stmt->stmt_name[0]) {
+        // Use PQprepare + PQdescribePrepared for metadata-only access
+        LOG_INFO("METADATA_DESCRIBE: Using PQdescribePrepared for: %.100s", pg_stmt->pg_sql);
+
+        // Prepare the statement on PG if not already prepared
+        PGresult *prep = PQprepare(exec_conn->conn, pg_stmt->stmt_name,
+                                    pg_stmt->pg_sql, 0, NULL);
+        if (PQresultStatus(prep) != PGRES_COMMAND_OK) {
+            const char *err = PQerrorMessage(exec_conn->conn);
+            // "already exists" is fine — another path already prepared it
+            if (!err || !strstr(err, "already exists")) {
+                LOG_ERROR("METADATA_DESCRIBE: PQprepare failed: %s", err ? err : "(null)");
+                PQclear(prep);
+                pthread_mutex_unlock(&exec_conn->mutex);
+                return 0;
+            }
+            LOG_DEBUG("METADATA_DESCRIBE: statement already prepared, continuing with describe");
+        }
+        PQclear(prep);
+
+        // Describe to get column metadata
+        PGresult *desc = PQdescribePrepared(exec_conn->conn, pg_stmt->stmt_name);
+        pthread_mutex_unlock(&exec_conn->mutex);
+
+        if (PQresultStatus(desc) == PGRES_COMMAND_OK) {
+            pg_stmt->num_cols = PQnfields(desc);
+            // Store column names from describe result
+            if (pg_stmt->num_cols > 0) {
+                pg_stmt->col_names = calloc(pg_stmt->num_cols, sizeof(char*));
+                if (pg_stmt->col_names) {
+                    pg_stmt->num_col_names = pg_stmt->num_cols;
+                    for (int i = 0; i < pg_stmt->num_cols; i++) {
+                        const char *name = PQfname(desc, i);
+                        pg_stmt->col_names[i] = name ? strdup(name) : NULL;
+                    }
+                }
+            }
+            // CRITICAL: Store the describe result as pg_stmt->result so that
+            // column_decltype can read OIDs via PQftype(result, idx).
+            // The describe result has 0 rows but full column metadata.
+            pg_stmt->result = desc;
+            pg_stmt->num_rows = 0;
+            pg_stmt->current_row = 0;
+            pg_stmt->metadata_only_result = 1;
+            LOG_INFO("METADATA_DESCRIBE: Success - %d cols for: %.100s",
+                     pg_stmt->num_cols, pg_stmt->pg_sql);
+            // Don't PQclear(desc) — it's now owned by pg_stmt->result
+            return 1;
+        } else {
+            LOG_ERROR("METADATA_DESCRIBE: PQdescribePrepared failed: %s",
+                     PQerrorMessage(exec_conn->conn));
+            PQclear(desc);
+            return 0;
+        }
+    }
+
+    // No unbound params or no stmt_name — execute the query for metadata
+    LOG_INFO("METADATA_EXEC: Executing query for column metadata access: %.100s", pg_stmt->pg_sql);
 
     // Build parameter values array
     const char *paramValues[MAX_PARAMS] = {NULL};
@@ -2005,25 +2134,33 @@ const char* my_sqlite3_column_name(sqlite3_stmt *pStmt, int idx) {
         pthread_mutex_lock(&pg_stmt->mutex);
         // If no result yet but we have a query, execute it to get column metadata
         // SQLite allows column_name to be called before step()
-        if (!pg_stmt->result && !pg_stmt->cached_result && pg_stmt->pg_sql) {
+        if (!pg_stmt->result && !pg_stmt->cached_result && !pg_stmt->col_names && pg_stmt->pg_sql) {
             if (!ensure_pg_result_for_metadata(pg_stmt)) {
                 LOG_DEBUG("COLUMN_NAME: failed to execute query for metadata");
                 pthread_mutex_unlock(&pg_stmt->mutex);
                 return orig_sqlite3_column_name ? orig_sqlite3_column_name(pStmt, idx) : NULL;
             }
         }
-        if (!pg_stmt->result) {
-            LOG_DEBUG("COLUMN_NAME: pg_stmt has no result, falling back to orig");
+        // Check col_names first (from PQdescribePrepared — no result available)
+        if (pg_stmt->col_names && idx >= 0 && idx < pg_stmt->num_col_names) {
+            const char *name = pg_stmt->col_names[idx];
+            LOG_DEBUG("COLUMN_NAME: returning '%s' for idx=%d (from col_names)", name ? name : "NULL", idx);
             pthread_mutex_unlock(&pg_stmt->mutex);
-            return orig_sqlite3_column_name ? orig_sqlite3_column_name(pStmt, idx) : NULL;
+            return name;
         }
-        if (idx >= 0 && idx < pg_stmt->num_cols) {
+        // Then check PGresult
+        if (pg_stmt->result && idx >= 0 && idx < pg_stmt->num_cols) {
             const char *name = PQfname(pg_stmt->result, idx);
             LOG_DEBUG("COLUMN_NAME: returning '%s' for idx=%d", name ? name : "NULL", idx);
             pthread_mutex_unlock(&pg_stmt->mutex);
             return name;
         }
-        LOG_DEBUG("COLUMN_NAME: idx out of bounds (num_cols=%d)", pg_stmt->num_cols);
+        if (!pg_stmt->result && !pg_stmt->col_names) {
+            LOG_DEBUG("COLUMN_NAME: pg_stmt has no result or col_names, falling back to orig");
+            pthread_mutex_unlock(&pg_stmt->mutex);
+            return orig_sqlite3_column_name ? orig_sqlite3_column_name(pStmt, idx) : NULL;
+        }
+        LOG_DEBUG("COLUMN_NAME: idx out of bounds (num_cols=%d, num_col_names=%d)", pg_stmt->num_cols, pg_stmt->num_col_names);
         pthread_mutex_unlock(&pg_stmt->mutex);
     } else {
         LOG_DEBUG("COLUMN_NAME: not a PG stmt (pg_stmt=%p is_pg=%d), using orig",
@@ -2173,59 +2310,31 @@ const char* my_sqlite3_column_decltype(sqlite3_stmt *pStmt, int idx) {
             }
         }
         
-        // SPECIAL CASE: Aggregate functions (count, sum, max, min, avg) 
-        // PostgreSQL returns BIGINT (OID 20) for aggregates
-        // Different Plex call sites expect different widths. In practice:
-        // - count(*) is often consumed as a 32-bit INTEGER
-        // - other aggregates (sum/max/min/avg) may require 64-bit handling
-        if (col_name && oid == 20) {
-            const int is_countish =
+        // SPECIAL CASE: Aggregate function expressions (count, sum, max, min, avg)
+        // Real SQLite returns NULL from column_decltype() for expressions —
+        // only actual table columns get a decltype. SOCI handles NULL decltype
+        // by falling back to column_type() for runtime type detection.
+        // Returning "INTEGER" instead of NULL changes SOCI's code path and
+        // causes std::bad_cast in MetadataCollection.cpp:522.
+        if (col_name) {
+            const int is_aggregate_expr =
                 strcmp(col_name, "count") == 0 ||
                 strcmp(col_name, "cnt") == 0 ||
+                strcmp(col_name, "sum") == 0 ||
+                strcmp(col_name, "avg") == 0 ||
                 strstr(col_name, "count(") != NULL ||
                 strstr(col_name, "COUNT(") != NULL ||
-                (pg_stmt->pg_sql && (strstr(pg_stmt->pg_sql, "count(") != NULL || strstr(pg_stmt->pg_sql, "COUNT(") != NULL));
-
-            if (is_countish) {
-                const int has_table = (idx < MAX_PARAMS && pg_stmt->col_table_names[idx]);
-                // Native SQLite returns NULL decltype for computed expressions like count(*).
-                // Matching that behavior avoids SOCI/Plex making incorrect type assumptions.
-                if (!has_table) {
-                    if (trace) {
-                        trace_badcast_log_ctx(pg_stmt, pStmt, idx, "column_decltype", "NULL", pg_stmt->current_row, 0, oid, col_name);
-                    }
-                    LOG_DEBUG("DECLTYPE_AGGREGATE: col='%s' OID=20 (count expr) -> returning NULL", col_name);
-                    pthread_mutex_unlock(&pg_stmt->mutex);
-                    return NULL;
-                }
-                if (trace) {
-                    trace_badcast_log_ctx(pg_stmt, pStmt, idx, "column_decltype", "INTEGER", pg_stmt->current_row, 0, oid, col_name);
-                }
-                LOG_DEBUG("DECLTYPE_AGGREGATE: col='%s' OID=20 (BIGINT/count) -> returning INTEGER", col_name);
+                strncmp(col_name, "sum(", 4) == 0 ||
+                strncmp(col_name, "max(", 4) == 0 ||
+                strncmp(col_name, "min(", 4) == 0 ||
+                strncmp(col_name, "avg(", 4) == 0;
+            if (is_aggregate_expr) {
+                // Return NULL to match real SQLite behavior for expressions.
+                // SOCI will fall back to column_type() which returns
+                // SQLITE_INTEGER — this is the correct code path.
+                LOG_DEBUG("DECLTYPE_AGGREGATE: col='%s' -> returning NULL (matching SQLite behavior)", col_name);
                 pthread_mutex_unlock(&pg_stmt->mutex);
-                return "INTEGER";
-            }
-
-            // For other aggregates returning int8, keep Plex's 8-byte token.
-            if (strcmp(col_name, "sum") == 0 ||
-                strcmp(col_name, "max") == 0 ||
-                strcmp(col_name, "min") == 0 ||
-                strcmp(col_name, "avg") == 0) {
-                const int has_table = (idx < MAX_PARAMS && pg_stmt->col_table_names[idx]);
-                if (!has_table) {
-                    if (trace) {
-                        trace_badcast_log_ctx(pg_stmt, pStmt, idx, "column_decltype", "NULL", pg_stmt->current_row, 0, oid, col_name);
-                    }
-                    LOG_DEBUG("DECLTYPE_AGGREGATE: col='%s' OID=20 (agg expr) -> returning NULL", col_name);
-                    pthread_mutex_unlock(&pg_stmt->mutex);
-                    return NULL;
-                }
-                if (trace) {
-                    trace_badcast_log_ctx(pg_stmt, pStmt, idx, "column_decltype", "dt_integer(8)", pg_stmt->current_row, 0, oid, col_name);
-                }
-                LOG_DEBUG("DECLTYPE_AGGREGATE: col='%s' OID=20 (BIGINT/agg) -> returning dt_integer(8)", col_name);
-                pthread_mutex_unlock(&pg_stmt->mutex);
-                return "dt_integer(8)";
+                return NULL;
             }
         }
         
@@ -2255,11 +2364,10 @@ const char* my_sqlite3_column_decltype(sqlite3_stmt *pStmt, int idx) {
         pthread_mutex_unlock(&pg_stmt->mutex);
         return decltype;
     }
-    LOG_DEBUG("DECLTYPE_FALLBACK: using orig (pg_stmt=%p is_pg=%d)",
-             (void*)pg_stmt, pg_stmt ? pg_stmt->is_pg : -1);
-    const char *orig_type = orig_sqlite3_column_decltype ? orig_sqlite3_column_decltype(pStmt, idx) : NULL;
-    LOG_DEBUG("COLUMN_DECLTYPE: orig returned '%s'", orig_type ? orig_type : "NULL");
-    return orig_type;
+    // Non-PG statement: pass through to real SQLite (this is NOT the shadow path —
+    // these are genuine SQLite-only statements like PRAGMA or non-library databases)
+    LOG_DEBUG("DECLTYPE_PASSTHROUGH: non-PG stmt=%p, using orig_sqlite3_column_decltype", (void*)pStmt);
+    return orig_sqlite3_column_decltype ? orig_sqlite3_column_decltype(pStmt, idx) : NULL;
 }
 // sqlite3_column_value returns a pointer to a sqlite3_value for a column.
 // For PostgreSQL statements, we return a fake sqlite3_value that encodes the pg_stmt and column.

@@ -92,6 +92,7 @@ char* translate_alias_quotes(const char *sql);
 char* translate_ddl_quotes(const char *sql);
 char* add_if_not_exists(const char *sql);
 char* fix_on_conflict_quotes(const char *sql);
+char* quote_mixed_case_identifiers(const char *sql);
 
 // ============================================================================
 // Keyword Translations (sql_tr_keywords.c)

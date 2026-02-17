@@ -1,3 +1,71 @@
+# Release Notes - v0.9.32
+
+**Release Date:** February 17, 2026
+
+Shadow SQLite elimination: decltype now matches real SQLite behavior, fixing `std::bad_cast` crashes. Adds camelCase alias quoting and named-parameter dummy prepare.
+
+## Highlights
+
+### Shadow SQLite Elimination Progress
+
+This release continues the work of eliminating the shadow SQLite dependency. The shim is moving towards using PostgreSQL as the sole data source, with SQLite handles serving only as opaque pointers. Key progress in this release:
+
+- **Dummy prepare with named parameters** — PG-routed queries no longer need a real SQLite prepare. A dummy statement (`SELECT 1 WHERE :param1 IS NOT NULL AND ...`) absorbs bind calls using the actual named parameters from the SQL translator result.
+- **PQdescribePrepared for column metadata** — `column_count()` and `column_name()` now use PostgreSQL's `PQdescribePrepared` to get column metadata without executing the query, removing another SQLite dependency.
+- **Decltype from PostgreSQL catalog** — column type information is resolved from PG's `information_schema.columns` cache instead of relying on the shadow SQLite schema.
+
+### Fixed: `std::bad_cast` in SyncCollections (MetadataCollection.cpp:522)
+
+- **Problem:** Every Plex startup crashed with `std::bad_cast` during the SyncCollections fixup for section 2 (170 collections, 2 tags). The crash occurred during the "Refreshed attributes" phase at `MetadataCollection.cpp:522`.
+- **Root cause:** `sqlite3_column_decltype()` returned `"INTEGER"` for aggregate expressions like `count(*)`, `min(year)`, `max(year)`. Real SQLite returns **NULL** for expressions — only actual table columns get a decltype. Plex's SOCI library uses decltype to decide how to create C++ type holders. Non-NULL decltype triggers a "known type" code path with specific `dynamic_cast` expectations; NULL decltype triggers a runtime fallback via `column_type()`. The wrong code path caused the cast to fail.
+- **Fix:** Aggregate expressions (`count`, `sum`, `min(`, `max(`, `avg(`) now return NULL from `column_decltype()`, matching real SQLite behavior. SOCI correctly falls back to `column_type()` (SQLITE_INTEGER) for runtime type detection.
+- **Impact:** Also fixes "Saving activity history aborted with DB exception" and "ViewStateSync exception" — both had the same root cause.
+
+### camelCase Alias Quoting
+
+- **Problem:** PostgreSQL lowercases unquoted identifiers, breaking Plex queries that use camelCase aliases like `blankKeyTaggingId`, `nonblankKeyId`, `grandparentsSettings`.
+- **Fix:** Two-pass approach in `sql_tr_quotes.c`: Pass 1 scans for `AS <mixedCaseIdentifier>` patterns (excluding SQL type keywords like INTEGER, TEXT). Pass 2 quotes all bare occurrences of collected identifiers throughout the query.
+
+### Logging Fork fd Leak Fix
+
+- **Problem:** Child processes forked by Plex inherited the shim's log fd. When the child exited, the destructor ran `fclose()` on the shared fd, silently killing logging in the parent Plex process.
+- **Fix:** Store `logging_owner_pid` at init; only `fclose()` in the destructor if `getpid() == logging_owner_pid`.
+
+### Log Noise Reduction
+
+- "STREAM: zero rows returned" downgraded from ERROR to DEBUG
+- "RESOLVE_TABLES: Using alternate connection" downgraded from ERROR to DEBUG
+- "pg_stmt_clear_result: drained N results after cancel" downgraded from ERROR to DEBUG
+
+## Testing
+
+261 unit tests (220 SQL translator + 41 shadow elimination), 0 failures. 11 new tests for camelCase alias quoting.
+
+## Upgrade Notes
+
+1. Re-run `scripts/install_wrappers.sh` (macOS) or restart the service (Linux/Docker) after updating.
+2. No database changes required.
+
+## Files Changed
+
+- `src/db_interpose_column.c` — Aggregate decltype returns NULL (not "INTEGER"); PQdescribePrepared metadata; decltype cache rewrite; log noise reduction
+- `src/db_interpose_prepare.c` — Dummy prepare with named parameters; blobs.db exclusion
+- `src/db_interpose_step.c` — Log noise reduction
+- `src/pg_statement.c` — Log noise reduction
+- `src/pg_logging.c` — Fork fd leak fix (logging_owner_pid)
+- `src/pg_types.h` — col_names/num_col_names on pg_stmt_t
+- `src/pg_client.c` — Transaction commit guards
+- `src/sql_tr_quotes.c` — quote_mixed_case_identifiers() two-pass, is_sql_type_keyword()
+- `src/sql_translator.c` — Step 10: camelCase alias quoting
+- `src/sql_translator_internal.h` — quote_mixed_case_identifiers() declaration
+- `src/db_interpose_common.c` — is_blobs_db_path(), rewrite_blobs_schema_migrations()
+- `src/db_interpose_exec.c` — blobs_rewrite call
+- `src/db_interpose_open.c` — Dead code removed
+- `tests/src/test_sql_translator.c` — 11 new camelCase quoting tests
+- `VERSION`, `CHANGELOG.md`, `README.md`, `README.es.md`, `RELEASE_NOTES.md`
+
+---
+
 # Release Notes - v0.9.31
 
 **Release Date:** February 16, 2026

@@ -617,3 +617,190 @@ char* fix_duplicate_assignments(const char *sql) {
     free(assignments);
     return result;
 }
+
+// ============================================================================
+// Quote mixed-case identifiers: both AS definitions and references
+//
+// PostgreSQL lowercases unquoted identifiers, so:
+//   AS blankKeyTaggingId  -> AS "blankKeyTaggingId"
+//   grandparentsSettings.col -> "grandparentsSettings".col
+//
+// Two-pass approach:
+//   Pass 1: Find all AS <mixedCaseIdent> and collect identifier names
+//   Pass 2: Quote all bare (unquoted) occurrences of those identifiers
+// ============================================================================
+
+// Helper: check if identifier has any uppercase letter
+static int has_uppercase(const char *s, size_t len) {
+    for (size_t i = 0; i < len; i++) {
+        if (s[i] >= 'A' && s[i] <= 'Z') return 1;
+    }
+    return 0;
+}
+
+// Helper: skip over a string literal (single or double quoted)
+// Returns pointer to character after closing quote
+static const char* skip_string_literal(const char *p) {
+    char quote = *p++;
+    while (*p) {
+        if (*p == quote) {
+            if (*(p + 1) == quote) {
+                p += 2;  // escaped quote
+                continue;
+            }
+            return p + 1;  // past closing quote
+        }
+        p++;
+    }
+    return p;
+}
+
+#define MAX_MIXED_IDENTS 32
+
+// SQL type keywords that appear after AS in CAST() — must NOT be quoted
+static int is_sql_type_keyword(const char *s, size_t len) {
+    // Common SQL type names (case-insensitive check)
+    static const char *types[] = {
+        "INTEGER", "INT", "BIGINT", "SMALLINT", "TINYINT",
+        "TEXT", "VARCHAR", "CHAR", "CHARACTER",
+        "REAL", "FLOAT", "DOUBLE", "NUMERIC", "DECIMAL",
+        "BOOLEAN", "BOOL",
+        "BLOB", "BYTEA",
+        "DATE", "TIME", "TIMESTAMP", "TIMESTAMPTZ", "INTERVAL",
+        "JSON", "JSONB",
+        "UUID",
+        NULL
+    };
+    for (int i = 0; types[i]; i++) {
+        if (strlen(types[i]) == len && strncasecmp(s, types[i], len) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+char* quote_mixed_case_identifiers(const char *sql) {
+    if (!sql) return NULL;
+
+    // ---- Pass 1: Collect mixed-case identifiers after AS ----
+    char idents[MAX_MIXED_IDENTS][128];
+    int ident_count = 0;
+
+    const char *p = sql;
+    while (*p) {
+        // Skip string literals
+        if (*p == '\'' || *p == '"') {
+            p = skip_string_literal(p);
+            continue;
+        }
+
+        // Look for AS keyword
+        if ((*p == 'a' || *p == 'A') &&
+            (*(p + 1) == 's' || *(p + 1) == 'S') &&
+            (p == sql || !is_ident_char(*(p - 1))) &&
+            *(p + 2) && !is_ident_char(*(p + 2))) {
+
+            p += 2;  // skip "AS"
+            while (*p && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) p++;
+
+            // Already quoted or subquery - skip
+            if (*p == '"' || *p == '\'' || *p == '(') continue;
+
+            // Extract identifier
+            const char *id_start = p;
+            while (*p && is_ident_char(*p)) p++;
+            size_t id_len = p - id_start;
+
+            if (id_len > 0 && id_len < 128 && has_uppercase(id_start, id_len) &&
+                !is_sql_type_keyword(id_start, id_len) &&
+                ident_count < MAX_MIXED_IDENTS) {
+                // Check for duplicates
+                int dup = 0;
+                for (int i = 0; i < ident_count; i++) {
+                    if (strlen(idents[i]) == id_len && memcmp(idents[i], id_start, id_len) == 0) {
+                        dup = 1;
+                        break;
+                    }
+                }
+                if (!dup) {
+                    memcpy(idents[ident_count], id_start, id_len);
+                    idents[ident_count][id_len] = '\0';
+                    ident_count++;
+                }
+            }
+            continue;
+        }
+
+        p++;
+    }
+
+    // No mixed-case identifiers found - return as-is
+    if (ident_count == 0) {
+        return strdup(sql);
+    }
+
+    // ---- Pass 2: Quote all bare occurrences of collected identifiers ----
+    size_t len = strlen(sql);
+    // Each identifier occurrence could grow by 2 chars (quotes), allocate generously
+    char *result = malloc(len * 3 + 1);
+    if (!result) return NULL;
+
+    char *out = result;
+    p = sql;
+
+    while (*p) {
+        // Skip string literals (single-quoted)
+        if (*p == '\'') {
+            const char *end = skip_string_literal(p);
+            memcpy(out, p, end - p);
+            out += (end - p);
+            p = end;
+            continue;
+        }
+
+        // Skip already double-quoted identifiers
+        if (*p == '"') {
+            const char *end = skip_string_literal(p);
+            memcpy(out, p, end - p);
+            out += (end - p);
+            p = end;
+            continue;
+        }
+
+        // Check if current position starts an identifier character
+        if (is_ident_char(*p)) {
+            // Extract the full identifier at this position
+            const char *id_start = p;
+            while (*p && is_ident_char(*p)) p++;
+            size_t id_len = p - id_start;
+
+            // Check if this identifier matches any of our collected mixed-case names
+            int matched = 0;
+            for (int i = 0; i < ident_count; i++) {
+                size_t idn_len = strlen(idents[i]);
+                if (id_len == idn_len && memcmp(id_start, idents[i], id_len) == 0) {
+                    // Must not be preceded by identifier char (already guaranteed by how we got here)
+                    // and must not be followed by identifier char (already guaranteed)
+                    *out++ = '"';
+                    memcpy(out, id_start, id_len);
+                    out += id_len;
+                    *out++ = '"';
+                    matched = 1;
+                    break;
+                }
+            }
+
+            if (!matched) {
+                // Copy identifier as-is
+                memcpy(out, id_start, id_len);
+                out += id_len;
+            }
+            continue;
+        }
+
+        *out++ = *p++;
+    }
+
+    *out = '\0';
+    return result;
+}

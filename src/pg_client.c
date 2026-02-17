@@ -820,6 +820,17 @@ static pg_connection_t* pool_get_connection(const char *db_path) {
             // When reusing another thread's connection, use PQreset() to ensure clean state
             // This is safer than trying to drain stale results which can crash
             if (conn && conn->conn) {
+                // v0.8.9.6 fix: commit any pending transaction before PQreset()
+                // PQreset() closes/reopens the connection, causing implicit ROLLBACK
+                PGTransactionStatusType txn = PQtransactionStatus(conn->conn);
+                if (txn == PQTRANS_INTRANS || txn == PQTRANS_INERROR) {
+                    const char *cmd = (txn == PQTRANS_INTRANS) ? "COMMIT" : "ROLLBACK";
+                    LOG_INFO("Pool PHASE 2: slot %d has pending transaction (status=%d), sending %s before reset",
+                            i, txn, cmd);
+                    PGresult *txn_res = PQexec(conn->conn, cmd);
+                    PQclear(txn_res);
+                }
+
                 LOG_DEBUG("Pool: resetting connection in slot %d for reuse", i);
                 pg_stmt_cache_clear(conn);  // Clear cache before reset
                 PQreset(conn->conn);
@@ -1140,6 +1151,21 @@ void pg_close_pool_for_db(sqlite3 *db) {
 
             // Only release if in READY state (not while RECONNECTING)
             if (current_state == SLOT_READY) {
+                // v0.8.9.6 fix: commit any pending transaction before releasing
+                // Without this, uncommitted INSERTs get rolled back when another
+                // thread reuses this slot and calls PQreset()
+                PGconn *pgconn = library_pool[pool_slot].conn->conn;
+                if (pgconn) {
+                    PGTransactionStatusType txn = PQtransactionStatus(pgconn);
+                    if (txn == PQTRANS_INTRANS || txn == PQTRANS_INERROR) {
+                        const char *cmd = (txn == PQTRANS_INTRANS) ? "COMMIT" : "ROLLBACK";
+                        LOG_INFO("Pool: slot %d has pending transaction (status=%d), sending %s before release",
+                                pool_slot, txn, cmd);
+                        PGresult *res = PQexec(pgconn, cmd);
+                        PQclear(res);
+                    }
+                }
+
                 library_pool[pool_slot].owner_thread = 0;
                 // NOTE: Don't reset last_used here! Keep the timestamp from last actual query.
                 // This allows the reaper to properly measure idle time from last use,

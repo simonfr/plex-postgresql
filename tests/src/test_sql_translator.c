@@ -3127,6 +3127,161 @@ static void test_upsert_unknown_table_no_columns(void) {
 }
 
 // ============================================================================
+// Mixed-Case Identifier Quoting Tests
+// ============================================================================
+
+static void test_quote_mixed_case_column_alias(void) {
+    TEST("MixedCase - column alias AS blankKeyTaggingId -> AS \"blankKeyTaggingId\"");
+    char *result = quote_mixed_case_identifiers("SELECT id AS blankKeyTaggingId FROM t");
+    if (result && strstr(result, "AS \"blankKeyTaggingId\"") && !strstr(result, "AS blankKeyTaggingId\"\"")) {
+        PASS();
+    } else {
+        FAIL("Expected AS \"blankKeyTaggingId\"");
+        if (result) printf("    Got: %s\n", result);
+    }
+    free(result);
+}
+
+static void test_quote_mixed_case_table_alias(void) {
+    TEST("MixedCase - table alias as otherTags -> as \"otherTags\"");
+    char *result = quote_mixed_case_identifiers("FROM tags JOIN tags as otherTags ON otherTags.id = tags.id");
+    if (result && strstr(result, "as \"otherTags\"")) {
+        PASS();
+    } else {
+        FAIL("Expected as \"otherTags\"");
+        if (result) printf("    Got: %s\n", result);
+    }
+    free(result);
+}
+
+static void test_quote_mixed_case_no_uppercase(void) {
+    TEST("MixedCase - no uppercase -> unchanged");
+    char *result = quote_mixed_case_identifiers("SELECT id AS my_alias FROM t");
+    if (result && strstr(result, "AS my_alias") && !strstr(result, "\"my_alias\"")) {
+        PASS();
+    } else {
+        FAIL("Expected AS my_alias (unchanged)");
+        if (result) printf("    Got: %s\n", result);
+    }
+    free(result);
+}
+
+static void test_quote_mixed_case_already_quoted(void) {
+    TEST("MixedCase - already quoted AS \"Foo\" -> unchanged");
+    char *result = quote_mixed_case_identifiers("SELECT id AS \"Foo\" FROM t");
+    if (result && strstr(result, "AS \"Foo\"") && !strstr(result, "AS \"\"Foo\"\"")) {
+        PASS();
+    } else {
+        FAIL("Expected AS \"Foo\" (unchanged)");
+        if (result) printf("    Got: %s\n", result);
+    }
+    free(result);
+}
+
+static void test_quote_mixed_case_in_string_literal(void) {
+    TEST("MixedCase - AS inside string literal -> not quoted");
+    char *result = quote_mixed_case_identifiers("SELECT 'AS camelCase' FROM t");
+    if (result && strstr(result, "'AS camelCase'") && !strstr(result, "\"camelCase\"")) {
+        PASS();
+    } else {
+        FAIL("Expected string literal unchanged");
+        if (result) printf("    Got: %s\n", result);
+    }
+    free(result);
+}
+
+static void test_quote_mixed_case_synccollections(void) {
+    TEST("MixedCase - SyncCollections: aliases AND references quoted");
+    char *result = quote_mixed_case_identifiers(
+        "select taggings.id as blankKeyTaggingId, otherTags.id as nonblankKeyId "
+        "from tags join tags as otherTags on otherTags.tag = tags.tag");
+    if (result &&
+        strstr(result, "as \"blankKeyTaggingId\"") &&
+        strstr(result, "as \"nonblankKeyId\"") &&
+        strstr(result, "as \"otherTags\"") &&
+        strstr(result, "\"otherTags\".id") &&
+        strstr(result, "\"otherTags\".tag")) {
+        PASS();
+    } else {
+        FAIL("Expected all mixed-case identifiers quoted (incl. references)");
+        if (result) printf("    Got: %s\n", result);
+    }
+    free(result);
+}
+
+static void test_quote_mixed_case_table_reference(void) {
+    TEST("MixedCase - table alias reference: grandparentsSettings.col -> quoted");
+    char *result = quote_mixed_case_identifiers(
+        "select grandparentsSettings.extra_data from metadata_item_settings as grandparentsSettings");
+    if (result &&
+        strstr(result, "\"grandparentsSettings\".extra_data") &&
+        strstr(result, "as \"grandparentsSettings\"")) {
+        PASS();
+    } else {
+        FAIL("Expected grandparentsSettings quoted everywhere");
+        if (result) printf("    Got: %s\n", result);
+    }
+    free(result);
+}
+
+static void test_quote_mixed_case_cast_not_quoted(void) {
+    TEST("MixedCase - CAST(x AS INTEGER) -> INTEGER not quoted");
+    char *result = quote_mixed_case_identifiers(
+        "SELECT CAST(rating_count/100 AS INTEGER) FROM metadata_items");
+    if (result && strstr(result, "AS INTEGER") && !strstr(result, "\"INTEGER\"")) {
+        PASS();
+    } else {
+        FAIL("Expected AS INTEGER (not quoted)");
+        if (result) printf("    Got: %s\n", result);
+    }
+    free(result);
+}
+
+static void test_quote_mixed_case_cast_with_alias(void) {
+    TEST("MixedCase - CAST with type keyword + mixed-case alias both correct");
+    char *result = quote_mixed_case_identifiers(
+        "SELECT CAST(x AS INTEGER) AS myResult FROM t");
+    if (result &&
+        strstr(result, "AS INTEGER") && !strstr(result, "\"INTEGER\"") &&
+        strstr(result, "AS \"myResult\"")) {
+        PASS();
+    } else {
+        FAIL("Expected INTEGER unquoted, myResult quoted");
+        if (result) printf("    Got: %s\n", result);
+    }
+    free(result);
+}
+
+static void test_quote_mixed_case_null_input(void) {
+    TEST("MixedCase - NULL input -> NULL output");
+    char *result = quote_mixed_case_identifiers(NULL);
+    if (result == NULL) {
+        PASS();
+    } else {
+        FAIL("Expected NULL");
+        free(result);
+    }
+}
+
+static void test_quote_mixed_case_full_translate(void) {
+    TEST("MixedCase - full sql_translate() preserves camelCase aliases");
+    sql_translation_t tr = sql_translate(
+        "select taggings.id as blankKeyTaggingId, otherTags.id as nonblankKeyId "
+        "from tags join tags as otherTags on otherTags.tag = tags.tag "
+        "where tags.tag_value = :C1");
+    if (tr.success && tr.sql &&
+        strstr(tr.sql, "\"blankKeyTaggingId\"") &&
+        strstr(tr.sql, "\"nonblankKeyId\"") &&
+        strstr(tr.sql, "\"otherTags\"")) {
+        PASS();
+    } else {
+        FAIL("Expected mixed-case identifiers quoted in full translation");
+        if (tr.sql) printf("    Got: %s\n", tr.sql);
+    }
+    sql_translation_free(&tr);
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 
@@ -3424,6 +3579,19 @@ int main(void) {
     test_upsert_tags_without_column_list();
     test_upsert_tags_with_column_list();
     test_upsert_unknown_table_no_columns();
+
+    printf("\n\033[1mMixed-Case Identifier Quoting:\033[0m\n");
+    test_quote_mixed_case_column_alias();
+    test_quote_mixed_case_table_alias();
+    test_quote_mixed_case_no_uppercase();
+    test_quote_mixed_case_already_quoted();
+    test_quote_mixed_case_in_string_literal();
+    test_quote_mixed_case_synccollections();
+    test_quote_mixed_case_table_reference();
+    test_quote_mixed_case_cast_not_quoted();
+    test_quote_mixed_case_cast_with_alias();
+    test_quote_mixed_case_null_input();
+    test_quote_mixed_case_full_translate();
 
     // Cleanup
     sql_translator_cleanup();

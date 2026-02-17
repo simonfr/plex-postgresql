@@ -1,3 +1,7 @@
+# Embedded repos and data
+wiki/
+monitoring/
+
 # Build artifacts
 *.o
 *.dylib

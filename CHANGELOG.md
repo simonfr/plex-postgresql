@@ -5,6 +5,22 @@ All notable changes to plex-postgresql will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.32] - 2026-02-17
+
+### Fixed
+- **Aggregate decltype returns NULL** — `sqlite3_column_decltype()` for aggregate expressions (`count(*)`, `sum()`, `min()`, `max()`, `avg()`) now returns NULL instead of `"INTEGER"`, matching real SQLite behavior. This fixes `std::bad_cast` crashes in SyncCollections (`MetadataCollection.cpp:522`), "Saving activity history aborted", and "ViewStateSync exception".
+- **camelCase alias quoting** — PostgreSQL lowercases unquoted identifiers; aliases like `blankKeyTaggingId`, `nonblankKeyId`, `grandparentsSettings` are now auto-quoted. Two-pass approach excludes SQL type keywords (INTEGER, TEXT, etc.) in CAST expressions.
+- **Logging fd leak after fork** — child processes forked by Plex no longer close the parent's log file descriptor on exit.
+- **Log noise** — "STREAM: zero rows returned", "RESOLVE_TABLES: alternate connection", "drained N results after cancel" downgraded from ERROR to DEBUG.
+
+### Added
+- **Dummy prepare with named parameters** — PG-routed queries build a dummy SQLite statement using actual named parameters from the SQL translator, removing more shadow SQLite dependency.
+- **PQdescribePrepared for column metadata** — `column_count()` and `column_name()` use PostgreSQL's describe protocol instead of shadow SQLite.
+- **Decltype cache from PG catalog** — column types resolved from `information_schema.columns` cache.
+- **Transaction commit guards** in connection pool release.
+- **blobs.db schema_migrations routing** to PostgreSQL.
+- 11 new camelCase alias quoting tests. Total: 261 tests (220 SQL + 41 shadow elimination).
+
 ## [0.9.31] - 2026-02-16
 
 ### Fixed

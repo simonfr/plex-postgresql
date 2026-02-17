@@ -542,6 +542,18 @@ void pg_stmt_free(pg_stmt_t *stmt) {
         }
     }
 
+    // Free column names from PQdescribePrepared
+    if (stmt->col_names) {
+        for (int i = 0; i < stmt->num_col_names; i++) {
+            if (stmt->col_names[i]) {
+                free(stmt->col_names[i]);
+            }
+        }
+        free(stmt->col_names);
+        stmt->col_names = NULL;
+        stmt->num_col_names = 0;
+    }
+
     LOG_DEBUG("pg_stmt_free: destroying mutex and freeing stmt=%p", (void*)stmt);
     pthread_mutex_destroy(&stmt->mutex);
     free(stmt);
@@ -577,7 +589,7 @@ void pg_stmt_clear_result(pg_stmt_t *stmt) {
                 }
             }
             if (drain_count > 0) {
-                LOG_ERROR("pg_stmt_clear_result: drained %d results after cancel (sql=%.60s)",
+                LOG_DEBUG("pg_stmt_clear_result: drained %d results after cancel (sql=%.60s)",
                          drain_count, stmt->sql ? stmt->sql : "?");
             }
         }
@@ -625,6 +637,18 @@ void pg_stmt_clear_result(pg_stmt_t *stmt) {
         }
     }
     stmt->cached_row = -1;
+
+    // Free column names from PQdescribePrepared (they belong to the previous result)
+    if (stmt->col_names) {
+        for (int i = 0; i < stmt->num_col_names; i++) {
+            if (stmt->col_names[i]) {
+                free(stmt->col_names[i]);
+            }
+        }
+        free(stmt->col_names);
+        stmt->col_names = NULL;
+        stmt->num_col_names = 0;
+    }
 }
 
 // ============================================================================

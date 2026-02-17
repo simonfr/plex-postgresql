@@ -7,20 +7,20 @@
 
 A small shim library that catches Plex SQLite calls and sends them to PostgreSQL. You do not need to change Plex source code.
 
-## 🎉 Latest Release: v0.9.31
+## 🎉 Latest Release: v0.9.32
 
-**Single-row streaming and connection isolation** — READ queries now stream results row by row for lower memory usage, with full connection isolation to prevent concurrent access.
+**Shadow SQLite elimination progress** — the shim is moving away from the shadow SQLite dependency for decltype and column metadata. This release fixes `std::bad_cast` crashes by returning NULL from `column_decltype()` for aggregate expressions, matching real SQLite behavior.
 
-- 🆕 **Streaming mode:** All READ queries use PostgreSQL's `PQsetSingleRowMode` to stream results one row at a time instead of loading entire result sets into memory. Automatic fallback to eager fetch if needed.
-- 🆕 **Connection isolation:** Streaming connections are protected by a `streaming_active` flag — pool acquisition, `resolve_column_tables()`, and `preload_decltype_cache()` automatically use alternate connections
-- 🆕 **Dummy shadow fallback:** When shadow SQLite prepare fails for READ queries, a dummy statement absorbs bind calls so the query runs purely on PostgreSQL
-- 🆕 **DDL `IF NOT EXISTS`:** Shadow SQLite schema operations no longer fail on existing tables/indices
-- ✅ **37 new unit tests** (connection isolation + shadow fallback) — 798 total across 24 suites
+- 🆕 **Aggregate decltype fix:** `count(*)`, `sum()`, `min()`, `max()`, `avg()` now return NULL from `column_decltype()` — matches real SQLite, fixes `std::bad_cast` in SyncCollections and activity history
+- 🆕 **Dummy prepare with named params:** PG-routed queries no longer need real SQLite prepare — named parameters from the SQL translator are used directly
+- 🆕 **PQdescribePrepared metadata:** column count/name resolved from PostgreSQL instead of shadow SQLite
+- 🆕 **camelCase alias quoting:** aliases like `blankKeyTaggingId` are auto-quoted to prevent PostgreSQL lowercasing
+- ✅ **261 unit tests** (220 SQL translator + 41 shadow elimination)
 
-[📥 Download v0.9.31](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.31) | [📋 Full Release Notes](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.31)
+[📥 Download v0.9.32](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.32) | [📋 Full Release Notes](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.32)
 
 Linux and macOS release zips are built by GitHub Actions on tag push via `.github/workflows/release-linux-artifacts.yml` and `.github/workflows/release-macos-artifacts.yml`.
-Pull requests and `main` pushes run `.github/workflows/ci.yml` (script validation + Linux amd64 build check + **798 unit tests**).
+Pull requests and `main` pushes run `.github/workflows/ci.yml` (script validation + Linux amd64 build check + **261 unit tests**).
 Docker images are published to GHCR on release tags via `.github/workflows/docker-publish.yml`:
 - `ghcr.io/cgnl/plex-postgresql-linuxserver`
 - `ghcr.io/cgnl/plex-postgresql-plexinc`
@@ -31,7 +31,7 @@ Docker images are published to GHCR on release tags via `.github/workflows/docke
 
 **macOS:**
 ```bash
-curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.31/plex-postgresql-v0.9.31-macos.zip \
+curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.32/plex-postgresql-v0.9.32-macos.zip \
   -o /tmp/plex-pg-macos.zip
 mkdir -p /tmp/plex-pg-macos && cd /tmp/plex-pg-macos
 unzip /tmp/plex-pg-macos.zip
@@ -41,7 +41,7 @@ pkill -f "Plex Media Server" 2>/dev/null || true
 
 **Linux (x86_64):**
 ```bash
-sudo curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.31/plex-postgresql-v0.9.31-linux.zip \
+sudo curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.32/plex-postgresql-v0.9.32-linux.zip \
   -o /tmp/plex-postgresql-linux.zip
 sudo unzip -j /tmp/plex-postgresql-linux.zip db_interpose_pg-linux-x86_64.so -d /usr/local/lib
 sudo mv /usr/local/lib/db_interpose_pg-linux-x86_64.so /usr/local/lib/db_interpose_pg.so

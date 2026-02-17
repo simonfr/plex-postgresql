@@ -226,6 +226,64 @@ int is_library_db_path(const char *path) {
            strstr(path, "com.plexapp.plugins.library.blobs.db") != NULL;
 }
 
+// Helper: check if path is for blobs.db
+int is_blobs_db_path(const char *path) {
+    if (!path) return 0;
+    return strstr(path, "com.plexapp.plugins.library.blobs.db") != NULL;
+}
+
+// Helper: rewrite schema_migrations -> blobs_schema_migrations for blobs.db connections.
+// Returns a malloc'd string (caller must free) or NULL if no rewrite needed.
+char* rewrite_blobs_schema_migrations(const char *sql, const char *db_path) {
+    if (!sql || !db_path) return NULL;
+    if (!is_blobs_db_path(db_path)) return NULL;
+    if (!strcasestr(sql, "schema_migrations")) return NULL;
+    // Don't double-rewrite
+    if (strcasestr(sql, "blobs_schema_migrations")) return NULL;
+
+    // Replace all occurrences of schema_migrations with blobs_schema_migrations
+    // Handle both quoted and unquoted forms
+    const char *patterns[] = {
+        "schema_migrations",
+        NULL
+    };
+
+    char *result = strdup(sql);
+    if (!result) return NULL;
+
+    for (int i = 0; patterns[i]; i++) {
+        char *pos;
+        while ((pos = strcasestr(result, patterns[i])) != NULL) {
+            // Make sure we don't match "blobs_schema_migrations" (already rewritten)
+            if (pos > result && *(pos - 1) != ' ' && *(pos - 1) != '"' &&
+                *(pos - 1) != '\'' && *(pos - 1) != '`' && *(pos - 1) != '(' &&
+                *(pos - 1) != ',' && *(pos - 1) != '\t' && *(pos - 1) != '\n') {
+                break; // Part of another identifier
+            }
+            size_t old_len = strlen(patterns[i]);
+            size_t new_len = old_len + 6; // "blobs_" prefix
+            size_t result_len = strlen(result);
+            char *new_result = malloc(result_len + 6 + 1);
+            if (!new_result) { free(result); return NULL; }
+            size_t prefix_len = pos - result;
+            memcpy(new_result, result, prefix_len);
+            memcpy(new_result + prefix_len, "blobs_", 6);
+            memcpy(new_result + prefix_len + 6, pos, strlen(pos) + 1);
+            free(result);
+            result = new_result;
+        }
+    }
+
+    // If nothing changed, free and return NULL
+    if (strcmp(result, sql) == 0) {
+        free(result);
+        return NULL;
+    }
+
+    LOG_INFO("BLOBS_REWRITE: %s", result);
+    return result;
+}
+
 // Simple string replace helper
 char* simple_str_replace(const char *str, const char *old, const char *new_str) {
     if (!str || !old || !new_str) return NULL;

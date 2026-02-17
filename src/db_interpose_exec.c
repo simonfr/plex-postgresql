@@ -152,6 +152,10 @@ int my_sqlite3_exec(sqlite3 *db, const char *sql,
     pg_connection_t *pg_conn = pg_find_connection(db);
 
     if (pg_conn && pg_conn->conn && pg_conn->is_pg_active) {
+        // Rewrite schema_migrations for blobs.db connections
+        char *blobs_rewrite = rewrite_blobs_schema_migrations(sql, pg_conn->db_path);
+        if (blobs_rewrite) sql = blobs_rewrite;
+
         if (!should_skip_sql(sql)) {
             // GUARD: Block junk INSERTs into metadata_items with NULL library_section_id AND metadata_type
             if (strcasestr(sql, "INSERT") && strcasestr(sql, "metadata_items") &&
@@ -307,6 +311,7 @@ int my_sqlite3_exec(sqlite3 *db, const char *sql,
             }
             sql_translation_free(&trans);
         }
+        if (blobs_rewrite) free(blobs_rewrite);
         return SQLITE_OK;
     }
 

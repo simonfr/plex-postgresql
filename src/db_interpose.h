@@ -208,8 +208,12 @@ extern volatile long global_column_type_calls;
 // Check if a pointer is one of our fake values
 pg_fake_value_t* pg_check_fake_value(sqlite3_value *pVal);
 
-// Check if path is library.db
+// Check if path is library.db or blobs.db
 int is_library_db_path(const char *path);
+int is_blobs_db_path(const char *path);
+
+// Rewrite schema_migrations -> blobs_schema_migrations for blobs.db connections
+char* rewrite_blobs_schema_migrations(const char *sql, const char *db_path);
 
 // Simple string replace helper
 char* simple_str_replace(const char *str, const char *old, const char *new_str);
@@ -223,9 +227,6 @@ static inline int is_preallocated_buffer(pg_stmt_t *stmt, int idx) {
 // ============================================================================
 // Open/Close Functions (db_interpose_open.c)
 // ============================================================================
-
-void drop_icu_root_indexes(sqlite3 *db);
-void drop_fts_triggers(sqlite3 *db);
 
 EXPORT int my_sqlite3_open(const char *filename, sqlite3 **ppDb);
 EXPORT int my_sqlite3_open_v2(const char *filename, sqlite3 **ppDb, int flags, const char *zVfs);
@@ -243,8 +244,6 @@ EXPORT int my_sqlite3_exec(sqlite3 *db, const char *sql,
 // ============================================================================
 // Prepare Functions (db_interpose_prepare.c)
 // ============================================================================
-
-char* simplify_fts_for_sqlite(const char *sql);
 
 EXPORT int my_sqlite3_prepare_v2_internal(sqlite3 *db, const char *zSql, int nByte,
                                    sqlite3_stmt **ppStmt, const char **pzTail,

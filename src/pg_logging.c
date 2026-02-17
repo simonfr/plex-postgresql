@@ -12,6 +12,7 @@
 #include <strings.h>
 #include <time.h>
 #include <pthread.h>
+#include <unistd.h>
 
 // ============================================================================
 // Static State
@@ -39,6 +40,7 @@ static pthread_once_t logging_init_once = PTHREAD_ONCE_INIT;
 static size_t log_max_size = DEFAULT_LOG_MAX_SIZE;
 static char log_file_path[1024] = {0};           // Store path for rotation
 static atomic_long log_message_count = 0;        // Count messages for rotation check
+static pid_t logging_owner_pid = 0;              // PID of process that opened the log file
 
 static atomic_long query_count = 0;           // Queries in current window
 static atomic_long query_count_total = 0;     // Total queries since throttle started
@@ -226,6 +228,7 @@ static void do_logging_init(void) {
     }
 
     logging_initialized = 1;
+    logging_owner_pid = getpid();
 }
 
 void pg_logging_init(void) {
@@ -239,10 +242,18 @@ void pg_logging_init(void) {
 }
 
 void pg_logging_cleanup(void) {
+    // CRITICAL: Only the process that opened the log file should close it.
+    // After fork(), child processes inherit the file descriptor. If a child
+    // calls fclose(), it closes the underlying fd which is shared with the
+    // parent via the file descriptor table, causing the parent's logging to
+    // silently stop working.
     if (log_file && log_file != stdout && log_file != stderr) {
-        fclose(log_file);
-        log_file = NULL;
+        fflush(log_file);
+        if (getpid() == logging_owner_pid) {
+            fclose(log_file);
+        }
     }
+    log_file = NULL;
     logging_initialized = 0;
 }
 

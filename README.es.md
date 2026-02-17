@@ -13,15 +13,16 @@ Una librería shim pequeña que captura las llamadas SQLite de Plex y las envía
 | Linux (Docker) | ✅ Funciona (init y ejecución probados, no probado en producción) |
 | Linux (Nativo) | ⚠️ No probado |
 
-## Última versión: v0.9.31
+## Última versión: v0.9.32
 
-**Corrección SyncCollections:** eliminados workarounds COMPAT que causaban 223 errores LPE por inicio.
+**Eliminación de shadow SQLite** — el shim está eliminando la dependencia de shadow SQLite para decltype y metadatos de columnas. Corrige crashes `std::bad_cast` al devolver NULL de `column_decltype()` para expresiones agregadas, igualando el comportamiento real de SQLite.
 
-- ✅ **Corregido:** eliminados skips COMPAT de SyncCollections — las consultas de limpieza blank-key y agregación de tags ahora se ejecutan normalmente
-- ✅ **Corregido:** elimina los 223 errores "Failed to generate a query" LPE al inicio — Plex ahora tiene datos completos de colecciones para consultas hub
-- ℹ️ Los problemas subyacentes de std::bad_cast ya fueron corregidos en v0.9.23
+- ✅ **Corregido:** `count(*)`, `sum()`, `min()`, `max()`, `avg()` ahora devuelven NULL desde `column_decltype()` — corrige `std::bad_cast` en SyncCollections y historial de actividades
+- ✅ **Nuevo:** prepare dummy con parámetros nombrados — las consultas PG ya no necesitan prepare real de SQLite
+- ✅ **Nuevo:** metadatos via PQdescribePrepared — count/name de columnas desde PostgreSQL en lugar de shadow SQLite
+- ✅ **Nuevo:** auto-quoting de alias camelCase — aliases como `blankKeyTaggingId` se entrecomillan automáticamente
 
-Descarga: https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.31
+Descarga: https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.32
 
 ## ¿Por qué PostgreSQL?
 

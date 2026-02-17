@@ -621,7 +621,17 @@ test-shadow: $(TEST_BIN_DIR)/test_shadow_fallback
 	@echo ""
 
 # CI-safe subset: excludes tests needing LD_PRELOAD + shim (test-api, test-expanded, test-params)
-ci-test: test-recursion test-crash test-sql test-groupby test-upsert test-types test-soci test-cache test-tls test-fork test-reaper test-buffer test-logging test-exception test-fts test-config test-bind test-common test-statement test-stmt-free test-bind-mismatch test-parity test-uri test-streaming test-isolation test-shadow
+# Shadow SQLite elimination tests (in-memory shadow, dummy stmts, bind absorption, type mapping)
+$(TEST_BIN_DIR)/test_shadow_elimination: $(TEST_DIR)/test_shadow_elimination.c
+	@mkdir -p $(TEST_BIN_DIR)
+	$(CC) -o $@ $< -Wall -Wextra -lsqlite3
+
+test-shadow-elim: $(TEST_BIN_DIR)/test_shadow_elimination
+	@echo ""
+	@./$(TEST_BIN_DIR)/test_shadow_elimination
+	@echo ""
+
+ci-test: test-recursion test-crash test-sql test-groupby test-upsert test-types test-soci test-cache test-tls test-fork test-reaper test-buffer test-logging test-exception test-fts test-config test-bind test-common test-statement test-stmt-free test-bind-mismatch test-parity test-uri test-streaming test-isolation test-shadow test-shadow-elim
 	@echo "All CI unit tests complete."
 
 # ============================================================================

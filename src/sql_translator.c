@@ -435,11 +435,19 @@ sql_translation_t sql_translate(const char *sqlite_sql) {
         return result;
     }
 
-    result.sql = step9;
+    // Step 10: Quote mixed-case identifiers after AS (PostgreSQL lowercases unquoted)
+    char *step10 = quote_mixed_case_identifiers(step9);
+    free(step9);
+    if (!step10) {
+        strcpy(result.error, "Mixed-case identifier quoting failed");
+        return result;
+    }
+
+    result.sql = step10;
     result.success = 1;
 
     // Store in thread-local cache for future lookups
-    cache_store(sqlite_sql, hash, step9, result.param_count);
+    cache_store(sqlite_sql, hash, step10, result.param_count);
 
     return result;
 }

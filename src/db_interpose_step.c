@@ -228,10 +228,16 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                             PQclear(prep_res);
                             res = PQexecPrepared(cached_exec_conn->conn, stmt_name, 0, NULL, NULL, NULL, 0);
                         } else {
-                            // Prepare failed - fall back to PQexec
-                            LOG_DEBUG("CACHED EXEC prepare failed, using PQexec: %s", PQerrorMessage(cached_exec_conn->conn));
-                            PQclear(prep_res);
-                            res = PQexec(cached_exec_conn->conn, exec_sql);
+                            const char *err = PQerrorMessage(cached_exec_conn->conn);
+                            if (err && strstr(err, "already exists")) {
+                                pg_stmt_cache_add(cached_exec_conn, sql_hash, stmt_name, 0);
+                                PQclear(prep_res);
+                                res = PQexecPrepared(cached_exec_conn->conn, stmt_name, 0, NULL, NULL, NULL, 0);
+                            } else {
+                                LOG_DEBUG("CACHED EXEC prepare failed, using PQexec: %s", err ? err : "(null)");
+                                PQclear(prep_res);
+                                res = PQexec(cached_exec_conn->conn, exec_sql);
+                            }
                         }
                     }
                     pthread_mutex_unlock(&cached_exec_conn->mutex);
@@ -386,10 +392,16 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                                     LOG_DEBUG("CACHED READ (new prepared): stmt=%s sql=%.60s", read_stmt_name, trans.sql);
                                     new_stmt->result = PQexecPrepared(cached_read_conn->conn, read_stmt_name, 0, NULL, NULL, NULL, 0);
                                 } else {
-                                    // Prepare failed - fall back to PQexec
-                                    LOG_DEBUG("CACHED READ prepare failed, using PQexec: %s", PQerrorMessage(cached_read_conn->conn));
-                                    PQclear(prep_res);
-                                    new_stmt->result = PQexec(cached_read_conn->conn, trans.sql);
+                                    const char *err = PQerrorMessage(cached_read_conn->conn);
+                                    if (err && strstr(err, "already exists")) {
+                                        pg_stmt_cache_add(cached_read_conn, read_sql_hash, read_stmt_name, 0);
+                                        PQclear(prep_res);
+                                        new_stmt->result = PQexecPrepared(cached_read_conn->conn, read_stmt_name, 0, NULL, NULL, NULL, 0);
+                                    } else {
+                                        LOG_DEBUG("CACHED READ prepare failed, using PQexec: %s", err ? err : "(null)");
+                                        PQclear(prep_res);
+                                        new_stmt->result = PQexec(cached_read_conn->conn, trans.sql);
+                                    }
                                 }
                             }
                             pthread_mutex_unlock(&cached_read_conn->mutex);
@@ -775,7 +787,17 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                             cached_name = pg_stmt->stmt_name;
                             is_cached = 1;
                         } else {
-                            LOG_ERROR("PQprepare failed for %s: %s", pg_stmt->stmt_name, PQerrorMessage(exec_conn->conn));
+                            // "already exists" means metadata_describe or another path
+                            // already prepared this statement on this connection — that's fine
+                            const char *err = PQerrorMessage(exec_conn->conn);
+                            if (err && strstr(err, "already exists")) {
+                                pg_stmt_cache_add(exec_conn, pg_stmt->sql_hash, pg_stmt->stmt_name, pg_stmt->param_count);
+                                cached_name = pg_stmt->stmt_name;
+                                is_cached = 1;
+                                LOG_DEBUG("PQprepare: statement %s already exists, reusing", pg_stmt->stmt_name);
+                            } else {
+                                LOG_ERROR("PQprepare failed for %s: %s", pg_stmt->stmt_name, err ? err : "(null)");
+                            }
                         }
                         PQclear(prep_res);
                     }
@@ -873,7 +895,7 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                     return SQLITE_ROW;
                 } else if (first_status == PGRES_TUPLES_OK) {
                     // Zero rows — TUPLES_OK sentinel immediately
-                    LOG_ERROR("STREAM: zero rows returned for sql=%.200s",
+                    LOG_DEBUG("STREAM: zero rows returned for sql=%.200s",
                              pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
                     PQclear(first_res);
                     PGresult *final_null = PQgetResult(exec_conn->conn);
@@ -1177,8 +1199,15 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                         cached_name = pg_stmt->stmt_name;
                         is_cached = 1;
                     } else {
-                        // Prepare failed - fall back to PQexecParams
-                        LOG_DEBUG("PQprepare (write) failed for %s: %s", pg_stmt->stmt_name, PQerrorMessage(exec_conn->conn));
+                        const char *err = PQerrorMessage(exec_conn->conn);
+                        if (err && strstr(err, "already exists")) {
+                            pg_stmt_cache_add(exec_conn, pg_stmt->sql_hash, pg_stmt->stmt_name, pg_stmt->param_count);
+                            cached_name = pg_stmt->stmt_name;
+                            is_cached = 1;
+                            LOG_DEBUG("PQprepare (write): statement %s already exists, reusing", pg_stmt->stmt_name);
+                        } else {
+                            LOG_DEBUG("PQprepare (write) failed for %s: %s", pg_stmt->stmt_name, err ? err : "(null)");
+                        }
                     }
                     PQclear(prep_res);
                 }
