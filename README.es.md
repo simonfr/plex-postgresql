@@ -13,7 +13,7 @@ Una librería shim pequeña que captura las llamadas SQLite de Plex y las envía
 | Linux (Docker) | ✅ Funciona (init y ejecución probados, no probado en producción) |
 | Linux (Nativo) | ⚠️ No probado |
 
-## Última versión: v0.9.35
+## Última versión: v0.9.36
 
 **Fix arranque Docker standalone** — elimina `chown -R` lento que causaba retrasos de minutos en librerías grandes.
 
@@ -21,7 +21,7 @@ Una librería shim pequeña que captura las llamadas SQLite de Plex y las envía
 - ✅ Recuperación tras reinicio de PG (Issue #8): reintentos pool + step (v0.9.34)
 - ✅ **278 tests unitarios** (220 SQL + 41 shadow elimination + 17 connection isolation)
 
-Descarga: https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.35
+Descarga: https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.36
 
 ## ¿Por qué PostgreSQL?
 
@@ -90,7 +90,7 @@ psql -d plex -c "ALTER USER plex PASSWORD 'plex';"
 ### 2. Instalar (ZIP recomendado)
 
 ```bash
-curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.35/plex-postgresql-v0.9.35-macos.zip -o /tmp/plex-pg-macos.zip
+curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.36/plex-postgresql-v0.9.36-macos.zip -o /tmp/plex-pg-macos.zip
 mkdir -p /tmp/plex-pg-macos && cd /tmp/plex-pg-macos
 unzip /tmp/plex-pg-macos.zip
 
@@ -141,7 +141,7 @@ psql -U plex -d plex -c "CREATE SCHEMA plex;"
 ### 2. Instalar (ZIP recomendado)
 
 ```bash
-curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.35/plex-postgresql-v0.9.35-linux.zip -o /tmp/plex-pg-linux.zip
+curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.36/plex-postgresql-v0.9.36-linux.zip -o /tmp/plex-pg-linux.zip
 mkdir -p /tmp/plex-pg && cd /tmp/plex-pg
 unzip /tmp/plex-pg-linux.zip
 
