@@ -84,7 +84,8 @@ static int get_pool_size(void) {
 
 // Connection idle timeout (seconds) - release slots idle longer than this
 // Must be long enough for slow queries and Plex processing between step() calls
-#define POOL_IDLE_TIMEOUT 300
+#define pool_idle_timeout_DEFAULT 300
+static int pool_idle_timeout = pool_idle_timeout_DEFAULT;
 
 // Track mapping from sqlite3* handles to pool slots for cleanup on close
 static struct {
@@ -196,10 +197,19 @@ static void do_client_init(void) {
         }
     }
 
+    // Read idle timeout from environment (default: 300s)
+    const char *idle_env = getenv("PLEX_PG_IDLE_TIMEOUT");
+    if (idle_env) {
+        int timeout = atoi(idle_env);
+        if (timeout >= 10) {
+            pool_idle_timeout = timeout;
+        }
+    }
+
     int pool_sz = atomic_load(&configured_pool_size);
     client_initialized = 1;
-    LOG_ERROR("pg_client initialized: pool_size=%d, max=%d, auto_grow=yes",
-              pool_sz, POOL_SIZE_MAX);
+    LOG_ERROR("pg_client initialized: pool_size=%d, max=%d, idle_timeout=%ds, auto_grow=yes",
+              pool_sz, POOL_SIZE_MAX, pool_idle_timeout);
 }
 
 void pg_client_init(void) {
@@ -488,7 +498,7 @@ static int is_library_db(const char *path) {
 static _Atomic time_t last_reap_time = 0;
 #define POOL_REAP_INTERVAL 60  // Run reaper at most every 60 seconds
 
-// Reap idle connections from pool (close connections idle > POOL_IDLE_TIMEOUT)
+// Reap idle connections from pool (close connections idle > pool_idle_timeout)
 // Uses atomic CAS to safely claim slots before closing - no race conditions
 static void pool_reap_idle_connections(void) {
     time_t now = time(NULL);
@@ -498,7 +508,7 @@ static void pool_reap_idle_connections(void) {
     // Only reap FREE slots with old connections - use atomic CAS to claim
     for (int i = 0; i < configured_pool_size; i++) {
         if (library_pool[i].conn &&
-            (now - library_pool[i].last_used) > POOL_IDLE_TIMEOUT) {
+            (now - library_pool[i].last_used) > pool_idle_timeout) {
 
             // Try to claim the slot atomically
             pool_slot_state_t expected = SLOT_FREE;
@@ -728,7 +738,7 @@ static pg_connection_t* pool_get_connection(const char *db_path) {
     // =========================================================================
     for (int i = 0; i < configured_pool_size; i++) {
         pool_slot_state_t state = atomic_load(&library_pool[i].state);
-        if (state == SLOT_READY && (now - library_pool[i].last_used) > POOL_IDLE_TIMEOUT) {
+        if (state == SLOT_READY && (now - library_pool[i].last_used) > pool_idle_timeout) {
             // Check if owner thread still exists
             pthread_t owner = library_pool[i].owner_thread;
             int thread_exists = (pthread_kill(owner, 0) == 0);
