@@ -5,6 +5,11 @@ All notable changes to plex-postgresql will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.35] - 2026-02-21
+
+### Fixed
+- **Docker standalone: chown -R delay on large libraries** — removed two `chown -R plex:plex` calls from `standalone-entrypoint.sh` that caused massive delays on multi-TB libraries. Plex handles ownership itself via `40-plex-first-run`. Also fixes triple-chown issue when `PLEX_UID`/`PLEX_GID` are set. (PR #7 by @sjdaws)
+
 ## [0.9.34] - 2026-02-21
 
 ### Added
