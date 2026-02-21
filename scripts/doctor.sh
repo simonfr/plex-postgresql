@@ -370,6 +370,11 @@ check "chk_not_orphan constraint" \
     "SELECT EXISTS (SELECT 1 FROM information_schema.table_constraints WHERE constraint_schema = '$PG_SCHEMA' AND table_name = 'metadata_items' AND constraint_name = 'chk_not_orphan');" \
     "ALTER TABLE $PG_SCHEMA.metadata_items ADD CONSTRAINT chk_not_orphan CHECK (metadata_type IS NOT NULL OR library_section_id IS NOT NULL);"
 
+# Unique index on blobs for ON CONFLICT upsert (linked_type, linked_id, blob_type)
+check "blobs upsert unique index" \
+    "SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = '$PG_SCHEMA' AND tablename = 'blobs' AND indexname = 'idx_blobs_linked_type_id_blob_type');" \
+    "CREATE UNIQUE INDEX idx_blobs_linked_type_id_blob_type ON $PG_SCHEMA.blobs (linked_type, linked_id, blob_type);"
+
 echo ""
 
 # ============================================================================

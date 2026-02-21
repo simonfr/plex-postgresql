@@ -10,11 +10,76 @@
 #include "pg_query_cache.h"
 #include "shim_alloc.h"
 
+// Forward declaration of the inner implementation
+static int my_sqlite3_step_impl(sqlite3_stmt *pStmt);
+
+// Thread-local flag: set to 1 by step_impl whenever SQLITE_ERROR is caused by
+// a PG connection failure (not a SQL/logic error). Checked by the retry wrapper.
+static __thread int step_pg_conn_error = 0;
+
 // ============================================================================
-// Step Function - Main Query Execution
+// Step Function - Retry Wrapper (v0.9.34, fixes #8)
 // ============================================================================
+// When PG restarts, threads that already hold a pool connection see
+// CONNECTION_BAD / PQsend failures. This wrapper catches SQLITE_ERROR,
+// resets statement state, waits with exponential backoff, and retries.
+// Every "return SQLITE_ERROR" inside step_impl releases all mutexes,
+// so re-entry is safe and deadlock-free.
 
 int my_sqlite3_step(sqlite3_stmt *pStmt) {
+    static __thread int step_retry_count = 0;
+
+    int rc = my_sqlite3_step_impl(pStmt);
+
+    // Backoff schedule from PLEX_PG_RETRY_DELAYS (default: 500,1000,2000,3000,4000 ms)
+    int step_retry_delays_ms[PG_RETRY_MAX_DELAYS];
+    int step_max_retries = 0;
+    pg_get_retry_delays(step_retry_delays_ms, &step_max_retries);
+
+    if (rc == SQLITE_ERROR && step_retry_count < step_max_retries) {
+        pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
+        if (pg_stmt && pg_stmt->is_pg && step_pg_conn_error) {
+            // step_impl set step_pg_conn_error=1: error was connection-related
+            step_pg_conn_error = 0;
+            {
+                int delay = step_retry_delays_ms[step_retry_count];
+                step_retry_count++;
+                LOG_ERROR("step: PG conn error, retry %d/%d in %dms (thread %p)",
+                         step_retry_count, step_max_retries, delay, (void*)pthread_self());
+
+                pthread_mutex_lock(&pg_stmt->mutex);
+                pg_stmt_clear_result(pg_stmt);
+                pthread_mutex_unlock(&pg_stmt->mutex);
+
+                usleep(delay * 1000);
+                step_pg_conn_error = 0;
+                rc = my_sqlite3_step(pStmt);  // recursive retry
+
+                if (step_retry_count > 0 && rc != SQLITE_ERROR) {
+                    LOG_ERROR("step: retry succeeded after %d attempt(s)",
+                             step_retry_count);
+                }
+                step_retry_count = 0;
+                return rc;
+            }
+        }
+    }
+
+    if (step_retry_count > 0) {
+        if (rc == SQLITE_ERROR) {
+            LOG_ERROR("step: retries exhausted, returning SQLITE_ERROR");
+        }
+        // Success in recursive frame: reset counter silently
+        step_retry_count = 0;
+    }
+    return rc;
+}
+
+// ============================================================================
+// Step Function - Inner Implementation
+// ============================================================================
+
+static int my_sqlite3_step_impl(sqlite3_stmt *pStmt) {
     // Periodic shim memory usage summary (every 60s, near-zero overhead)
     shim_alloc_maybe_log();
 
@@ -179,7 +244,7 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                         if (insert_sql) free(insert_sql);
                         sql_translation_free(&trans);
                         if (expanded_sql) sqlite3_free(expanded_sql);
-                        return SQLITE_ERROR;
+                        do { step_pg_conn_error = 1; return SQLITE_ERROR; } while(0);
                     }
 
                     // v0.9.33: Guard cancel+drain — skip if connection is streaming
@@ -346,7 +411,7 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                                 pthread_mutex_unlock(&cached_read_conn->mutex);
                                 sql_translation_free(&trans);
                                 if (expanded_sql) sqlite3_free(expanded_sql);
-                                return SQLITE_ERROR;
+                                do { step_pg_conn_error = 1; return SQLITE_ERROR; } while(0);
                             }
 
                             // v0.9.33: Guard cancel+drain — skip if connection is streaming
@@ -662,7 +727,7 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                     if (!exec_conn || !exec_conn->conn) {
                         LOG_ERROR("STEP SELECT: NULL connection after retry — giving up");
                         pthread_mutex_unlock(&pg_stmt->mutex);
-                        return SQLITE_ERROR;
+                        do { step_pg_conn_error = 1; return SQLITE_ERROR; } while(0);
                     }
                     LOG_ERROR("STEP SELECT: reconnect retry succeeded (exec_conn=%p)", (void*)exec_conn);
                 }
@@ -674,7 +739,7 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                     LOG_ERROR("STEP SELECT: conn became NULL after lock (TOCTOU race)");
                     pthread_mutex_unlock(&exec_conn->mutex);
                     pthread_mutex_unlock(&pg_stmt->mutex);
-                    return SQLITE_ERROR;
+                    do { step_pg_conn_error = 1; return SQLITE_ERROR; } while(0);
                 }
 
                 // v0.9.33: TOCTOU guard — if another stmt on the same thread set
@@ -697,12 +762,12 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                             LOG_ERROR("STEP SELECT: alt conn also unavailable");
                             pthread_mutex_unlock(&exec_conn->mutex);
                             pthread_mutex_unlock(&pg_stmt->mutex);
-                            return SQLITE_ERROR;
+                            do { step_pg_conn_error = 1; return SQLITE_ERROR; } while(0);
                         }
                     } else {
                         LOG_ERROR("STEP SELECT: no non-streaming connection available");
                         pthread_mutex_unlock(&pg_stmt->mutex);
-                        return SQLITE_ERROR;
+                        do { step_pg_conn_error = 1; return SQLITE_ERROR; } while(0);
                     }
                 }
 
@@ -744,7 +809,7 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                             exec_conn->is_pg_active = 0;
                             pthread_mutex_unlock(&exec_conn->mutex);
                             pthread_mutex_unlock(&pg_stmt->mutex);
-                            return SQLITE_ERROR;
+                            do { step_pg_conn_error = 1; return SQLITE_ERROR; } while(0);
                         }
                     } else {
                         LOG_ERROR("STEP READ: PQreset succeeded, connection recovered");
@@ -859,7 +924,7 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                     pthread_mutex_unlock(&exec_conn->mutex);
                     pg_pool_check_connection_health(exec_conn);
                     pthread_mutex_unlock(&pg_stmt->mutex);
-                    return SQLITE_ERROR;
+                    do { step_pg_conn_error = 1; return SQLITE_ERROR; } while(0);
                 }
 
                 // Activate single-row mode
@@ -960,7 +1025,7 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                     pg_stmt->streaming_conn = NULL;
                     pg_pool_check_connection_health(exec_conn);
                     pthread_mutex_unlock(&pg_stmt->mutex);
-                    return SQLITE_ERROR;
+                    do { step_pg_conn_error = 1; return SQLITE_ERROR; } while(0);
                 }
             }
         } else if (pg_stmt->is_pg == 1) {  // WRITE
@@ -1121,7 +1186,7 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                     LOG_ERROR("STEP WRITE: NULL connection after retry — giving up");
                     pg_stmt->write_executed = 1;
                     pthread_mutex_unlock(&pg_stmt->mutex);
-                    return SQLITE_ERROR;
+                    do { step_pg_conn_error = 1; return SQLITE_ERROR; } while(0);
                 }
                 LOG_ERROR("STEP WRITE: reconnect retry succeeded (exec_conn=%p)", (void*)exec_conn);
             }
@@ -1138,7 +1203,7 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                 pthread_mutex_unlock(&exec_conn->mutex);
                 pg_stmt->write_executed = 1;
                 pthread_mutex_unlock(&pg_stmt->mutex);
-                return SQLITE_ERROR;
+                do { step_pg_conn_error = 1; return SQLITE_ERROR; } while(0);
             }
 
             // v0.9.33: TOCTOU guard — if connection became streaming after pool lookup
@@ -1158,13 +1223,13 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                         pthread_mutex_unlock(&exec_conn->mutex);
                         pg_stmt->write_executed = 1;
                         pthread_mutex_unlock(&pg_stmt->mutex);
-                        return SQLITE_ERROR;
+                        do { step_pg_conn_error = 1; return SQLITE_ERROR; } while(0);
                     }
                 } else {
                     LOG_ERROR("STEP WRITE: no non-streaming connection available");
                     pg_stmt->write_executed = 1;
                     pthread_mutex_unlock(&pg_stmt->mutex);
-                    return SQLITE_ERROR;
+                    do { step_pg_conn_error = 1; return SQLITE_ERROR; } while(0);
                 }
             }
 
@@ -1208,7 +1273,7 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                         pthread_mutex_unlock(&exec_conn->mutex);
                         pg_stmt->write_executed = 1;
                         pthread_mutex_unlock(&pg_stmt->mutex);
-                        return SQLITE_ERROR;
+                        do { step_pg_conn_error = 1; return SQLITE_ERROR; } while(0);
                     }
                 } else {
                     LOG_ERROR("STEP WRITE: PQreset succeeded, connection recovered");

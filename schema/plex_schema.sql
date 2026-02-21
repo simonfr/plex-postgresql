@@ -3635,6 +3635,13 @@ CREATE INDEX idx_blobs_linked ON plex.blobs USING btree (linked_type, linked_id)
 
 
 --
+-- Name: idx_blobs_linked_type_id_blob_type; Type: INDEX; Schema: plex; Owner: -
+--
+
+CREATE UNIQUE INDEX idx_blobs_linked_type_id_blob_type ON plex.blobs USING btree (linked_type, linked_id, blob_type);
+
+
+--
 -- Name: idx_devices_identifier; Type: INDEX; Schema: plex; Owner: -
 --
 

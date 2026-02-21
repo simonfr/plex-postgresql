@@ -5,6 +5,17 @@ All notable changes to plex-postgresql will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.34] - 2026-02-21
+
+### Added
+- **`PLEX_PG_RETRY_DELAYS` environment variable** — configures the retry backoff schedule for both pool-level and step-level PG reconnection. Comma-separated list of delays in milliseconds (default: `500,1000,2000,3000,4000`). Example: `PLEX_PG_RETRY_DELAYS=200,500,1000` for faster recovery on a local PG.
+
+### Fixed
+- **Plex doesn't recover after PostgreSQL restart (Issue #8)** — Two-layer fix ensures zero endpoint failures after PG restarts:
+  1. **Pool-level retry** (`pg_client.c`): `pool_get_connection()` Phase 5 retries with exponential backoff (500ms→4s, 5 retries, ~10.5s total) instead of returning NULL when all slots are unavailable. This covers threads needing new connections.
+  2. **Step-level retry** (`db_interpose_step.c`): New `my_sqlite3_step()` wrapper catches `SQLITE_ERROR` from any PG connection failure (flagged via thread-local `step_pg_conn_error`), resets statement state with `pg_stmt_clear_result()`, waits with exponential backoff, and retries. This covers threads whose existing connections died mid-query (PQsend failures, CONNECTION_BAD). All existing mutex/lock patterns are preserved — no deadlock risk.
+- **Blobs UNIQUE index** — `blobs` table was missing `UNIQUE INDEX idx_blobs_linked_type_id_blob_type ON blobs(linked_type, linked_id, blob_type)`, causing ON CONFLICT upsert errors. Added to schema and doctor.sh.
+
 ## [0.9.33] - 2026-02-18
 
 ### Fixed

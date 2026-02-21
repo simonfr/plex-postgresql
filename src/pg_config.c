@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <pthread.h>
 
 extern int shim_passthrough_only;
 
@@ -169,4 +170,62 @@ int is_read_operation(const char *sql) {
     if (strncasecmp(sql, "SELECT", 6) == 0) return 1;
 
     return 0;
+}
+
+// ============================================================================
+// Retry Delay Configuration (PLEX_PG_RETRY_DELAYS)
+// ============================================================================
+
+static int cached_retry_delays[PG_RETRY_MAX_DELAYS];
+static int cached_retry_count = 0;
+static pthread_once_t retry_delays_once = PTHREAD_ONCE_INIT;
+
+static void load_retry_delays_once(void) {
+    // Defaults: 500ms, 1s, 2s, 3s, 4s
+    static const int defaults[] = {500, 1000, 2000, 3000, 4000};
+    static const int ndefaults = (int)(sizeof(defaults) / sizeof(defaults[0]));
+
+    const char *env = getenv(ENV_PG_RETRY_DELAYS);
+    if (!env || !*env) {
+        for (int i = 0; i < ndefaults; i++) cached_retry_delays[i] = defaults[i];
+        cached_retry_count = ndefaults;
+        return;
+    }
+
+    // Parse comma-separated list of integers
+    char buf[256];
+    strncpy(buf, env, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+
+    int count = 0;
+    char *p = buf;
+    while (*p && count < PG_RETRY_MAX_DELAYS) {
+        while (*p == ' ' || *p == '\t') p++;
+        if (!*p) break;
+        char *end;
+        long val = strtol(p, &end, 10);
+        if (end == p) break;  // not a number
+        if (val < 0) val = 0;
+        if (val > 60000) val = 60000;  // cap at 60s per retry
+        cached_retry_delays[count++] = (int)val;
+        p = end;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == ',') p++;
+    }
+
+    if (count == 0) {
+        // Invalid env var — fall back to defaults
+        for (int i = 0; i < ndefaults; i++) cached_retry_delays[i] = defaults[i];
+        cached_retry_count = ndefaults;
+        LOG_ERROR("PLEX_PG_RETRY_DELAYS: invalid value '%s', using defaults", env);
+    } else {
+        cached_retry_count = count;
+        LOG_ERROR("PLEX_PG_RETRY_DELAYS: loaded %d delay(s) from env", count);
+    }
+}
+
+void pg_get_retry_delays(int *delays_out, int *count_out) {
+    pthread_once(&retry_delays_once, load_retry_delays_once);
+    *count_out = cached_retry_count;
+    for (int i = 0; i < cached_retry_count; i++) delays_out[i] = cached_retry_delays[i];
 }

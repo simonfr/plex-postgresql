@@ -968,16 +968,39 @@ static pg_connection_t* pool_get_connection(const char *db_path) {
     }
 
     // =========================================================================
-    // PHASE 5: Pool is full - log and return NULL
+    // PHASE 5: Pool exhausted — retry with backoff (v0.9.34, fixes #8)
     // =========================================================================
-    // Dump slot states for debugging
-    for (int i = 0; i < configured_pool_size; i++) {
-        pool_slot_state_t state = atomic_load(&library_pool[i].state);
-        LOG_DEBUG("Pool slot %d: state=%d conn=%p owner=%p",
-                 i, (int)state, (void*)library_pool[i].conn, (void*)library_pool[i].owner_thread);
+    // Instead of returning NULL immediately (which causes SQLITE_ERROR and
+    // Plex caches the error permanently), retry the entire pool acquisition.
+    // This handles PG restart: all slots go to SLOT_ERROR simultaneously,
+    // but Phase 4 can recover them once PG is back.
+    {
+        static __thread int pool_retry_count = 0;
+        // Backoff schedule from PLEX_PG_RETRY_DELAYS (default: 500,1000,2000,3000,4000 ms)
+        int pool_retry_delays_ms[PG_RETRY_MAX_DELAYS];
+        int max_pool_retries = 0;
+        pg_get_retry_delays(pool_retry_delays_ms, &max_pool_retries);
+
+        if (pool_retry_count < max_pool_retries) {
+            int delay = pool_retry_delays_ms[pool_retry_count];
+            LOG_ERROR("Pool: no connection available, retry %d/%d in %dms (thread %p)",
+                     pool_retry_count + 1, max_pool_retries, delay, (void*)current_thread);
+            pool_retry_count++;
+            usleep(delay * 1000);
+            // Recursive re-entry — retries all phases with fresh state
+            pg_connection_t *result = pool_get_connection(db_path);
+            if (result) {
+                pool_retry_count = 0;  // reset for next time
+            }
+            return result;
+        }
+
+        // All retries exhausted
+        LOG_ERROR("Pool: no available slots after %d retries for thread %p (all %d slots busy)",
+                 max_pool_retries, (void*)current_thread, configured_pool_size);
+        pool_retry_count = 0;  // reset for next call
+        return NULL;
     }
-    LOG_ERROR("Pool: no available slots for thread %p (all %d slots busy)", (void*)current_thread, configured_pool_size);
-    return NULL;
 }
 
 // Public function for getting thread connection (now uses pool)
