@@ -24,7 +24,7 @@
 // Connection Pool Configuration
 // ============================================================================
 
-// Pool size constants defined in pg_types.h (POOL_SIZE_MAX=100, POOL_SIZE_DEFAULT=50)
+// Pool size constants defined in pg_types.h (POOL_SIZE_MAX=200, POOL_SIZE_DEFAULT=150)
 
 typedef struct {
     pg_connection_t *conn;
@@ -75,11 +75,11 @@ static pid_t init_pid = 0;
 static pool_slot_t library_pool[POOL_SIZE_MAX];
 static pthread_mutex_t pool_mutex = PTHREAD_MUTEX_INITIALIZER;
 static char library_db_path[512] = {0};
-static int configured_pool_size = POOL_SIZE_DEFAULT;
+static _Atomic int configured_pool_size = POOL_SIZE_DEFAULT;
 
 // Get configured pool size (call after init)
 static int get_pool_size(void) {
-    return configured_pool_size;
+    return atomic_load(&configured_pool_size);
 }
 
 // Connection idle timeout (seconds) - release slots idle longer than this
@@ -184,21 +184,27 @@ static void do_client_init(void) {
     // Track PID for fork detection
     init_pid = getpid();
 
-    // Read pool size from environment (default: 50, max: 100)
+    // Read pool size from environment (default: 150, max: 200)
     const char *pool_env = getenv("PLEX_PG_POOL_SIZE");
     if (pool_env) {
         int size = atoi(pool_env);
         if (size > 0 && size <= POOL_SIZE_MAX) {
-            configured_pool_size = size;
+            atomic_store(&configured_pool_size, size);
         } else if (size > POOL_SIZE_MAX) {
-            configured_pool_size = POOL_SIZE_MAX;
+            atomic_store(&configured_pool_size, POOL_SIZE_MAX);
             LOG_INFO("PLEX_PG_POOL_SIZE=%d exceeds max, using %d", size, POOL_SIZE_MAX);
         }
     }
 
+    int pool_sz = atomic_load(&configured_pool_size);
     client_initialized = 1;
-    LOG_INFO("pg_client initialized with pool size %d (max %d)",
-             configured_pool_size, POOL_SIZE_MAX);
+    LOG_ERROR("pg_client initialized: pool_size=%d, max=%d, auto_grow=yes",
+              pool_sz, POOL_SIZE_MAX);
+    if (pool_sz < 80) {
+        LOG_ERROR("Pool: initial size %d is below recommended minimum (80). "
+                  "Pool will auto-grow up to %d if more threads arrive.",
+                  pool_sz, POOL_SIZE_MAX);
+    }
 }
 
 void pg_client_init(void) {
@@ -968,12 +974,63 @@ static pg_connection_t* pool_get_connection(const char *db_path) {
     }
 
     // =========================================================================
-    // PHASE 5: Pool exhausted — retry with backoff (v0.9.34, fixes #8)
+    // PHASE 5: Auto-grow pool (v0.9.36, fixes #9)
+    // =========================================================================
+    // All configured slots are in use. Instead of failing, grow the pool
+    // up to POOL_SIZE_MAX. This handles the case where Plex creates more
+    // threads than the initial pool size (e.g., library scan + streams).
+    // The reaper (pool_reap_idle_connections) will close idle connections
+    // later when demand drops.
+    {
+        int current = atomic_load(&configured_pool_size);
+        if (current < POOL_SIZE_MAX) {
+            int new_size = current + 1;
+            if (atomic_compare_exchange_strong(&configured_pool_size, &current, new_size)) {
+                // Successfully grew pool. The new slot at index (new_size - 1)
+                // is already zero-initialized (SLOT_FREE, conn=NULL).
+                int idx = new_size - 1;
+                pool_slot_state_t expected = SLOT_FREE;
+                if (atomic_compare_exchange_strong(&library_pool[idx].state,
+                                                    &expected, SLOT_RESERVED)) {
+                    library_pool[idx].owner_thread = current_thread;
+                    library_pool[idx].last_used = now;
+                    atomic_fetch_add(&library_pool[idx].generation, 1);
+
+                    LOG_ERROR("Pool: auto-grew %d -> %d (thread %p needs slot)",
+                             current, new_size, (void*)current_thread);
+
+                    pg_connection_t *new_conn = create_pool_connection(db_path);
+                    if (new_conn && new_conn->is_pg_active) {
+                        library_pool[idx].conn = new_conn;
+                        atomic_store(&library_pool[idx].state, SLOT_READY);
+                        tls_pool_slot = idx;
+                        tls_pool_generation = atomic_load(&library_pool[idx].generation);
+                        return new_conn;
+                    } else {
+                        LOG_ERROR("Pool: auto-grow slot %d connection failed", idx);
+                        library_pool[idx].conn = NULL;
+                        library_pool[idx].owner_thread = 0;
+                        if (new_conn) {
+                            if (new_conn->conn) PQfinish(new_conn->conn);
+                            pthread_mutex_destroy(&new_conn->mutex);
+                            free(new_conn);
+                        }
+                        atomic_store(&library_pool[idx].state, SLOT_FREE);
+                    }
+                }
+            }
+            // CAS failed — another thread grew simultaneously. Fall through to retry.
+        }
+    }
+
+    // =========================================================================
+    // PHASE 6: Pool exhausted — retry with backoff (v0.9.34, fixes #8)
     // =========================================================================
     // Instead of returning NULL immediately (which causes SQLITE_ERROR and
     // Plex caches the error permanently), retry the entire pool acquisition.
     // This handles PG restart: all slots go to SLOT_ERROR simultaneously,
     // but Phase 4 can recover them once PG is back.
+    // Auto-grow (Phase 5) may also have made a new slot available.
     {
         static __thread int pool_retry_count = 0;
         // Backoff schedule from PLEX_PG_RETRY_DELAYS (default: 500,1000,2000,3000,4000 ms)
@@ -997,7 +1054,7 @@ static pg_connection_t* pool_get_connection(const char *db_path) {
 
         // All retries exhausted
         LOG_ERROR("Pool: no available slots after %d retries for thread %p (all %d slots busy)",
-                 max_pool_retries, (void*)current_thread, configured_pool_size);
+                 max_pool_retries, (void*)current_thread, atomic_load(&configured_pool_size));
         pool_retry_count = 0;  // reset for next call
         return NULL;
     }

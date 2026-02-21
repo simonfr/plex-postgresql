@@ -586,6 +586,64 @@ test-uri: $(TEST_BIN_DIR)/test_uri_rewrite
 	@./$(TEST_BIN_DIR)/test_uri_rewrite
 	@echo ""
 
+# Stress / load test — uses direct libpq connections (no SQLite interpose needed)
+STRESS_THREADS  ?= 20
+STRESS_DURATION ?= 30
+
+$(TEST_BIN_DIR)/test_stress_load: $(TEST_DIR)/test_stress_load.c
+	@mkdir -p $(TEST_BIN_DIR)
+	$(CC) -o $@ $< \
+		-I$(PG_INCLUDE) \
+		-L$(PG_LIB) \
+		-lpq -lpthread -lm \
+		-Wall -Wextra -O2
+
+test-stress: $(TEST_BIN_DIR)/test_stress_load
+	@echo ""
+ifeq ($(UNAME_S),Darwin)
+	@PLEX_PG_HOST=/tmp \
+		PLEX_PG_DATABASE=plex \
+		PLEX_PG_USER=plex \
+		PLEX_PG_SCHEMA=plex \
+		./$(TEST_BIN_DIR)/test_stress_load $(STRESS_THREADS) $(STRESS_DURATION)
+else
+	@PLEX_PG_HOST=localhost \
+		PLEX_PG_DATABASE=plex \
+		PLEX_PG_USER=plex \
+		PLEX_PG_SCHEMA=plex \
+		./$(TEST_BIN_DIR)/test_stress_load $(STRESS_THREADS) $(STRESS_DURATION)
+endif
+	@echo ""
+
+# Pool exhaustion simulation (Issue #9)
+STRESS_POOL_SIZE ?= 50
+STRESS_POOL_THREADS ?= 80
+
+$(TEST_BIN_DIR)/test_pool_exhaustion: $(TEST_DIR)/test_pool_exhaustion.c
+	@mkdir -p $(TEST_BIN_DIR)
+	$(CC) -o $@ $< \
+		-I$(PG_INCLUDE) \
+		-L$(PG_LIB) \
+		-lpq -lpthread -lm \
+		-Wall -Wextra -O2
+
+test-pool-exhaustion: $(TEST_BIN_DIR)/test_pool_exhaustion
+	@echo ""
+ifeq ($(UNAME_S),Darwin)
+	@PLEX_PG_HOST=/tmp \
+		PLEX_PG_DATABASE=plex_stress \
+		PLEX_PG_USER=plex \
+		PLEX_PG_SCHEMA=plex \
+		./$(TEST_BIN_DIR)/test_pool_exhaustion $(STRESS_POOL_SIZE) $(STRESS_POOL_THREADS) $(STRESS_DURATION)
+else
+	@PLEX_PG_HOST=localhost \
+		PLEX_PG_DATABASE=plex_stress \
+		PLEX_PG_USER=plex \
+		PLEX_PG_SCHEMA=plex \
+		./$(TEST_BIN_DIR)/test_pool_exhaustion $(STRESS_POOL_SIZE) $(STRESS_POOL_THREADS) $(STRESS_DURATION)
+endif
+	@echo ""
+
 # Run all unit tests
 unit-test: test-recursion test-crash test-sql test-groupby test-upsert test-types test-soci test-cache test-tls test-fork test-reaper test-buffer test-api test-expanded test-params test-logging test-exception test-fts test-config test-bind test-common test-statement test-stmt-free test-bind-mismatch test-parity test-uri
 	@echo "All unit tests complete."
