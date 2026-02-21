@@ -200,11 +200,6 @@ static void do_client_init(void) {
     client_initialized = 1;
     LOG_ERROR("pg_client initialized: pool_size=%d, max=%d, auto_grow=yes",
               pool_sz, POOL_SIZE_MAX);
-    if (pool_sz < 80) {
-        LOG_ERROR("Pool: initial size %d is below recommended minimum (80). "
-                  "Pool will auto-grow up to %d if more threads arrive.",
-                  pool_sz, POOL_SIZE_MAX);
-    }
 }
 
 void pg_client_init(void) {

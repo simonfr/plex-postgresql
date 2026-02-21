@@ -198,7 +198,7 @@ sudo ./scripts/uninstall_wrappers_linux.sh
 | `PLEX_PG_USER` | plex | Usuario de la base de datos |
 | `PLEX_PG_PASSWORD` | (vacío) | Contraseña de la base de datos |
 | `PLEX_PG_SCHEMA` | plex | Nombre del esquema |
-| `PLEX_PG_POOL_SIZE` | 50 | Tamaño del pool de conexiones (máx 100) |
+| `PLEX_PG_POOL_SIZE` | 50 | Tamaño inicial del pool de conexiones (crece automáticamente hasta 200) |
 | `PLEX_PG_LOG_LEVEL` | 1 | 0=ERROR, 1=INFO, 2=DEBUG |
 
 ## Cómo Funciona

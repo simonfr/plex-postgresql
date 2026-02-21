@@ -445,7 +445,7 @@ sudo systemctl start plexmediaserver
 
 **Connection Pooling:**
 ```bash
-export PLEX_PG_POOL_SIZE=100  # Default: 50, Max: 200
+export PLEX_PG_POOL_SIZE=100  # Default: 50, auto-grows up to 200
 ```
 
 **Unix Socket (7% faster than TCP):**
