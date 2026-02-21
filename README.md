@@ -9,10 +9,11 @@ A small shim library that catches Plex SQLite calls and sends them to PostgreSQL
 
 ## 🎉 Latest Release: v0.9.37
 
-**Docker standalone startup fix** — removes slow `chown -R` that caused multi-minute delays on large libraries.
+**Pool auto-grow (Issue #9)** — connection pool now grows automatically when Plex creates more threads than configured slots. Idle connections get reaped after `PLEX_PG_IDLE_TIMEOUT` (default 300s).
 
-- 🆕 **Docker chown fix (PR #7):** removed `chown -R plex:plex` from standalone entrypoint: Plex handles ownership itself
-- ✅ PG restart recovery (Issue #8): pool + step-level retry, all endpoints recover after PG restart (v0.9.34)
+- 🆕 **Pool auto-grow:** pool grows from configured size up to 200 on demand, no more thread lockout
+- ✅ Docker chown fix (PR #7): removed slow `chown -R` from standalone entrypoint
+- ✅ PG restart recovery (Issue #8): pool + step-level retry, all endpoints recover after PG restart
 - ✅ **278 unit tests** (220 SQL + 41 shadow elimination + 17 connection isolation)
 
 [📥 Download v0.9.37](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.37) | [📋 Full Release Notes](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.37)

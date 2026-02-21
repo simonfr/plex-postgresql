@@ -15,10 +15,11 @@ Una librería shim pequeña que captura las llamadas SQLite de Plex y las envía
 
 ## Última versión: v0.9.37
 
-**Fix arranque Docker standalone** — elimina `chown -R` lento que causaba retrasos de minutos en librerías grandes.
+**Pool auto-grow (Issue #9)** — el pool de conexiones crece automáticamente cuando Plex crea más hilos que slots configurados. Conexiones inactivas se cierran tras `PLEX_PG_IDLE_TIMEOUT` (default 300s).
 
-- ✅ **Fix chown Docker (PR #7):** eliminado `chown -R plex:plex` del entrypoint standalone — Plex gestiona los permisos
-- ✅ Recuperación tras reinicio de PG (Issue #8): reintentos pool + step (v0.9.34)
+- 🆕 **Pool auto-grow:** el pool crece desde el tamaño configurado hasta 200, sin bloqueo de hilos
+- ✅ Fix chown Docker (PR #7): eliminado `chown -R` lento del entrypoint standalone
+- ✅ Recuperación tras reinicio de PG (Issue #8): reintentos pool + step
 - ✅ **278 tests unitarios** (220 SQL + 41 shadow elimination + 17 connection isolation)
 
 Descarga: https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.37
