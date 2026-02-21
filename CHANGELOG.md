@@ -5,6 +5,11 @@ All notable changes to plex-postgresql will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.37] - 2026-02-21
+
+### Changed
+- **Docs: add `PLEX_PG_IDLE_TIMEOUT` everywhere** — added idle timeout env var to Dockerfile.standalone, INSTALL.md (all platform sections), and Linux install wrapper script.
+
 ## [0.9.36] - 2026-02-21
 
 ### Added

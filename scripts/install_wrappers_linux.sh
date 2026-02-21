@@ -90,6 +90,7 @@ export PLEX_PG_USER="${PLEX_PG_USER:-plex}"
 export PLEX_PG_PASSWORD="${PLEX_PG_PASSWORD:-}"
 export PLEX_PG_SCHEMA="${PLEX_PG_SCHEMA:-plex}"
 export PLEX_PG_POOL_SIZE="${PLEX_PG_POOL_SIZE:-50}"
+export PLEX_PG_IDLE_TIMEOUT="${PLEX_PG_IDLE_TIMEOUT:-300}"
 
 # Execute the original server
 exec "$SERVER_BINARY" "$@"

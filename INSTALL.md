@@ -6,11 +6,11 @@ Simple install steps for Docker, macOS, and Linux.
 
 ## 📦 Choose Your Platform
 
-**Latest Release:** [v0.9.16](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.16)
+**Latest Release:** [v0.9.37](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.37)
 
 Release assets are zip-only:
-- `plex-postgresql-v0.9.16-macos.zip`
-- `plex-postgresql-v0.9.16-linux.zip`
+- `plex-postgresql-v0.9.37-macos.zip`
+- `plex-postgresql-v0.9.37-linux.zip`
 
 - **[Docker](#docker-all-platforms)** - Easiest option, works on Linux/macOS/Windows
 - **[macOS](#macos-native)** - Native installation for Apple Silicon
@@ -114,6 +114,7 @@ environment:
   - PLEX_PG_PASSWORD=plex
   - PLEX_PG_SCHEMA=plex
   - PLEX_PG_POOL_SIZE=50
+  - PLEX_PG_IDLE_TIMEOUT=300  # seconds, default 300
   - PLEX_PG_LOG_LEVEL=DEBUG  # 0=ERROR, 1=INFO, 2=DEBUG
 ```
 
@@ -190,7 +191,7 @@ docker-compose ps
 
 ### Option 1: Pre-compiled ZIP (Recommended)
 
-**Latest Release:** [v0.9.16](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.16)
+**Latest Release:** [v0.9.37](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.37)
 
 **1. Setup PostgreSQL**
 
@@ -209,7 +210,7 @@ psql -d plex -c "ALTER USER plex PASSWORD 'plex';"
 
 ```bash
 # Download latest macOS zip
-curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.16/plex-postgresql-v0.9.16-macos.zip -o /tmp/plex-pg-macos.zip
+curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.37/plex-postgresql-v0.9.37-macos.zip -o /tmp/plex-pg-macos.zip
 
 # Extract
 mkdir -p /tmp/plex-pg-macos && cd /tmp/plex-pg-macos
@@ -263,6 +264,7 @@ export PLEX_PG_USER=plex
 export PLEX_PG_PASSWORD=plex
 export PLEX_PG_SCHEMA=plex
 export PLEX_PG_POOL_SIZE=50
+export PLEX_PG_IDLE_TIMEOUT=300  # seconds, default 300
 ```
 
 ### Verify Installation
@@ -301,7 +303,7 @@ curl -s http://localhost:32400/library/sections | head -10
 
 ### Option 1: Pre-compiled ZIP (Recommended)
 
-**Latest Release:** [v0.9.16](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.16)
+**Latest Release:** [v0.9.37](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.37)
 
 **Available architectures:**
 - ✅ x86_64 (Intel/AMD 64-bit) - `db_interpose_pg-linux-x86_64.so`
@@ -329,7 +331,7 @@ sudo -u postgres psql -c "ALTER USER plex PASSWORD 'yourpassword';"
 
 ```bash
 # Download latest Linux zip
-curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.16/plex-postgresql-v0.9.16-linux.zip -o /tmp/plex-pg-linux.zip
+curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.37/plex-postgresql-v0.9.37-linux.zip -o /tmp/plex-pg-linux.zip
 
 # Extract
 mkdir -p /tmp/plex-pg-linux
@@ -375,6 +377,7 @@ PLEX_PG_USER=plex
 PLEX_PG_PASSWORD=yourpassword
 PLEX_PG_SCHEMA=plex
 PLEX_PG_POOL_SIZE=50
+PLEX_PG_IDLE_TIMEOUT=300
 ```
 
 **4. Start Plex**
@@ -445,7 +448,8 @@ sudo systemctl start plexmediaserver
 
 **Connection Pooling:**
 ```bash
-export PLEX_PG_POOL_SIZE=100  # Default: 50, auto-grows up to 200
+export PLEX_PG_POOL_SIZE=100   # Default: 50, auto-grows up to 200
+export PLEX_PG_IDLE_TIMEOUT=300  # Seconds before idle connections are reaped (default: 300)
 ```
 
 **Unix Socket (7% faster than TCP):**
@@ -547,6 +551,7 @@ export PLEX_PG_HOST=/tmp  # or /var/run/postgresql
 **Increase pool size:**
 ```bash
 export PLEX_PG_POOL_SIZE=100
+export PLEX_PG_IDLE_TIMEOUT=300  # seconds before idle connections are reaped
 ```
 
 **Check PostgreSQL performance:**
