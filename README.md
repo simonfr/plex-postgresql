@@ -11,7 +11,7 @@ A small shim library that catches Plex SQLite calls and sends them to PostgreSQL
 
 **Docker standalone startup fix** — removes slow `chown -R` that caused multi-minute delays on large libraries.
 
-- 🆕 **Docker chown fix (PR #7):** removed `chown -R plex:plex` from standalone entrypoint — Plex handles ownership itself
+- 🆕 **Docker chown fix (PR #7):** removed `chown -R plex:plex` from standalone entrypoint: Plex handles ownership itself
 - ✅ PG restart recovery (Issue #8): pool + step-level retry, all endpoints recover after PG restart (v0.9.34)
 - ✅ **278 unit tests** (220 SQL + 41 shadow elimination + 17 connection isolation)
 
