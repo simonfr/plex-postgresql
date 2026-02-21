@@ -292,6 +292,7 @@ Use this command to migrate an existing Plex library to PostgreSQL:
 | `PLEX_PG_PASSWORD` | (empty) | Database password |
 | `PLEX_PG_SCHEMA` | plex | Schema name |
 | `PLEX_PG_POOL_SIZE` | 50 | Initial connection pool size (auto-grows up to 200) |
+| `PLEX_PG_IDLE_TIMEOUT` | 300 | Seconds before idle connections are reaped |
 | `PLEX_PG_LOG_LEVEL` | 1 | 0=ERROR, 1=INFO, 2=DEBUG |
 | `PLEX_PG_RETRY_DELAYS` | 500,1000,2000,3000,4000 | PG reconnect backoff in ms (comma-separated, max 10 values) |
 

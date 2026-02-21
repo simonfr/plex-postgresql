@@ -43,6 +43,7 @@ services:
       - PLEX_PG_PASSWORD=plex
       - PLEX_PG_SCHEMA=plex
       - PLEX_PG_POOL_SIZE=50
+      # - PLEX_PG_IDLE_TIMEOUT=300
       - PLEX_PG_LOG_LEVEL=ERROR
     volumes:
       - plex_config:/config

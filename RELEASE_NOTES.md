@@ -11,7 +11,7 @@ Pool auto-grow: the connection pool now grows automatically when Plex creates mo
 - **Problem:** When `PLEX_PG_POOL_SIZE` is set below the number of concurrent Plex threads (e.g., during library scan + streaming), excess threads are permanently locked out and metadata writes fail.
 - **Fix:** The connection pool now auto-grows on demand. When all slots are occupied and a new thread needs a connection, the pool grows by one slot (up to the maximum of 200). The existing reaper closes idle connections when demand drops.
 - Pool auto-grows from configured size up to `POOL_SIZE_MAX` (200)
-- Startup warning when pool size is below recommended minimum (80)
+- `PLEX_PG_IDLE_TIMEOUT` env var to configure idle connection reaping (default: 300s)
 - Atomic pool size for lock-free growth via CAS
 - Verified live: pool=20, 10 simultaneous library scans → grew to 51, 0 errors, connections reaped after idle
 

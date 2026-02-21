@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Pool auto-grow (Issue #9)** — Connection pool now automatically grows from configured size up to `POOL_SIZE_MAX` (200) when Plex creates more threads than available slots. Prevents permanent thread lockout when `PLEX_PG_POOL_SIZE` is set below peak thread count. The existing reaper closes idle connections when demand drops.
-- **Startup warning** when `PLEX_PG_POOL_SIZE` is below recommended minimum (80).
+- **`PLEX_PG_IDLE_TIMEOUT` environment variable** — configures how long idle connections are kept before the reaper closes them (default: 300s, minimum: 10s).
 - **Stress test suite** — `test_pool_autogrow`, `test_stress_load`, `test_pool_exhaustion`, `test_pool_modes` for pool behavior validation under load.
 - **Makefile targets** — `test-stress` and `test-pool-exhaustion` for running pool stress tests.
 
