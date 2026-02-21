@@ -7,15 +7,15 @@
 
 A small shim library that catches Plex SQLite calls and sends them to PostgreSQL. You do not need to change Plex source code.
 
-## 🎉 Latest Release: v0.9.34
+## 🎉 Latest Release: v0.9.35
 
-**PostgreSQL restart recovery** — Plex now fully recovers after a PostgreSQL restart with no manual intervention. Also adds missing blobs UNIQUE index.
+**Docker standalone startup fix** — removes slow `chown -R` that caused multi-minute delays on large libraries.
 
-- 🆕 **PG restart recovery (Issue #8):** Two-layer fix (pool-level retry + step-level retry) ensures all Plex endpoints return 200 after PG restarts — no Plex restart needed
-- 🆕 **Blobs UNIQUE index:** Added missing `idx_blobs_linked_type_id_blob_type` index to fix ON CONFLICT upsert errors
+- 🆕 **Docker chown fix (PR #7):** removed `chown -R plex:plex` from standalone entrypoint — Plex handles ownership itself
+- ✅ PG restart recovery (Issue #8): pool + step-level retry, all endpoints recover after PG restart (v0.9.34)
 - ✅ **278 unit tests** (220 SQL + 41 shadow elimination + 17 connection isolation)
 
-[📥 Download v0.9.34](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.34) | [📋 Full Release Notes](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.34)
+[📥 Download v0.9.35](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.35) | [📋 Full Release Notes](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.35)
 
 Linux and macOS release zips are built by GitHub Actions on tag push via `.github/workflows/release-linux-artifacts.yml` and `.github/workflows/release-macos-artifacts.yml`.
 Pull requests and `main` pushes run `.github/workflows/ci.yml` (script validation + Linux amd64 build check + **278 unit tests**).
@@ -29,7 +29,7 @@ Docker images are published to GHCR on release tags via `.github/workflows/docke
 
 **macOS:**
 ```bash
-curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.34/plex-postgresql-v0.9.34-macos.zip \
+curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.35/plex-postgresql-v0.9.35-macos.zip \
   -o /tmp/plex-pg-macos.zip
 mkdir -p /tmp/plex-pg-macos && cd /tmp/plex-pg-macos
 unzip /tmp/plex-pg-macos.zip
@@ -39,7 +39,7 @@ pkill -f "Plex Media Server" 2>/dev/null || true
 
 **Linux (x86_64):**
 ```bash
-sudo curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.34/plex-postgresql-v0.9.34-linux.zip \
+sudo curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.35/plex-postgresql-v0.9.35-linux.zip \
   -o /tmp/plex-postgresql-linux.zip
 sudo unzip -j /tmp/plex-postgresql-linux.zip db_interpose_pg-linux-x86_64.so -d /usr/local/lib
 sudo mv /usr/local/lib/db_interpose_pg-linux-x86_64.so /usr/local/lib/db_interpose_pg.so
@@ -139,7 +139,7 @@ docker-compose logs -f plex
 
 **What happens:**
 - ✅ PostgreSQL schema auto-created (empty)
-- ✅ Fresh install works out of the box (v0.9.34 fixes blobs.db crash)
+- ✅ Fresh install works out of the box (v0.9.35 fixes blobs.db crash)
 - ✅ Claim flow works with both linuxserver and plexinc images
 - ✅ Multi-arch support (x86_64 + ARM64)
 - ✅ All directories pre-created (Plug-ins, Metadata, Cache)
@@ -213,7 +213,7 @@ volumes:
 Use the latest macOS zip and run the wrapper installer. The installer copies the shim dylib into `Plex Media Server.app`, patches the binaries, and sets up the wrapper script. Everything lives inside the Plex app bundle.
 
 ```bash
-curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.34/plex-postgresql-v0.9.34-macos.zip -o /tmp/plex-pg-macos.zip
+curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.35/plex-postgresql-v0.9.35-macos.zip -o /tmp/plex-pg-macos.zip
 mkdir -p /tmp/plex-pg-macos && cd /tmp/plex-pg-macos
 unzip /tmp/plex-pg-macos.zip
 
@@ -236,7 +236,7 @@ pkill -f "Plex Media Server" 2>/dev/null || true
 Use the latest Linux zip and install the binary for your CPU.
 
 ```bash
-curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.34/plex-postgresql-v0.9.34-linux.zip -o /tmp/plex-pg-linux.zip
+curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.35/plex-postgresql-v0.9.35-linux.zip -o /tmp/plex-pg-linux.zip
 mkdir -p /tmp/plex-pg-linux
 cd /tmp/plex-pg-linux
 unzip /tmp/plex-pg-linux.zip
