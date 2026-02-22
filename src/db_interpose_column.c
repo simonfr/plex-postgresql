@@ -823,21 +823,23 @@ static int ensure_pg_result_for_metadata(pg_stmt_t *pg_stmt) {
         // Use PQprepare + PQdescribePrepared for metadata-only access
         LOG_INFO("METADATA_DESCRIBE: Using PQdescribePrepared for: %.100s", pg_stmt->pg_sql);
 
-        // Prepare the statement on PG if not already prepared
-        PGresult *prep = PQprepare(exec_conn->conn, pg_stmt->stmt_name,
-                                    pg_stmt->pg_sql, 0, NULL);
-        if (PQresultStatus(prep) != PGRES_COMMAND_OK) {
-            const char *err = PQerrorMessage(exec_conn->conn);
-            // "already exists" is fine — another path already prepared it
-            if (!err || !strstr(err, "already exists")) {
-                LOG_ERROR("METADATA_DESCRIBE: PQprepare failed: %s", err ? err : "(null)");
-                PQclear(prep);
-                pthread_mutex_unlock(&exec_conn->mutex);
-                return 0;
+        // Prepare the statement on PG if not already in local cache
+        const char *cached_name = NULL;
+        if (!pg_stmt_cache_lookup(exec_conn, pg_stmt->sql_hash, &cached_name)) {
+            PGresult *prep = PQprepare(exec_conn->conn, pg_stmt->stmt_name,
+                                        pg_stmt->pg_sql, 0, NULL);
+            if (PQresultStatus(prep) != PGRES_COMMAND_OK) {
+                if (!pg_is_duplicate_prepared_stmt(prep)) {
+                    LOG_ERROR("METADATA_DESCRIBE: PQprepare failed: %s",
+                              PQerrorMessage(exec_conn->conn));
+                    PQclear(prep);
+                    pthread_mutex_unlock(&exec_conn->mutex);
+                    return 0;
+                }
             }
-            LOG_DEBUG("METADATA_DESCRIBE: statement already prepared, continuing with describe");
+            pg_stmt_cache_add(exec_conn, pg_stmt->sql_hash, pg_stmt->stmt_name, pg_stmt->param_count);
+            PQclear(prep);
         }
-        PQclear(prep);
 
         // Describe to get column metadata
         PGresult *desc = PQdescribePrepared(exec_conn->conn, pg_stmt->stmt_name);

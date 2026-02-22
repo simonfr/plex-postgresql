@@ -24,7 +24,7 @@
 // Connection Pool Configuration
 // ============================================================================
 
-// Pool size constants defined in pg_types.h (POOL_SIZE_MAX=200, POOL_SIZE_DEFAULT=150)
+// Pool size constants defined in pg_types.h (POOL_SIZE_MAX=200, POOL_SIZE_DEFAULT=50)
 
 typedef struct {
     pg_connection_t *conn;
@@ -598,6 +598,10 @@ static pg_connection_t* create_pool_connection(const char *db_path) {
             const char *err = res ? PQresultErrorMessage(res) : "NULL result";
             LOG_ERROR("Failed to set search_path: %s", err);
         }
+        if (res) PQclear(res);
+
+        // Deallocate any leftover prepared statements from previous shim instance
+        res = PQexec(conn->conn, "DEALLOCATE ALL");
         if (res) PQclear(res);
 
         // Set statement_timeout to prevent infinite hangs on PostgreSQL lock contention
@@ -1620,6 +1624,14 @@ int pg_is_stale_prepared_stmt(PGresult *res) {
     if (!res) return 0;
     const char *sqlstate = PQresultErrorField(res, PG_DIAG_SQLSTATE);
     return sqlstate && strcmp(sqlstate, "26000") == 0;
+}
+
+// Check if a PGresult is a "prepared statement already exists" error.
+// Uses SQLSTATE 42P05 (duplicate_prepared_statement) — locale-independent.
+int pg_is_duplicate_prepared_stmt(PGresult *res) {
+    if (!res) return 0;
+    const char *sqlstate = PQresultErrorField(res, PG_DIAG_SQLSTATE);
+    return sqlstate && strcmp(sqlstate, "42P05") == 0;
 }
 
 // Clear local prepared statement cache without sending DEALLOCATE to server.

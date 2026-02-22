@@ -339,6 +339,16 @@ test-tls: $(TEST_BIN_DIR)/test_tls_cache
 	@./$(TEST_BIN_DIR)/test_tls_cache
 	@echo ""
 
+# Prepared statement cache unit tests (hash, lookup, add, clear, SQLSTATE)
+$(TEST_BIN_DIR)/test_stmt_cache: $(TEST_DIR)/test_stmt_cache.c
+	@mkdir -p $(TEST_BIN_DIR)
+	$(CC) -o $@ $< -Wall -Wextra
+
+test-stmt-cache: $(TEST_BIN_DIR)/test_stmt_cache
+	@echo ""
+	@./$(TEST_BIN_DIR)/test_stmt_cache
+	@echo ""
+
 # Fork safety unit tests (pthread_atfork handlers)
 # NOTE: These tests run WITHOUT the shim loaded - they test fork logic in isolation
 $(TEST_BIN_DIR)/test_fork_safety: $(TEST_DIR)/test_fork_safety.c
@@ -645,7 +655,7 @@ endif
 	@echo ""
 
 # Run all unit tests
-unit-test: test-recursion test-crash test-sql test-groupby test-upsert test-types test-soci test-cache test-tls test-fork test-reaper test-buffer test-api test-expanded test-params test-logging test-exception test-fts test-config test-bind test-common test-statement test-stmt-free test-bind-mismatch test-parity test-uri
+unit-test: test-recursion test-crash test-sql test-groupby test-upsert test-types test-soci test-cache test-tls test-stmt-cache test-fork test-reaper test-buffer test-api test-expanded test-params test-logging test-exception test-fts test-config test-bind test-common test-statement test-stmt-free test-bind-mismatch test-parity test-uri
 	@echo "All unit tests complete."
 
 # Single-row streaming mode tests (v0.9.28)
@@ -689,7 +699,7 @@ test-shadow-elim: $(TEST_BIN_DIR)/test_shadow_elimination
 	@./$(TEST_BIN_DIR)/test_shadow_elimination
 	@echo ""
 
-ci-test: test-recursion test-crash test-sql test-groupby test-upsert test-types test-soci test-cache test-tls test-fork test-reaper test-buffer test-logging test-exception test-fts test-config test-bind test-common test-statement test-stmt-free test-bind-mismatch test-parity test-uri test-streaming test-isolation test-shadow test-shadow-elim
+ci-test: test-recursion test-crash test-sql test-groupby test-upsert test-types test-soci test-cache test-tls test-stmt-cache test-fork test-reaper test-buffer test-logging test-exception test-fts test-config test-bind test-common test-statement test-stmt-free test-bind-mismatch test-parity test-uri test-streaming test-isolation test-shadow test-shadow-elim
 	@echo "All CI unit tests complete."
 
 # ============================================================================
