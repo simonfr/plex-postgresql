@@ -1627,7 +1627,7 @@ int pg_is_stale_prepared_stmt(PGresult *res) {
 void pg_stmt_cache_clear_local(pg_connection_t *conn) {
     if (!conn) return;
     memset(&conn->stmt_cache, 0, sizeof(stmt_cache_t));
-    LOG_ERROR("Cleared prepared statement cache (local only) for connection %p", (void*)conn);
+    LOG_INFO("Cleared prepared statement cache (local only) for connection %p", (void*)conn);
 }
 
 // Clear all cached statements for a connection (called on disconnect/reset)
