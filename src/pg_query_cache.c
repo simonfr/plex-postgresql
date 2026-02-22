@@ -7,7 +7,6 @@
 
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <libpq-fe.h>
@@ -17,27 +16,13 @@
 #include "pg_logging.h"
 #include "shim_alloc.h"
 
+// Rust FFI: pure helpers migrated to rust/sql-translator/src/pg_query_cache.rs
+extern uint64_t rust_fnv1a_hash(const void *data, size_t len);
+extern uint64_t rust_get_time_ms(void);
+
 // Thread-local cache
 static pthread_key_t cache_key;
 static pthread_once_t cache_key_once = PTHREAD_ONCE_INIT;
-
-// Get current time in milliseconds
-static uint64_t get_time_ms(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-}
-
-// FNV-1a hash for cache key
-static uint64_t fnv1a_hash(const void *data, size_t len) {
-    const uint8_t *bytes = (const uint8_t *)data;
-    uint64_t hash = 0xcbf29ce484222325ULL;  // FNV offset basis
-    for (size_t i = 0; i < len; i++) {
-        hash ^= bytes[i];
-        hash *= 0x100000001b3ULL;  // FNV prime
-    }
-    return hash;
-}
 
 // Free a single cached result (only if ref_count is 0)
 static void free_cached_result(cached_result_t *entry) {
@@ -146,14 +131,14 @@ uint64_t pg_query_cache_key(pg_stmt_t *stmt) {
     if (!stmt || !stmt->pg_sql) return 0;
 
     // Start with SQL hash
-    uint64_t hash = fnv1a_hash(stmt->pg_sql, strlen(stmt->pg_sql));
+    uint64_t hash = rust_fnv1a_hash(stmt->pg_sql, strlen(stmt->pg_sql));
 
     // Mix in parameter values
     for (int i = 0; i < stmt->param_count && i < MAX_PARAMS; i++) {
         if (stmt->param_values[i]) {
             // Hash the parameter value
-            uint64_t param_hash = fnv1a_hash(stmt->param_values[i],
-                                              strlen(stmt->param_values[i]));
+            uint64_t param_hash = rust_fnv1a_hash(stmt->param_values[i],
+                                                   strlen(stmt->param_values[i]));
             // Mix hashes
             hash ^= param_hash;
             hash *= 0x100000001b3ULL;
@@ -182,7 +167,7 @@ cached_result_t* pg_query_cache_lookup(pg_stmt_t *stmt) {
     uint64_t key = pg_query_cache_key(stmt);
     if (key == 0) return NULL;
 
-    uint64_t now = get_time_ms();
+    uint64_t now = rust_get_time_ms();
 
     // Linear search (cache is small)
     for (int i = 0; i < QUERY_CACHE_SIZE; i++) {
@@ -351,7 +336,7 @@ void pg_query_cache_store(pg_stmt_t *stmt, void *result_ptr) {
 
     // Success - fill in metadata
     entry->cache_key = key;
-    entry->created_ms = get_time_ms();
+    entry->created_ms = rust_get_time_ms();
     atomic_store(&entry->ref_count, 0);  // Initialize ref_count
     entry->num_rows = num_rows;
     entry->num_cols = num_cols;

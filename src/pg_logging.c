@@ -1,401 +1,56 @@
 /*
- * PostgreSQL Shim - Logging Module
- * Thread-safe logging with configurable levels
+ * PostgreSQL Shim - Logging Module (thin C shim)
+ * Variadic printf formatting stays in C; all heavy lifting delegated to Rust.
  */
 
 #include "pg_logging.h"
-#include "pg_types.h"
 #include <stdio.h>
-#include <stdlib.h>
 #include <stdarg.h>
-#include <string.h>
-#include <strings.h>
-#include <time.h>
-#include <pthread.h>
-#include <unistd.h>
 
-// ============================================================================
-// Static State
-// ============================================================================
+/* Rust FFI declarations */
+extern void rust_logging_init(void);
+extern int  rust_logging_get_level(void);
+extern void rust_logging_write(int level, const char *message);
+extern void rust_logging_fallback(const char *original_sql, const char *translated_sql,
+                                   const char *error_msg, const char *context);
+extern int  rust_logging_is_known_limitation(const char *error_msg);
+extern void rust_logging_reset_after_fork(void);
+extern void rust_logging_cleanup(void);
 
-static FILE *log_file = NULL;
-static pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
-static int current_log_level = PG_LOG_ERROR;  // CRITICAL: Reduced from INFO to prevent mutex contention deadlock
-static volatile int logging_initialized = 0;
-static pthread_once_t logging_init_once = PTHREAD_ONCE_INIT;
-
-// ============================================================================
-// Throttling State (prevents disk space exhaustion from query explosions)
-// ============================================================================
-
-#define THROTTLE_WINDOW_SEC 1           // Time window for counting
-#define THROTTLE_THRESHOLD 999999999    // Queries per window before throttling (disabled for debugging)
-#define THROTTLE_SAMPLE_RATE 1000       // Log 1 in N queries when throttled
-#define THROTTLE_SUMMARY_INTERVAL 10    // Log summary every N seconds when throttled
-
-// Log rotation settings
-#define DEFAULT_LOG_MAX_SIZE (10 * 1024 * 1024)  // 10MB default
-#define ROTATION_CHECK_INTERVAL 100              // Check size every N log messages
-
-static size_t log_max_size = DEFAULT_LOG_MAX_SIZE;
-static char log_file_path[1024] = {0};           // Store path for rotation
-static atomic_long log_message_count = 0;        // Count messages for rotation check
-static pid_t logging_owner_pid = 0;              // PID of process that opened the log file
-
-static atomic_long query_count = 0;           // Queries in current window
-static atomic_long query_count_total = 0;     // Total queries since throttle started
-static atomic_long suppressed_count = 0;      // Suppressed log entries
-static time_t window_start = 0;               // Start of current counting window
-static time_t last_summary = 0;               // Last time we logged a summary
-static atomic_int throttle_active = 0;        // 1 = currently throttling
-
-// ============================================================================
-// Throttle Check (returns 1 if message should be logged, 0 if suppressed)
-// ============================================================================
-
-static int should_log_message(void) {
-    time_t now = time(NULL);
-
-    // Reset window if expired
-    if (now != window_start) {
-        long prev_count = atomic_exchange(&query_count, 1);
-        window_start = now;
-
-        // Check if we should exit throttle mode (low query rate)
-        if (prev_count < THROTTLE_THRESHOLD / 10 && atomic_load(&throttle_active)) {
-            atomic_store(&throttle_active, 0);
-            long total = atomic_exchange(&query_count_total, 0);
-            long suppressed = atomic_exchange(&suppressed_count, 0);
-            // Log exit from throttle mode (will be logged since throttle is now off)
-            if (log_file) {
-                struct tm tm_buf;
-                struct tm *tm = localtime_r(&now, &tm_buf);
-                pthread_mutex_lock(&log_mutex);
-                fprintf(log_file, "[%04d-%02d-%02d %02d:%02d:%02d] [INFO] THROTTLE OFF: %ld queries, %ld suppressed\n",
-                        tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
-                        tm->tm_hour, tm->tm_min, tm->tm_sec,
-                        total, suppressed);
-                fflush(log_file);
-                pthread_mutex_unlock(&log_mutex);
-            }
-        }
-        return 1; // Always log first message in new window
-    }
-
-    long count = atomic_fetch_add(&query_count, 1) + 1;
-
-    // Enter throttle mode if threshold exceeded
-    if (count >= THROTTLE_THRESHOLD && !atomic_load(&throttle_active)) {
-        atomic_store(&throttle_active, 1);
-        atomic_store(&query_count_total, count);
-        last_summary = now;
-        if (log_file) {
-            pthread_mutex_lock(&log_mutex);
-            fprintf(log_file, "[THROTTLE] Query explosion detected: %ld queries/sec, sampling 1:%d\n",
-                    count, THROTTLE_SAMPLE_RATE);
-            fflush(log_file);
-            pthread_mutex_unlock(&log_mutex);
-        }
-    }
-
-    // If throttling, sample and log summaries
-    if (atomic_load(&throttle_active)) {
-        atomic_fetch_add(&query_count_total, 1);
-
-        // Log periodic summary
-        if (now - last_summary >= THROTTLE_SUMMARY_INTERVAL) {
-            last_summary = now;
-            long total = atomic_load(&query_count_total);
-            long suppressed = atomic_load(&suppressed_count);
-            if (log_file) {
-                pthread_mutex_lock(&log_mutex);
-                fprintf(log_file, "[THROTTLE] Status: %ld queries total, %ld suppressed, rate ~%ld/sec\n",
-                        total, suppressed, count);
-                fflush(log_file);
-                pthread_mutex_unlock(&log_mutex);
-            }
-            return 1;
-        }
-
-        // Sample: only log every Nth message
-        if (count % THROTTLE_SAMPLE_RATE != 0) {
-            atomic_fetch_add(&suppressed_count, 1);
-            return 0;
-        }
-    }
-
-    return 1;
-}
-
-// ============================================================================
-// Log Rotation
-// ============================================================================
-
-static void rotate_log_file(void) {
-    if (!log_file || log_file == stdout || log_file == stderr) return;
-    if (log_file_path[0] == '\0') return;
-
-    // Get current file size
-    long current_size = ftell(log_file);
-    if (current_size < 0) {
-        fseek(log_file, 0, SEEK_END);
-        current_size = ftell(log_file);
-    }
-
-    if ((size_t)current_size < log_max_size) return;
-
-    // Need to rotate
-    pthread_mutex_lock(&log_mutex);
-
-    // Close current file
-    fclose(log_file);
-
-    // Build rotated filename (.1)
-    char rotated_path[1040];
-    snprintf(rotated_path, sizeof(rotated_path), "%s.1", log_file_path);
-
-    // Remove old .1 if exists, rename current to .1
-    remove(rotated_path);
-    rename(log_file_path, rotated_path);
-
-    // Open fresh log file
-    log_file = fopen(log_file_path, "a");
-    if (log_file) {
-        setbuf(log_file, NULL);  // Unbuffered
-        fprintf(log_file, "[LOG_ROTATION] Rotated log file (previous size: %ld bytes, max: %zu)\n",
-                current_size, log_max_size);
-        fflush(log_file);
-    } else {
-        log_file = stderr;
-    }
-
-    pthread_mutex_unlock(&log_mutex);
-}
-
-// ============================================================================
-// Initialization
-// ============================================================================
-
-static void do_logging_init(void) {
-    // Log Level from environment
-    const char *level_env = getenv(ENV_PG_LOG_LEVEL);
-    if (level_env) {
-        if (strcasecmp(level_env, "DEBUG") == 0) current_log_level = PG_LOG_DEBUG;
-        else if (strcasecmp(level_env, "ERROR") == 0) current_log_level = PG_LOG_ERROR;
-        else current_log_level = PG_LOG_INFO;
-    }
-
-    // Log Max Size from environment (e.g., "10M", "50M", "100K", or bytes)
-    const char *max_size_env = getenv(ENV_PG_LOG_MAX_SIZE);
-    if (max_size_env) {
-        char *endptr;
-        long size = strtol(max_size_env, &endptr, 10);
-        if (size > 0) {
-            if (*endptr == 'M' || *endptr == 'm') {
-                log_max_size = (size_t)size * 1024 * 1024;
-            } else if (*endptr == 'K' || *endptr == 'k') {
-                log_max_size = (size_t)size * 1024;
-            } else {
-                log_max_size = (size_t)size;
-            }
-        }
-    }
-
-    // Log File from environment
-    const char *file_env = getenv(ENV_PG_LOG_FILE);
-    if (file_env) {
-        if (strcasecmp(file_env, "stdout") == 0) {
-            log_file = stdout;
-        } else if (strcasecmp(file_env, "stderr") == 0) {
-            log_file = stderr;
-        } else {
-            strncpy(log_file_path, file_env, sizeof(log_file_path) - 1);
-            log_file = fopen(file_env, "a");
-        }
-    } else {
-        strncpy(log_file_path, LOG_FILE, sizeof(log_file_path) - 1);
-        log_file = fopen(LOG_FILE, "a");
-    }
-
-    if (!log_file) {
-        log_file = stderr;
-        fprintf(stderr, "[PG_SHIM] Failed to open log file, falling back to stderr\n");
-    }
-
-    // Unbuffered for file output
-    if (log_file != stdout && log_file != stderr) {
-        setbuf(log_file, NULL);
-    }
-
-    logging_initialized = 1;
-    logging_owner_pid = getpid();
-}
+/* ── Public API implementations ── */
 
 void pg_logging_init(void) {
-    pthread_once(&logging_init_once, do_logging_init);
-    // Log after init is complete (can't call from do_logging_init due to recursion)
-    static volatile int first_log_done = 0;
-    if (!first_log_done) {
-        first_log_done = 1;
-        pg_log_message_internal(PG_LOG_INFO, "Logging initialized. Level: %d", current_log_level);
-    }
+    rust_logging_init();
 }
 
 void pg_logging_cleanup(void) {
-    // CRITICAL: Only the process that opened the log file should close it.
-    // After fork(), child processes inherit the file descriptor. If a child
-    // calls fclose(), it closes the underlying fd which is shared with the
-    // parent via the file descriptor table, causing the parent's logging to
-    // silently stop working.
-    if (log_file && log_file != stdout && log_file != stderr) {
-        fflush(log_file);
-        if (getpid() == logging_owner_pid) {
-            fclose(log_file);
-        }
-    }
-    log_file = NULL;
-    logging_initialized = 0;
+    rust_logging_cleanup();
 }
 
-// Reset logging after fork - reinitializes mutex to prevent deadlock
-// CRITICAL: After fork(), the child inherits mutex state from parent
-// If parent held the mutex, child's copy is permanently locked!
 void pg_logging_reset_after_fork(void) {
-    // Reinitialize the mutex (this is safe because we're in child after fork)
-    pthread_mutex_init(&log_mutex, NULL);
-    
-    // Reset pthread_once control to allow re-initialization
-    logging_init_once = (pthread_once_t)PTHREAD_ONCE_INIT;
-    logging_initialized = 0;
-    
-    // Reset throttling state
-    query_count = 0;
-    query_count_total = 0;
-    suppressed_count = 0;
-    window_start = 0;
-    last_summary = 0;
-    throttle_active = 0;
-    log_message_count = 0;
-    
-    // Close inherited file handle (parent owns it)
-    // Child will reopen its own log file
-    log_file = NULL;
-    log_file_path[0] = '\0';
+    rust_logging_reset_after_fork();
 }
 
-// ============================================================================
-// Core Logging (minimized mutex hold time)
-// ============================================================================
-
+/* The variadic entry point — format in C, write via Rust */
 void pg_log_message_internal(int level, const char *fmt, ...) {
-    if (!logging_initialized) pg_logging_init();
-    if (level > current_log_level) return;
-    if (!log_file) return;
+    /* Fast path: check level before any work */
+    if (level > rust_logging_get_level()) return;
 
-    // Throttle check (skip if query explosion detected)
-    // Always log ERROR messages, regardless of throttle
-    if (level != PG_LOG_ERROR && !should_log_message()) return;
-
-    // HEAP allocation to prevent stack overflow (Plex uses ~388KB of stack)
-    // Previously this 4KB buffer on stack caused crashes when combined with Plex's deep recursion
-    #define LOG_BUFFER_SIZE 4096
-    char *buffer = malloc(LOG_BUFFER_SIZE);
-    if (!buffer) return;
-
-    int offset = 0;
-
-    // Timestamp
-    time_t now = time(NULL);
-    struct tm tm_buf;
-    struct tm *tm = localtime_r(&now, &tm_buf);  // Thread-safe version
-    offset += snprintf(buffer + offset, LOG_BUFFER_SIZE - offset,
-                       "[%04d-%02d-%02d %02d:%02d:%02d] ",
-                       tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
-                       tm->tm_hour, tm->tm_min, tm->tm_sec);
-
-    // Level tag
-    const char *tag;
-    switch (level) {
-        case PG_LOG_ERROR: tag = "[ERROR] "; break;
-        case PG_LOG_INFO:  tag = "[INFO] "; break;
-        case PG_LOG_DEBUG: tag = "[DEBUG] "; break;
-        default: tag = "[???] "; break;
-    }
-    offset += snprintf(buffer + offset, LOG_BUFFER_SIZE - offset, "%s", tag);
-
-    // Message
+    char buf[4096];
     va_list args;
     va_start(args, fmt);
-    offset += vsnprintf(buffer + offset, LOG_BUFFER_SIZE - offset, fmt, args);
+    vsnprintf(buf, sizeof(buf), fmt, args);
     va_end(args);
 
-    // Newline
-    if (offset < LOG_BUFFER_SIZE - 1) {
-        buffer[offset++] = '\n';
-        buffer[offset] = '\0';
-    }
-
-    // Brief mutex hold for atomic write
-    // NOTE: Removed fflush() to prevent deadlock with flockfile()
-    // The file is already unbuffered (setbuf NULL), so fflush is not needed
-    pthread_mutex_lock(&log_mutex);
-    fputs(buffer, log_file);
-    pthread_mutex_unlock(&log_mutex);
-
-    free(buffer);
-
-    // Periodic rotation check (every N messages to avoid overhead)
-    if (atomic_fetch_add(&log_message_count, 1) % ROTATION_CHECK_INTERVAL == 0) {
-        rotate_log_file();
-    }
+    rust_logging_write(level, buf);
 }
 
-// ============================================================================
-// SQL Fallback Logging
-// ============================================================================
-
+/* Non-variadic — direct delegation */
 void log_sql_fallback(const char *original_sql, const char *translated_sql,
                       const char *error_msg, const char *context) {
-    // Log to main log
-    pg_log_message_internal(PG_LOG_INFO, "=== SQL FALLBACK TO SQLITE ===");
-    pg_log_message_internal(PG_LOG_INFO, "Context: %s", context ? context : "(null)");
-    pg_log_message_internal(PG_LOG_INFO, "Original SQL: %.500s", original_sql ? original_sql : "(null)");
-    if (translated_sql) {
-        pg_log_message_internal(PG_LOG_INFO, "Translated SQL: %.500s", translated_sql);
-    }
-    pg_log_message_internal(PG_LOG_INFO, "PostgreSQL Error: %s", error_msg ? error_msg : "(null)");
-    pg_log_message_internal(PG_LOG_INFO, "=== END FALLBACK ===");
-
-    // Also log to separate fallback analysis file
-    FILE *fallback_log = fopen(FALLBACK_LOG_FILE, "a");
-    if (fallback_log) {
-        time_t now = time(NULL);
-        char timestamp[64];
-        strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", localtime(&now));
-
-        fprintf(fallback_log, "\n[%s] %s\n", timestamp, context ? context : "(null)");
-        fprintf(fallback_log, "ORIGINAL: %s\n", original_sql ? original_sql : "(null)");
-        if (translated_sql) {
-            fprintf(fallback_log, "TRANSLATED: %s\n", translated_sql);
-        }
-        fprintf(fallback_log, "ERROR: %s\n", error_msg ? error_msg : "(null)");
-        fprintf(fallback_log, "---\n");
-        fclose(fallback_log);
-    }
+    rust_logging_fallback(original_sql, translated_sql, error_msg, context);
 }
 
-// ============================================================================
-// Error Classification
-// ============================================================================
-
 int is_known_translation_limitation(const char *error_msg) {
-    if (!error_msg) return 0;
-
-    // Known translation limitations (logged for improvement)
-    if (strstr(error_msg, "operator does not exist: integer = json")) return 1;
-    if (strstr(error_msg, "must appear in the GROUP BY clause")) return 1;
-    if (strstr(error_msg, "syntax error")) return 1;
-    if (strstr(error_msg, "no unique or exclusion constraint matching the ON CONFLICT")) return 1;
-
-    return 0;
+    return rust_logging_is_known_limitation(error_msg);
 }

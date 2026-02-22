@@ -8,7 +8,7 @@
 #define _GNU_SOURCE
 
 #include "db_interpose.h"
-#include "sql_translator_internal.h"
+#include "../include/str_utils.h"  // for safe_strcasestr
 #include <time.h>
 #include <sys/time.h>
 #include "shim_alloc.h"

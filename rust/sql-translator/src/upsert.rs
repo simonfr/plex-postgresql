@@ -25,7 +25,7 @@ fn transform_insert(insert: &mut Insert) {
         return;
     }
 
-    // Look up conflict target (PK column) from table name
+    // Look up conflict target columns from table name
     let table_name = match &insert.table {
         TableObject::TableName(name) => name
             .0
@@ -37,40 +37,52 @@ fn transform_insert(insert: &mut Insert) {
             .unwrap_or_default(),
         _ => String::new(),
     };
-    let conflict_target =
-        get_table_pk(&table_name).map(|pk| ConflictTarget::Columns(vec![Ident::new(pk)]));
+    let conflict_cols = get_conflict_columns(&table_name);
+    let conflict_target = conflict_cols
+        .as_ref()
+        .map(|cols| ConflictTarget::Columns(cols.iter().map(|c| Ident::new(*c)).collect()));
 
-    match insert.or {
-        Some(SqliteOnConflict::Replace) => {
-            // INSERT OR REPLACE → ON CONFLICT (pk) DO UPDATE SET col=EXCLUDED.col, ...
-            let columns = insert.columns.clone();
-            let pk_name = get_table_pk(&table_name).unwrap_or("id");
-            insert.on = Some(OnInsert::OnConflict(make_do_update(
-                columns,
-                conflict_target,
-                pk_name,
-            )));
-            insert.or = None;
-            // Also clear replace_into flag if set
-            insert.replace_into = false;
+    // Handle both INSERT OR REPLACE and REPLACE INTO (replace_into flag)
+    let is_replace = matches!(insert.or, Some(SqliteOnConflict::Replace)) || insert.replace_into;
+    let is_ignore = matches!(insert.or, Some(SqliteOnConflict::Ignore));
+
+    if is_replace {
+        // INSERT OR REPLACE / REPLACE INTO → ON CONFLICT (target) DO UPDATE SET col=EXCLUDED.col, ...
+        let columns = insert.columns.clone();
+        let conflict_col_names: Vec<String> = conflict_cols
+            .as_ref()
+            .map(|cols| cols.iter().map(|c| c.to_lowercase()).collect())
+            .unwrap_or_else(|| vec!["id".to_string()]);
+        insert.on = Some(OnInsert::OnConflict(make_do_update(
+            columns,
+            conflict_target,
+            &conflict_col_names,
+        )));
+        insert.or = None;
+        insert.replace_into = false;
+        // Add RETURNING id when conflict target contains "id" (matches C behavior)
+        if should_add_returning_id(&conflict_cols) {
+            insert.returning = Some(vec![SelectItem::UnnamedExpr(Expr::Identifier(Ident::new(
+                "id",
+            )))]);
         }
-        Some(SqliteOnConflict::Ignore) => {
-            // INSERT OR IGNORE → ON CONFLICT DO NOTHING
-            insert.on = Some(OnInsert::OnConflict(OnConflict {
-                conflict_target,
-                action: OnConflictAction::DoNothing,
-            }));
-            insert.or = None;
-        }
-        _ => {
-            // No SQLite conflict modifier – nothing to do
-        }
+    } else if is_ignore {
+        // INSERT OR IGNORE → ON CONFLICT DO NOTHING
+        insert.on = Some(OnInsert::OnConflict(OnConflict {
+            conflict_target,
+            action: OnConflictAction::DoNothing,
+        }));
+        insert.or = None;
     }
 }
 
-/// Known Plex table primary key columns
-fn get_table_pk(table_name: &str) -> Option<&'static str> {
+/// Known Plex table conflict target columns (for ON CONFLICT).
+/// Returns a list of column names that form the conflict target.
+/// This matches the C translator's conflict_targets[] array, which uses
+/// UNIQUE constraints rather than always using the PK.
+fn get_conflict_columns(table_name: &str) -> Option<Vec<&'static str>> {
     match table_name.to_lowercase().as_str() {
+        // Tables with simple id PRIMARY KEY
         "tags"
         | "taggings"
         | "metadata_items"
@@ -78,20 +90,22 @@ fn get_table_pk(table_name: &str) -> Option<&'static str> {
         | "media_parts"
         | "media_streams"
         | "settings"
-        | "preferences"
         | "accounts"
         | "directories"
         | "library_sections"
-        | "statistics_bandwidth"
         | "statistics_media"
         | "statistics_resources"
         | "devices"
         | "play_queue_items"
         | "play_queue_generators"
+        | "play_queues"
+        | "activities"
+        | "locations"
+        | "plugins"
+        | "media_grabs"
         | "versioned_metadata_items"
         | "external_metadata_items"
         | "external_metadata_sources"
-        | "metadata_item_settings"
         | "metadata_item_views"
         | "metadata_item_accounts"
         | "metadata_item_clusterings"
@@ -101,25 +115,60 @@ fn get_table_pk(table_name: &str) -> Option<&'static str> {
         | "metadata_relations"
         | "metadata_subscription_desired_items"
         | "sync_schema_versions"
-        | "locatables"
         | "spellfix_metadata_titles"
         | "section_locations"
-        | "hub_templates" => Some("id"),
-        "schema_migrations" => Some("version"),
+        | "hub_templates"
+        | "blobs" => Some(vec!["id"]),
+
+        // Tables with UNIQUE constraints (not PK)
+        "statistics_bandwidth" => Some(vec!["account_id", "device_id", "timespan", "at", "lan"]),
+        "metadata_item_settings" => Some(vec!["account_id", "guid"]),
+        "locatables" => Some(vec!["location_id", "locatable_id", "locatable_type"]),
+        "location_places" => Some(vec!["location_id", "guid"]),
+        "media_stream_settings" => Some(vec!["media_stream_id", "account_id"]),
+        "preferences" => Some(vec!["name"]),
+        "schema_migrations" => Some(vec!["version"]),
+
         _ => None,
     }
 }
 
-/// Build `ON CONFLICT (pk) DO UPDATE SET col1 = EXCLUDED.col1, col2 = EXCLUDED.col2, ...`
-/// Excludes the PK column from the SET assignments.
+/// Check if RETURNING id should be added for this table's upsert.
+/// Matches C behavior: add RETURNING id when "id" appears anywhere in
+/// the conflict target columns string (substring match, like the C code's
+/// strcasestr check). This means tables with conflict targets containing "id"
+/// as a substring (e.g. "account_id") also get RETURNING id.
+fn should_add_returning_id(conflict_cols: &Option<Vec<&str>>) -> bool {
+    if let Some(cols) = conflict_cols {
+        // Check if any conflict column contains "id" as a substring
+        // (matches C behavior: strcasestr(conflict_columns, "id"))
+        let joined = cols.join(", ");
+        joined.to_lowercase().contains("id")
+    } else {
+        false
+    }
+}
+
+/// Build `ON CONFLICT (target_cols) DO UPDATE SET col1 = EXCLUDED.col1, col2 = EXCLUDED.col2, ...`
+/// Excludes:
+///   - the `id` column (always — it's the PK and shouldn't be updated)
+///   - the conflict target columns (they define the conflict, can't be updated)
 fn make_do_update(
     columns: Vec<Ident>,
     conflict_target: Option<ConflictTarget>,
-    pk_name: &str,
+    exclude_cols: &[String],
 ) -> OnConflict {
     let assignments: Vec<Assignment> = columns
         .iter()
-        .filter(|col| col.value.to_lowercase() != pk_name.to_lowercase())
+        .filter(|col| {
+            let col_lower = col.value.to_lowercase();
+            // Always skip `id` column
+            if col_lower == "id" {
+                return false;
+            }
+            // Skip conflict target columns
+            !exclude_cols.iter().any(|ex| ex.to_lowercase() == col_lower)
+        })
         .map(|col| Assignment {
             target: AssignmentTarget::ColumnName(ObjectName(vec![ObjectNamePart::Identifier(
                 col.clone(),

@@ -48,9 +48,61 @@ pub fn transform(stmt: &mut Statement) {
 ///
 /// Called from `crate::preprocess` (lib.rs) before the SQL hits sqlparser.
 pub fn preprocess(sql: &str) -> String {
-    let sql = rewrite_glob(sql);
+    let sql = fix_placeholder_spacing(sql);
+    let sql = rewrite_glob(&sql);
     let sql = rewrite_indexed_by(&sql);
     sql
+}
+
+/// Fix `?identifier` placeholders that sqlparser can't handle.
+/// SQLite allows `?left` (positional placeholder followed by identifier without space),
+/// but sqlparser chokes on it because `left` is a keyword.
+/// We strip the trailing identifier part: `?left` → `?`.
+fn fix_placeholder_spacing(sql: &str) -> String {
+    let bytes = sql.as_bytes();
+    let mut result = String::with_capacity(sql.len());
+    let mut i = 0;
+    let mut in_string = false;
+    let mut string_char: u8 = 0;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_string {
+            result.push(b as char);
+            if b == string_char {
+                if i + 1 < bytes.len() && bytes[i + 1] == string_char {
+                    result.push(bytes[i + 1] as char);
+                    i += 2;
+                    continue;
+                }
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if b == b'\'' || b == b'"' {
+            in_string = true;
+            string_char = b;
+            result.push(b as char);
+            i += 1;
+            continue;
+        }
+
+        if b == b'?' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_alphabetic() {
+            // `?left` → `?` (strip the trailing identifier, it's junk from SQLite)
+            result.push('?');
+            i += 1;
+            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                i += 1;
+            }
+            continue;
+        }
+
+        result.push(b as char);
+        i += 1;
+    }
+    result
 }
 
 /// Replace `GLOB '<pattern>'` with `ILIKE '<pg_pattern>'`.
@@ -226,7 +278,37 @@ fn transform_query(q: &mut Query) {
             transform_query(&mut cte.query);
         }
     }
+
+    // Detect GROUP BY NULL before transforming (need Query-level access for ORDER BY)
+    let had_group_by_null = if let SetExpr::Select(sel) = q.body.as_ref() {
+        if let GroupByExpr::Expressions(exprs, _) = &sel.group_by {
+            !exprs.is_empty() && exprs.iter().all(|e| is_null_expr(e))
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
     transform_set_expr(&mut q.body);
+
+    // GROUP BY NULL was removed: add ORDER BY 1 NULLS FIRST if no ORDER BY exists
+    if had_group_by_null && q.order_by.is_none() {
+        q.order_by = Some(OrderBy {
+            kind: OrderByKind::Expressions(vec![OrderByExpr {
+                expr: Expr::Value(ValueWithSpan {
+                    value: Value::Number("1".to_string(), false),
+                    span: Span::empty(),
+                }),
+                options: OrderByOptions {
+                    asc: None,
+                    nulls_first: Some(true),
+                },
+                with_fill: None,
+            }]),
+            interpolate: None,
+        });
+    }
 }
 
 fn transform_set_expr(se: &mut SetExpr) {

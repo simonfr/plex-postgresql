@@ -17,6 +17,15 @@
 #include "shim_alloc.h"
 
 // ============================================================================
+// Rust FFI — pure-logic helpers (implemented in rust/sql-translator/src/pg_statement.rs)
+// ============================================================================
+
+extern int rust_oid_to_sqlite_type(unsigned int oid);
+extern const char* rust_oid_to_sqlite_decltype(unsigned int oid);
+extern char* rust_convert_metadata_settings_upsert(const char *sql);
+extern long long rust_extract_metadata_id(const char *sql);
+
+// ============================================================================
 // Static State
 // ============================================================================
 
@@ -656,57 +665,11 @@ void pg_stmt_clear_result(pg_stmt_t *stmt) {
 // ============================================================================
 
 char* convert_metadata_settings_insert_to_upsert(const char *sql) {
-    if (!sql) return NULL;
-    if (!strcasestr(sql, "INSERT INTO")) return NULL;
-    if (!strcasestr(sql, "metadata_item_settings")) return NULL;
-    if (strcasestr(sql, "ON CONFLICT")) return NULL;
-    if (strcasestr(sql, "RETURNING")) return NULL;
-
-    static const char *on_conflict =
-        " ON CONFLICT (account_id, guid) DO UPDATE SET "
-        "rating = COALESCE(EXCLUDED.rating, plex.metadata_item_settings.rating), "
-        "view_offset = EXCLUDED.view_offset, "
-        "view_count = CASE WHEN plex.metadata_item_settings.view_count > 0 AND EXCLUDED.view_count = 0 "
-                     "THEN 0 ELSE GREATEST(EXCLUDED.view_count, plex.metadata_item_settings.view_count, 1) END, "
-        "last_viewed_at = CASE WHEN plex.metadata_item_settings.view_count > 0 AND EXCLUDED.view_count = 0 "
-                         "THEN NULL ELSE COALESCE(EXCLUDED.last_viewed_at, EXTRACT(EPOCH FROM NOW())::bigint) END, "
-        "updated_at = COALESCE(EXCLUDED.updated_at, EXTRACT(EPOCH FROM NOW())::bigint), "
-        "skip_count = EXCLUDED.skip_count, "
-        "last_skipped_at = EXCLUDED.last_skipped_at, "
-        "changed_at = COALESCE(EXCLUDED.changed_at, EXTRACT(EPOCH FROM NOW())::bigint), "
-        "extra_data = COALESCE(EXCLUDED.extra_data, plex.metadata_item_settings.extra_data), "
-        "last_rated_at = COALESCE(EXCLUDED.last_rated_at, plex.metadata_item_settings.last_rated_at) "
-        "RETURNING id";
-
-    size_t len = strlen(sql) + strlen(on_conflict) + 1;
-    char *result = malloc(len);
-    if (result) {
-        snprintf(result, len, "%s%s", sql, on_conflict);
-    }
-    return result;
+    return rust_convert_metadata_settings_upsert(sql);
 }
 
 sqlite3_int64 extract_metadata_id_from_generator_sql(const char *sql) {
-    if (!sql) return 0;
-    if (!strcasestr(sql, "play_queue_generators")) return 0;
-    if (!strcasestr(sql, "INSERT")) return 0;
-
-    // Look for URL-encoded /metadata/ pattern
-    const char *pattern = "%2Fmetadata%2F";
-    const char *pos = strstr(sql, pattern);
-    if (!pos) {
-        pattern = "/metadata/";
-        pos = strstr(sql, pattern);
-    }
-    if (!pos) return 0;
-
-    pos += strlen(pattern);
-    sqlite3_int64 id = 0;
-    while (*pos >= '0' && *pos <= '9') {
-        id = id * 10 + (*pos - '0');
-        pos++;
-    }
-    return id;
+    return (sqlite3_int64)rust_extract_metadata_id(sql);
 }
 
 // ============================================================================
@@ -714,69 +677,14 @@ sqlite3_int64 extract_metadata_id_from_generator_sql(const char *sql) {
 // ============================================================================
 
 int pg_oid_to_sqlite_type(Oid oid) {
-    switch (oid) {
-        case 16:   // BOOL
-        case 20:   // INT8
-        case 21:   // INT2
-        case 23:   // INT4
-        case 26:   // OID - v0.8.9.2: must match column_decltype mapping
-            return SQLITE_INTEGER;
-        case 700:  // FLOAT4
-        case 701:  // FLOAT8
-        case 1700: // NUMERIC
-            return SQLITE_FLOAT;
-        case 17:   // BYTEA
-            return SQLITE_BLOB;
-        case 25:   // TEXT
-        case 1042: // BPCHAR
-        case 1043: // VARCHAR
-        default:
-            return SQLITE_TEXT;
-    }
+    return rust_oid_to_sqlite_type((unsigned int)oid);
 }
 
-// Convert PostgreSQL OID to SQLite declared type string
-// Returns static strings that don't need to be freed
+// Convert PostgreSQL OID to SQLite declared type string.
+// Returns a pointer to a static string owned by the Rust module; do not free.
+// OID 20 (int8/bigint) returns "BIGINT" — critical for SOCI 64-bit handling.
 const char* pg_oid_to_sqlite_decltype(Oid oid) {
-    switch (oid) {
-        case 16:   // BOOL
-            return "INTEGER";  // SQLite has no BOOL, use INTEGER
-        case 20:   // INT8 (bigint)
-            // CRITICAL FIX v2: Return BIGINT instead of INTEGER
-            // Root cause: SOCI maps "INTEGER" -> db_int32 (32-bit), but PostgreSQL BIGINT is 64-bit
-            // When Plex calls row.get<int64_t>(), SOCI tries to cast int32 -> int64 -> std::bad_cast
-            // Solution: "BIGINT" -> SOCI maps to db_int64 -> calls column_int64() -> correct 64-bit handling
-            // See: SOCI Issue #1190, Agent 2 analysis in supernerdanalyse.md
-            return "BIGINT";
-        case 21:   // INT2 (smallint)
-            return "INTEGER";  // Keep as INTEGER for SOCI compatibility
-        case 23:   // INT4 (integer)
-            return "INTEGER";  // Standard 32-bit integer
-        case 700:  // FLOAT4
-            return "REAL";
-        case 701:  // FLOAT8
-            return "REAL";
-        case 1700: // NUMERIC
-            return "REAL";
-        case 17:   // BYTEA
-            return "BLOB";
-        case 25:   // TEXT
-            return "TEXT";
-        case 1042: // BPCHAR (char)
-            return "TEXT";
-        case 1043: // VARCHAR
-            return "TEXT";
-        case 1082: // DATE
-            return "TEXT";
-        case 1083: // TIME
-            return "TEXT";
-        case 1114: // TIMESTAMP
-            return "TEXT";
-        case 1184: // TIMESTAMPTZ
-            return "TEXT";
-        default:
-            return "TEXT";  // Default to TEXT for unknown types
-    }
+    return rust_oid_to_sqlite_decltype((unsigned int)oid);
 }
 
 sqlite3_value* pg_create_column_value(pg_stmt_t *stmt, int col_idx) {

@@ -10,6 +10,10 @@
 ///   7. min(a,b) multi-arg  — → LEAST(a,b)
 ///   8. COLLATE ICU strip   — remove icu_* collations
 ///   9. COLLATE NOCASE      — `x COLLATE NOCASE = y` → `LOWER(x) = LOWER(y)`
+///  10. FTS4 MATCH          — `col MATCH 'term'` → `col_fts @@ to_tsquery('simple', E'term')`
+///  11. Collections filter  — remove `metadata_type=18` from OR conditions
+///  12. Int/text mismatch   — cast integer to ::text for known text columns
+///                            and cast string literal to integer for known int columns
 use sqlparser::ast::*;
 use sqlparser::tokenizer::Span;
 
@@ -91,6 +95,7 @@ fn transform_select(sel: &mut Select) {
     // WHERE fixups
     if let Some(w) = &mut sel.selection {
         fix_where_numeric(w);
+        fix_collections_filter(w);
         transform_expr_inplace(w);
     }
 
@@ -332,6 +337,36 @@ fn transform_expr(expr: Expr) -> Expr {
             }
 
             Expr::Function(func)
+        }
+
+        // Fix FTS4: col MATCH 'term' → col_fts @@ to_tsquery('simple', E'converted_term')
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::PGCustomBinaryOperator(ref custom_ops),
+            right,
+        } if custom_ops.len() == 1 && custom_ops[0] == "MATCH" => {
+            transform_fts_match(*left, *right)
+        }
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::Match,
+            right,
+        } => transform_fts_match(*left, *right),
+
+        // Fix 12: Int/text mismatch — known text columns compared with int literals
+        // and known int columns compared with string literals
+        Expr::BinaryOp {
+            ref left,
+            ref op,
+            ref right,
+        } if matches!(op, BinaryOperator::Eq | BinaryOperator::NotEq)
+            && should_fix_int_text_mismatch(left, right) =>
+        {
+            let (left, op, right) = match expr {
+                Expr::BinaryOp { left, op, right } => (*left, op, *right),
+                _ => unreachable!(),
+            };
+            fix_int_text_mismatch(left, op, right)
         }
 
         // Fix 9: COLLATE NOCASE on equality → LOWER(x) = LOWER(y)
@@ -606,6 +641,408 @@ fn strip_collate_nocase_shallow(expr: Expr) -> (Expr, bool) {
         );
     }
     (expr, false)
+}
+
+// ─── Fix 11: Collections filter ───────────────────────────────────────────────
+
+/// Remove `metadata_type=18` from OR conditions.
+/// Plex can't properly serialize collection objects (type 18), causing errors.
+/// Pattern: `(metadata_type=1 OR metadata_type=18)` → `metadata_type=1`
+fn fix_collections_filter(expr: &mut Expr) {
+    // Recurse into nested expressions first
+    match expr {
+        Expr::Nested(inner) => {
+            fix_collections_filter(inner);
+            // After fixing inner, if it simplified to a single condition, unwrap
+            if is_metadata_type_eq(inner, 18) {
+                // Entire expression is just metadata_type=18 — replace with TRUE
+                *expr = Expr::Value(ValueWithSpan {
+                    value: Value::Boolean(true),
+                    span: Span::empty(),
+                });
+            }
+        }
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::Or,
+            right,
+        } => {
+            fix_collections_filter(left);
+            fix_collections_filter(right);
+
+            let left_is_18 = is_metadata_type_eq(left, 18);
+            let right_is_18 = is_metadata_type_eq(right, 18);
+
+            if left_is_18 && !right_is_18 {
+                // Remove left (type=18), keep right
+                let r = std::mem::replace(
+                    right.as_mut(),
+                    Expr::Value(ValueWithSpan {
+                        value: Value::Null,
+                        span: Span::empty(),
+                    }),
+                );
+                *expr = r;
+            } else if right_is_18 && !left_is_18 {
+                // Remove right (type=18), keep left
+                let l = std::mem::replace(
+                    left.as_mut(),
+                    Expr::Value(ValueWithSpan {
+                        value: Value::Null,
+                        span: Span::empty(),
+                    }),
+                );
+                *expr = l;
+            }
+        }
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::And,
+            right,
+        } => {
+            fix_collections_filter(left);
+            fix_collections_filter(right);
+        }
+        _ => {}
+    }
+}
+
+/// Check if expr matches `metadata_type = <value>` or `metadata_items.metadata_type = <value>`
+fn is_metadata_type_eq(expr: &Expr, value: i64) -> bool {
+    if let Expr::BinaryOp {
+        left,
+        op: BinaryOperator::Eq,
+        right,
+    } = expr
+    {
+        let col_name = match left.as_ref() {
+            Expr::Identifier(ident) => Some(ident.value.to_lowercase()),
+            Expr::CompoundIdentifier(parts) => parts.last().map(|i| i.value.to_lowercase()),
+            _ => None,
+        };
+        if col_name.as_deref() == Some("metadata_type") {
+            if let Expr::Value(ValueWithSpan {
+                value: Value::Number(ref s, _),
+                ..
+            }) = right.as_ref()
+            {
+                if let Ok(n) = s.parse::<i64>() {
+                    return n == value;
+                }
+            }
+        }
+    }
+    false
+}
+
+// ─── Fix 12: Int/text mismatch ────────────────────────────────────────────────
+
+/// Known columns that are stored as TEXT in Plex but sometimes compared with integers
+const KNOWN_TEXT_COLUMNS: &[&str] = &["status", "state", "downloaded", "metadata_item_id"];
+
+/// Known columns that are stored as INTEGER in Plex but sometimes compared with strings
+const KNOWN_INT_COLUMNS: &[&str] = &["id"];
+
+fn get_column_name(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Identifier(ident) => Some(ident.value.to_lowercase()),
+        Expr::CompoundIdentifier(parts) => parts.last().map(|i| i.value.to_lowercase()),
+        _ => None,
+    }
+}
+
+fn is_number_literal(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Value(ValueWithSpan {
+            value: Value::Number(_, _),
+            ..
+        })
+    )
+}
+
+fn is_string_literal(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Value(ValueWithSpan {
+            value: Value::SingleQuotedString(_),
+            ..
+        })
+    )
+}
+
+/// Check if this binary comparison has an int/text mismatch that needs fixing
+fn should_fix_int_text_mismatch(left: &Expr, right: &Expr) -> bool {
+    // Pattern A: known_text_col = number → cast number to text
+    if let Some(col) = get_column_name(left) {
+        if KNOWN_TEXT_COLUMNS.contains(&col.as_str()) && is_number_literal(right) {
+            return true;
+        }
+    }
+    if let Some(col) = get_column_name(right) {
+        if KNOWN_TEXT_COLUMNS.contains(&col.as_str()) && is_number_literal(left) {
+            return true;
+        }
+    }
+    // Pattern B: known_int_col = 'string' → cast string to int
+    if let Some(col) = get_column_name(left) {
+        if KNOWN_INT_COLUMNS.contains(&col.as_str()) && is_string_literal(right) {
+            return true;
+        }
+    }
+    if let Some(col) = get_column_name(right) {
+        if KNOWN_INT_COLUMNS.contains(&col.as_str()) && is_string_literal(left) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Fix int/text mismatch by adding appropriate casts
+fn fix_int_text_mismatch(left: Expr, op: BinaryOperator, right: Expr) -> Expr {
+    let left_col = get_column_name(&left);
+    let right_col = get_column_name(&right);
+
+    let (new_left, new_right) = if left_col
+        .as_ref()
+        .map(|c| KNOWN_TEXT_COLUMNS.contains(&c.as_str()))
+        .unwrap_or(false)
+        && is_number_literal(&right)
+    {
+        // text_col = 123 → text_col = 123::text
+        (
+            transform_expr(left),
+            Expr::Cast {
+                kind: CastKind::DoubleColon,
+                expr: Box::new(transform_expr(right)),
+                data_type: DataType::Text,
+                array: false,
+                format: None,
+            },
+        )
+    } else if right_col
+        .as_ref()
+        .map(|c| KNOWN_TEXT_COLUMNS.contains(&c.as_str()))
+        .unwrap_or(false)
+        && is_number_literal(&left)
+    {
+        (
+            Expr::Cast {
+                kind: CastKind::DoubleColon,
+                expr: Box::new(transform_expr(left)),
+                data_type: DataType::Text,
+                array: false,
+                format: None,
+            },
+            transform_expr(right),
+        )
+    } else if left_col
+        .as_ref()
+        .map(|c| KNOWN_INT_COLUMNS.contains(&c.as_str()))
+        .unwrap_or(false)
+        && is_string_literal(&right)
+    {
+        // int_col = '123' → int_col = CAST('123' AS INTEGER)
+        (
+            transform_expr(left),
+            Expr::Cast {
+                kind: CastKind::Cast,
+                expr: Box::new(transform_expr(right)),
+                data_type: DataType::Integer(None),
+                array: false,
+                format: None,
+            },
+        )
+    } else if right_col
+        .as_ref()
+        .map(|c| KNOWN_INT_COLUMNS.contains(&c.as_str()))
+        .unwrap_or(false)
+        && is_string_literal(&left)
+    {
+        (
+            Expr::Cast {
+                kind: CastKind::Cast,
+                expr: Box::new(transform_expr(left)),
+                data_type: DataType::Integer(None),
+                array: false,
+                format: None,
+            },
+            transform_expr(right),
+        )
+    } else {
+        (transform_expr(left), transform_expr(right))
+    };
+
+    Expr::BinaryOp {
+        left: Box::new(new_left),
+        op,
+        right: Box::new(new_right),
+    }
+}
+
+// ─── Fix FTS4: MATCH → @@ to_tsquery ──────────────────────────────────────────
+
+/// Transform `col MATCH 'term'` → `col_fts @@ to_tsquery('simple', E'converted_term')`
+fn transform_fts_match(left: Expr, right: Expr) -> Expr {
+    // Get the FTS column name and append _fts
+    let fts_col = match &left {
+        Expr::Identifier(ident) => Expr::Identifier(Ident::new(format!("{}_fts", ident.value))),
+        Expr::CompoundIdentifier(parts) => {
+            let mut new_parts = parts.clone();
+            if let Some(last) = new_parts.last_mut() {
+                last.value = format!("{}_fts", last.value);
+            }
+            Expr::CompoundIdentifier(new_parts)
+        }
+        _ => left,
+    };
+
+    // Convert the match term to tsquery syntax
+    let term_str = match &right {
+        Expr::Value(ValueWithSpan {
+            value: Value::SingleQuotedString(s),
+            ..
+        }) => convert_fts_term(s),
+        _ => {
+            return Expr::BinaryOp {
+                left: Box::new(fts_col),
+                op: BinaryOperator::AtAt,
+                right: Box::new(right),
+            }
+        }
+    };
+
+    // Build: col_fts @@ to_tsquery('simple', E'term')
+    let tsquery_call = Expr::Function(Function {
+        name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("to_tsquery"))]),
+        uses_odbc_syntax: false,
+        parameters: FunctionArguments::None,
+        args: FunctionArguments::List(FunctionArgumentList {
+            duplicate_treatment: None,
+            args: vec![
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(ValueWithSpan {
+                    value: Value::SingleQuotedString("simple".to_string()),
+                    span: Span::empty(),
+                }))),
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(ValueWithSpan {
+                    value: Value::EscapedStringLiteral(term_str),
+                    span: Span::empty(),
+                }))),
+            ],
+            clauses: vec![],
+        }),
+        filter: None,
+        null_treatment: None,
+        over: None,
+        within_group: vec![],
+    });
+
+    Expr::BinaryOp {
+        left: Box::new(fts_col),
+        op: BinaryOperator::AtAt,
+        right: Box::new(tsquery_call),
+    }
+}
+
+/// Convert SQLite FTS term syntax to PostgreSQL tsquery syntax.
+///
+/// | SQLite         | PostgreSQL tsquery |
+/// |----------------|-------------------|
+/// | `term`         | `term`            |
+/// | `term1 term2`  | `term1 & term2`   |
+/// | `-term`        | `!term`           |
+/// | `term1 OR term2`| `term1 | term2`  |
+/// | `"exact phrase"`| `exact <-> phrase`|
+/// | `'` (quote)    | stripped           |
+fn convert_fts_term(input: &str) -> String {
+    let mut result = String::new();
+    let mut chars = input.chars().peekable();
+    let mut need_and = false;
+
+    while let Some(&c) = chars.peek() {
+        match c {
+            // Negation
+            '-' => {
+                if need_and {
+                    result.push_str(" & ");
+                }
+                chars.next();
+                result.push('!');
+                need_and = false;
+            }
+            // Phrase: "word1 word2" → word1 <-> word2
+            '"' => {
+                if need_and {
+                    result.push_str(" & ");
+                }
+                chars.next(); // skip opening "
+                let mut phrase = String::new();
+                while let Some(&pc) = chars.peek() {
+                    if pc == '"' {
+                        chars.next();
+                        break;
+                    }
+                    phrase.push(pc);
+                    chars.next();
+                }
+                let words: Vec<&str> = phrase.split_whitespace().collect();
+                result.push_str(&words.join(" <-> "));
+                need_and = true;
+            }
+            // Single quote — strip (not valid in tsquery)
+            '\'' => {
+                chars.next();
+            }
+            // Whitespace — check for OR or implicit AND
+            ' ' | '\t' | '\n' => {
+                chars.next();
+                // Skip whitespace
+                while let Some(&wc) = chars.peek() {
+                    if wc == ' ' || wc == '\t' || wc == '\n' {
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                // Check for OR keyword
+                if chars.peek() == Some(&'O') || chars.peek() == Some(&'o') {
+                    let rest: String = chars.clone().take(3).collect();
+                    if rest.to_uppercase().starts_with("OR ")
+                        || (rest.len() >= 2 && rest[..2].to_uppercase() == "OR" && rest.len() == 2)
+                    {
+                        chars.next(); // O
+                        chars.next(); // R
+                                      // skip space after OR
+                        while let Some(&wc) = chars.peek() {
+                            if wc == ' ' {
+                                chars.next();
+                            } else {
+                                break;
+                            }
+                        }
+                        result.push_str(" | ");
+                        need_and = false;
+                        continue;
+                    }
+                }
+                // Implicit AND (space between terms)
+                if need_and && chars.peek().is_some() {
+                    result.push_str(" & ");
+                    need_and = false;
+                }
+            }
+            // Regular character — part of a term
+            _ => {
+                if !need_and {
+                    // First char of a new term
+                }
+                result.push(c);
+                chars.next();
+                need_and = true;
+            }
+        }
+    }
+    result
 }
 
 /// Wrap an expression in LOWER(…)

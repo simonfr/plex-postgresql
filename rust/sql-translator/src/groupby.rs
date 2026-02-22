@@ -22,6 +22,9 @@ fn transform_query(q: &mut Query) {
         }
     }
 
+    // Check if this is a SELECT (not DELETE/UPDATE/INSERT subquery)
+    let is_select = matches!(q.body.as_ref(), SetExpr::Select(_));
+
     // Collect info from SELECT body before mutating order_by
     let (has_distinct, gb_exprs, agg_map) = if let SetExpr::Select(sel) = q.body.as_ref() {
         let has_distinct = matches!(sel.distinct, Some(Distinct::Distinct));
@@ -66,9 +69,50 @@ fn transform_query(q: &mut Query) {
             }
         }
 
+        // HAVING alias expansion: replace aliases with their underlying expressions
+        if sel.having.is_some() {
+            let alias_map = build_alias_map(&sel.projection);
+            if let Some(ref mut having) = sel.having {
+                expand_aliases_in_expr(having, &alias_map);
+            }
+        }
+
         // Recurse into subqueries in FROM
         for twj in &mut sel.from {
             transform_table_with_joins(twj);
+        }
+    }
+
+    // NULLS FIRST: when GROUP BY is present and no ORDER BY exists,
+    // add ORDER BY 1 NULLS FIRST to ensure SOCI sees NULLs first
+    // (prevents "Null value not allowed" errors).
+    if is_select && has_group_by && !has_distinct && q.order_by.is_none() {
+        q.order_by = Some(OrderBy {
+            kind: OrderByKind::Expressions(vec![OrderByExpr {
+                expr: Expr::Value(ValueWithSpan {
+                    value: Value::Number("1".to_string(), false),
+                    span: Span::empty(),
+                }),
+                options: OrderByOptions {
+                    asc: None,
+                    nulls_first: Some(true),
+                },
+                with_fill: None,
+            }]),
+            interpolate: None,
+        });
+    }
+
+    // NULLS FIRST: when GROUP BY + existing ORDER BY, add NULLS FIRST to each expr
+    if is_select && has_group_by && !has_distinct {
+        if let Some(ref mut ob) = q.order_by {
+            if let OrderByKind::Expressions(ref mut exprs) = ob.kind {
+                for oe in exprs.iter_mut() {
+                    if oe.options.nulls_first.is_none() {
+                        oe.options.nulls_first = Some(true);
+                    }
+                }
+            }
         }
     }
 }
@@ -261,6 +305,47 @@ fn find_agg_for_expr(expr: &Expr, agg_map: &AggMap) -> Option<Expr> {
         }
     }
     None
+}
+
+// ─── HAVING alias expansion ───────────────────────────────────────────────────
+
+/// Build a map from alias name → expression for SELECT aliases.
+/// E.g. `count(media_items.id) AS cnt` → ("cnt", Expr::Function(count(…)))
+fn build_alias_map(projection: &[SelectItem]) -> Vec<(String, Expr)> {
+    let mut map = Vec::new();
+    for item in projection {
+        if let SelectItem::ExprWithAlias { expr, alias } = item {
+            map.push((alias.value.to_lowercase(), expr.clone()));
+        }
+    }
+    map
+}
+
+/// Replace bare identifier references in an expression with their aliased expressions.
+/// E.g. `cnt = 0` → `count(media_items.id) = 0`
+fn expand_aliases_in_expr(expr: &mut Expr, alias_map: &[(String, Expr)]) {
+    match expr {
+        Expr::Identifier(ident) => {
+            let name = ident.value.to_lowercase();
+            for (alias, replacement) in alias_map {
+                if &name == alias {
+                    *expr = replacement.clone();
+                    return;
+                }
+            }
+        }
+        Expr::BinaryOp { left, right, .. } => {
+            expand_aliases_in_expr(left, alias_map);
+            expand_aliases_in_expr(right, alias_map);
+        }
+        Expr::UnaryOp { expr: inner, .. } => {
+            expand_aliases_in_expr(inner, alias_map);
+        }
+        Expr::Nested(inner) => {
+            expand_aliases_in_expr(inner, alias_map);
+        }
+        _ => {}
+    }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

@@ -17,6 +17,11 @@
 #include <unistd.h>
 #include "shim_alloc.h"
 
+// Rust FFI: pure helpers migrated to rust/sql-translator/src/pg_client.rs
+extern uint64_t rust_hash_sql(const char *sql);
+extern int rust_is_stale_sqlstate(const char *sqlstate);
+extern int rust_is_duplicate_sqlstate(const char *sqlstate);
+
 // Socket timeout for PostgreSQL connections (prevents infinite poll() waits)
 #define PG_SOCKET_TIMEOUT_SEC 60
 
@@ -1504,16 +1509,9 @@ void pg_pool_cleanup_after_fork(void) {
 // Prepared Statement Cache Management
 // ============================================================================
 
-// FNV-1a hash - fast with good distribution
+// FNV-1a hash - delegated to Rust (rust/sql-translator/src/pg_client.rs)
 uint64_t pg_hash_sql(const char *sql) {
-    if (!sql) return 0;
-
-    uint64_t hash = 14695981039346656037ULL;  // FNV offset basis
-    while (*sql) {
-        hash ^= (uint64_t)(unsigned char)*sql++;
-        hash *= 1099511628211ULL;  // FNV prime
-    }
-    return hash;
+    return rust_hash_sql(sql);
 }
 
 // Lookup statement in cache by hash (O(1) average with linear probing)
@@ -1620,18 +1618,22 @@ int pg_stmt_cache_add(pg_connection_t *conn, uint64_t sql_hash, const char *stmt
 
 // Check if a PGresult is a "prepared statement does not exist" error.
 // Uses SQLSTATE 26000 (invalid_sql_statement_name) — locale-independent.
+// SQLSTATE extraction stays in C (requires PGresult); string comparison
+// is delegated to Rust (rust/sql-translator/src/pg_client.rs).
 int pg_is_stale_prepared_stmt(PGresult *res) {
     if (!res) return 0;
     const char *sqlstate = PQresultErrorField(res, PG_DIAG_SQLSTATE);
-    return sqlstate && strcmp(sqlstate, "26000") == 0;
+    return rust_is_stale_sqlstate(sqlstate);
 }
 
 // Check if a PGresult is a "prepared statement already exists" error.
 // Uses SQLSTATE 42P05 (duplicate_prepared_statement) — locale-independent.
+// SQLSTATE extraction stays in C (requires PGresult); string comparison
+// is delegated to Rust (rust/sql-translator/src/pg_client.rs).
 int pg_is_duplicate_prepared_stmt(PGresult *res) {
     if (!res) return 0;
     const char *sqlstate = PQresultErrorField(res, PG_DIAG_SQLSTATE);
-    return sqlstate && strcmp(sqlstate, "42P05") == 0;
+    return rust_is_duplicate_sqlstate(sqlstate);
 }
 
 // Clear local prepared statement cache without sending DEALLOCATE to server.

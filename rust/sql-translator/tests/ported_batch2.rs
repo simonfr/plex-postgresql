@@ -38,7 +38,6 @@ fn keyword_notnull() {
 }
 
 #[test]
-#[ignore] // GAP: ALTER TABLE not yet supported
 fn keyword_alter_table_add_quoted() {
     let t = translate("ALTER TABLE 'metadata_items' ADD 'new_col' TEXT").unwrap();
     let up = t.sql.to_uppercase();
@@ -50,7 +49,6 @@ fn keyword_alter_table_add_quoted() {
 }
 
 #[test]
-#[ignore] // GAP: ALTER TABLE not yet supported
 fn keyword_alter_table_add_dblquoted() {
     let t = translate("ALTER TABLE \"metadata_items\" ADD \"new_col\" TEXT").unwrap();
     let up = t.sql.to_uppercase();
@@ -62,7 +60,6 @@ fn keyword_alter_table_add_dblquoted() {
 }
 
 #[test]
-#[ignore] // GAP: ALTER TABLE not yet supported
 fn keyword_alter_table_add_unquoted() {
     let t = translate("ALTER TABLE metadata_items ADD new_col TEXT").unwrap();
     let up = t.sql.to_uppercase();
@@ -196,7 +193,6 @@ fn keyword_group_by_null() {
 }
 
 #[test]
-#[ignore] // GAP: HAVING cnt expansion not implemented
 fn keyword_having_cnt() {
     let t = translate(
         "SELECT library_section_id, count(media_items.id) as cnt \
@@ -341,7 +337,6 @@ fn keyword_indexed_by_multiple() {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[test]
-#[ignore] // GAP: single-quote identifiers (e.g. t.'name') not handled by full pipeline
 fn quote_column_quotes() {
     let t = translate("SELECT t.'name' FROM t").unwrap();
     let sql = &t.sql;
@@ -353,7 +348,6 @@ fn quote_column_quotes() {
 }
 
 #[test]
-#[ignore] // GAP: single-quote alias (AS 'my_alias') not handled by full pipeline
 fn quote_alias_quotes() {
     let t = translate("SELECT a AS 'my_alias' FROM t").unwrap();
     let sql = &t.sql;
@@ -365,7 +359,6 @@ fn quote_alias_quotes() {
 }
 
 #[test]
-#[ignore] // GAP: single-quote DDL table name not handled
 fn quote_ddl_table() {
     let t = translate("CREATE TABLE 'my_table' (id INTEGER)").unwrap();
     let sql = &t.sql;
@@ -438,7 +431,6 @@ fn quote_if_not_exists_already() {
 }
 
 #[test]
-#[ignore] // GAP: ON CONFLICT("name") → ON CONFLICT(name) unquoting
 fn quote_on_conflict_unquote() {
     let t =
         translate("INSERT INTO t (id, name) VALUES (1, 'val') ON CONFLICT(\"name\") DO NOTHING")
@@ -702,6 +694,20 @@ fn upsert_unknown_table_no_columns() {
     assert!(
         up.contains("INSERT"),
         "should produce INSERT, got: {}",
+        t.sql
+    );
+}
+
+#[test]
+fn mixed_case_join_on_clause_quoted() {
+    // Specifically test that mixed-case alias references in ON clause are quoted
+    let t = translate(
+        "select taggings.id as blankKeyTaggingId, otherTags.id as nonblankKeyId from tags join tags as otherTags on otherTags.tag = tags.tag where tags.tag_value = ?"
+    ).unwrap();
+    eprintln!("SQL: {}", t.sql);
+    assert!(
+        t.sql.contains("\"otherTags\".tag"),
+        "otherTags in ON clause should be quoted, got: {}",
         t.sql
     );
 }

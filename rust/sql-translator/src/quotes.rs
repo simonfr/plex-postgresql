@@ -18,6 +18,14 @@ pub fn transform(stmt: &mut Statement) {
             if let Some(src) = &mut ins.source {
                 transform_query(src);
             }
+            // Unquote ON CONFLICT target columns (PostgreSQL wants unquoted)
+            if let Some(OnInsert::OnConflict(ref mut oc)) = ins.on {
+                if let Some(ConflictTarget::Columns(ref mut cols)) = oc.conflict_target {
+                    for col in cols {
+                        col.quote_style = None;
+                    }
+                }
+            }
         }
 
         Statement::Update(u) => {
@@ -47,6 +55,8 @@ pub fn transform(stmt: &mut Statement) {
         Statement::CreateTable(ct) => {
             // Set IF NOT EXISTS
             ct.if_not_exists = true;
+            // Fix table name quotes (single-quote → double-quote)
+            fix_object_name(&mut ct.name);
             // Fix column names and types
             for col in &mut ct.columns {
                 fix_ident(&mut col.name);
@@ -56,6 +66,25 @@ pub fn transform(stmt: &mut Statement) {
         Statement::CreateIndex(ci) => {
             // Set IF NOT EXISTS
             ci.if_not_exists = true;
+        }
+
+        Statement::AlterTable(at) => {
+            // Fix table name quotes
+            fix_object_name(&mut at.name);
+            // ALTER TABLE ADD → ADD COLUMN IF NOT EXISTS
+            for op in &mut at.operations {
+                if let AlterTableOperation::AddColumn {
+                    ref mut column_keyword,
+                    ref mut if_not_exists,
+                    ref mut column_def,
+                    ..
+                } = op
+                {
+                    *column_keyword = true;
+                    *if_not_exists = true;
+                    fix_ident(&mut column_def.name);
+                }
+            }
         }
 
         _ => {}
@@ -142,7 +171,8 @@ fn transform_table_with_joins(twj: &mut TableWithJoins) {
     for join in &mut twj.joins {
         transform_table_factor(&mut join.relation);
         match &mut join.join_operator {
-            JoinOperator::Inner(JoinConstraint::On(e))
+            JoinOperator::Join(JoinConstraint::On(e))
+            | JoinOperator::Inner(JoinConstraint::On(e))
             | JoinOperator::LeftOuter(JoinConstraint::On(e))
             | JoinOperator::RightOuter(JoinConstraint::On(e))
             | JoinOperator::FullOuter(JoinConstraint::On(e)) => {
@@ -180,7 +210,8 @@ fn transform_table_factor(tf: &mut TableFactor) {
 /// (PostgreSQL folds unquoted identifiers to lowercase, so mixed-case names
 /// must be quoted to preserve their case).
 fn fix_ident(ident: &mut Ident) {
-    if ident.quote_style == Some('`') {
+    if ident.quote_style == Some('`') || ident.quote_style == Some('\'') {
+        // Backtick and single-quote identifiers → double-quote
         ident.quote_style = Some('"');
     } else if ident.quote_style.is_none() && needs_quoting(&ident.value) {
         ident.quote_style = Some('"');
@@ -336,5 +367,15 @@ mod tests {
     fn quotes_create_index_if_not_exists_added() {
         let r = translate("CREATE INDEX idx_foo ON t(id)").unwrap();
         assert!(r.sql.to_uppercase().contains("IF NOT EXISTS"));
+    }
+
+    #[test]
+    fn quotes_join_on_mixed_case() {
+        let r = translate("select taggings.id as blankKeyTaggingId, otherTags.id as nonblankKeyId from tags join tags as otherTags on otherTags.tag = tags.tag where tags.tag_value = ?").unwrap();
+        assert!(
+            r.sql.contains("\"otherTags\".tag"),
+            "otherTags ref in ON clause should be quoted, got: {}",
+            r.sql
+        );
     }
 }

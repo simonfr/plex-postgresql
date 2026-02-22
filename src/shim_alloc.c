@@ -1,191 +1,148 @@
 /*
- * shim_alloc.c — Lightweight shim-only memory tracker
+ * shim_alloc.c — Hybrid C allocator wrappers + Rust tracking backend
  *
- * Tracks all malloc/free/realloc/calloc/strdup calls made by the shim.
- * Uses a small hash table to record allocation sizes so free() can
- * accurately subtract bytes. The hash table uses open addressing with
- * linear probing — simple, cache-friendly, and lock-free for reads.
+ * This file provides the allocator wrapper functions that MUST remain in C
+ * because:
+ *   1. They call real libc malloc/free/realloc/calloc/strdup (without the
+ *      macro overrides that shim_alloc.h installs for other translation units).
+ *   2. They capture __FILE__ / __LINE__ at the call site via C macros in the
+ *      header.
  *
- * Overhead: ~1MB for the tracking table + one atomic add per alloc/free.
- * Logging: one summary line every 60s at INFO level.
+ * All tracking state (atomic counters, hash table, stats, periodic logging)
+ * lives in the Rust module rust/sql-translator/src/shim_alloc.rs and is
+ * accessed here through the FFI functions declared below.
+ *
+ * Public API (defined in shim_alloc.h) is unchanged.
  */
 
 /* Must be before shim_alloc.h to prevent macro redefinition of malloc/free */
 #define SHIM_ALLOC_NO_OVERRIDE
 #include "shim_alloc.h"
-#include "pg_logging.h"
 
 #include <stdlib.h>
 #include <string.h>
-#include <stdatomic.h>
-#include <time.h>
-#include <pthread.h>
 
-/* ---- Opt-in via PLEX_PG_ALLOC_TRACK=1 / PLEX_PG_ALLOC_TRACE=1 ---- */
-static atomic_int g_enabled = -1;  /* -1 = not checked, 0 = off, 1 = track, 2 = track+trace */
+/* ---- Rust FFI declarations ---- */
 
-static inline int shim_alloc_enabled(void) {
-    int v = atomic_load(&g_enabled);
-    if (__builtin_expect(v >= 0, 1)) return v;
-    const char *env_track = getenv("PLEX_PG_ALLOC_TRACK");
-    const char *env_trace = getenv("PLEX_PG_ALLOC_TRACE");
-    if (env_trace && env_trace[0] == '1') {
-        v = 2;  /* trace implies track */
-    } else if (env_track && env_track[0] == '1') {
-        v = 1;
-    } else {
-        v = 0;
-    }
-    atomic_store(&g_enabled, v);
-    return v;
-}
+/* Returns the tracking mode: 0 = off, 1 = track, 2 = track+trace. */
+extern int rust_shim_alloc_enabled(void);
 
-static inline int shim_alloc_trace_enabled(void) {
-    return shim_alloc_enabled() >= 2;
-}
-
-/* ---- Atomic counters ---- */
-static atomic_ullong g_total_allocs   = 0;
-static atomic_ullong g_total_frees    = 0;
-static atomic_ullong g_total_reallocs = 0;
-static atomic_ullong g_bytes_alloc    = 0;
-static atomic_ullong g_bytes_freed    = 0;
-static atomic_llong  g_bytes_live     = 0;
-static atomic_ullong g_peak_live      = 0;
-static atomic_ullong g_last_log_ts    = 0;
-
-/* ---- Size tracking hash table ----
- * We need to know the size of each allocation so free() can subtract it.
- * Using a simple open-addressing hash table with pointer keys.
- * 64K entries = 1MB, should be more than enough for shim allocations.
+/*
+ * Record a new allocation in the Rust hash table.
+ * Called AFTER a successful malloc/calloc/strdup so ptr is always non-NULL.
  */
-#define ALLOC_TABLE_SIZE  (1 << 16)  /* 65536 entries */
-#define ALLOC_TABLE_MASK  (ALLOC_TABLE_SIZE - 1)
+extern void rust_shim_alloc_record(unsigned long long ptr,
+                                    unsigned long long size,
+                                    const char        *file,
+                                    int                line);
 
-typedef struct {
-    _Atomic(void *)       ptr;    /* NULL = empty slot */
-    _Atomic(size_t)       size;
-    const char           *file;   /* source file (static string, no alloc) */
-    int                   line;   /* source line */
-} alloc_entry_t;
+/*
+ * Remove a pointer from the Rust hash table.
+ * Returns the previously recorded size (0 if not found).
+ */
+extern unsigned long long rust_shim_alloc_remove(unsigned long long ptr);
 
-static alloc_entry_t g_alloc_table[ALLOC_TABLE_SIZE];
+/* Increment allocation counters (total_allocs, bytes_alloc, bytes_live). */
+extern void rust_shim_alloc_record_alloc(unsigned long long size);
 
-static inline unsigned int ptr_hash(const void *p) {
-    unsigned long long v = (unsigned long long)p;
-    v = (v >> 4) ^ (v >> 16) ^ (v >> 28);
-    return (unsigned int)(v & ALLOC_TABLE_MASK);
-}
+/* Increment free counters (total_frees, bytes_freed, bytes_live). */
+extern void rust_shim_alloc_record_free(unsigned long long size);
 
-/* Record an allocation. Returns 1 if stored, 0 if table full (size lost). */
-static int alloc_table_put(void *ptr, size_t size, const char *file, int line) {
-    if (!ptr) return 0;
-    unsigned int idx = ptr_hash(ptr);
-    for (int i = 0; i < 64; i++) {  /* max 64 probes */
-        unsigned int slot = (idx + i) & ALLOC_TABLE_MASK;
-        void *expected = NULL;
-        if (atomic_compare_exchange_strong(&g_alloc_table[slot].ptr, &expected, ptr)) {
-            atomic_store(&g_alloc_table[slot].size, size);
-            g_alloc_table[slot].file = file;
-            g_alloc_table[slot].line = line;
-            return 1;
-        }
-        /* Slot taken by same ptr? (realloc scenario) */
-        if (expected == ptr) {
-            atomic_store(&g_alloc_table[slot].size, size);
-            g_alloc_table[slot].file = file;
-            g_alloc_table[slot].line = line;
-            return 1;
-        }
-    }
-    return 0;  /* table full in this neighborhood */
-}
+/* Increment realloc counters (total_reallocs, live bytes delta). */
+extern void rust_shim_alloc_record_realloc(unsigned long long old_size,
+                                            unsigned long long new_size);
 
-/* Remove and return the size of an allocation. Returns 0 if not found. */
-static size_t alloc_table_remove(void *ptr) {
-    if (!ptr) return 0;
-    unsigned int idx = ptr_hash(ptr);
-    for (int i = 0; i < 64; i++) {
-        unsigned int slot = (idx + i) & ALLOC_TABLE_MASK;
-        void *stored = atomic_load(&g_alloc_table[slot].ptr);
-        if (stored == ptr) {
-            size_t sz = atomic_load(&g_alloc_table[slot].size);
-            atomic_store(&g_alloc_table[slot].ptr, (void *)NULL);
-            atomic_store(&g_alloc_table[slot].size, (size_t)0);
-            return sz;
-        }
-        if (stored == NULL) return 0;  /* empty = not in table */
-    }
-    return 0;
-}
+/* Fill *out with a stats snapshot (identical layout to shim_alloc_stats_t). */
+extern void rust_shim_alloc_get_stats(shim_alloc_stats_t *out);
 
-/* Update peak if current live exceeds it */
-static void update_peak(void) {
-    long long live = atomic_load(&g_bytes_live);
-    if (live < 0) return;
-    unsigned long long ulive = (unsigned long long)live;
-    unsigned long long peak = atomic_load(&g_peak_live);
-    while (ulive > peak) {
-        if (atomic_compare_exchange_weak(&g_peak_live, &peak, ulive)) break;
-    }
-}
+/* Force-log a one-line summary now. */
+extern void rust_shim_alloc_log_summary(void);
 
-/* ---- Public API ---- */
+/* Log a summary if 60 s have elapsed since the last one. */
+extern void rust_shim_alloc_maybe_log(void);
 
-void *shim_malloc_tracked(size_t size, const char *file, int line) {
+/* Log live allocation sites (stub in Rust backend — no file:line stored). */
+extern void rust_shim_alloc_dump_leaks(void);
+
+/* Reset all counters and clear the hash table. */
+extern void rust_shim_alloc_reset(void);
+
+/* ---- Allocator wrappers ---- */
+
+/*
+ * Each wrapper:
+ *   1. Calls the real libc function (no macro override active here).
+ *   2. If tracking is enabled AND the call succeeded, updates Rust state.
+ *
+ * The record + record_alloc calls are intentionally separate so the C side
+ * can pass __FILE__/__LINE__ to rust_shim_alloc_record without the Rust side
+ * needing to know about C preprocessor macros.
+ */
+
+void *shim_malloc_tracked(size_t size, const char *file, int line)
+{
     void *ptr = malloc(size);
-    if (ptr && shim_alloc_enabled()) {
-        atomic_fetch_add(&g_total_allocs, 1);
-        atomic_fetch_add(&g_bytes_alloc, (unsigned long long)size);
-        atomic_fetch_add(&g_bytes_live, (long long)size);
-        alloc_table_put(ptr, size, file, line);
-        update_peak();
+    if (ptr && rust_shim_alloc_enabled()) {
+        rust_shim_alloc_record((unsigned long long)ptr,
+                               (unsigned long long)size, file, line);
+        rust_shim_alloc_record_alloc((unsigned long long)size);
     }
     return ptr;
 }
 
-void *shim_calloc_tracked(size_t count, size_t size, const char *file, int line) {
-    void *ptr = calloc(count, size);
+void *shim_calloc_tracked(size_t count, size_t size, const char *file, int line)
+{
+    void  *ptr   = calloc(count, size);
     size_t total = count * size;
-    if (ptr && shim_alloc_enabled()) {
-        atomic_fetch_add(&g_total_allocs, 1);
-        atomic_fetch_add(&g_bytes_alloc, (unsigned long long)total);
-        atomic_fetch_add(&g_bytes_live, (long long)total);
-        alloc_table_put(ptr, total, file, line);
-        update_peak();
+    if (ptr && rust_shim_alloc_enabled()) {
+        rust_shim_alloc_record((unsigned long long)ptr,
+                               (unsigned long long)total, file, line);
+        rust_shim_alloc_record_alloc((unsigned long long)total);
     }
     return ptr;
 }
 
-void *shim_realloc_tracked(void *old_ptr, size_t new_size, const char *file, int line) {
-    if (!shim_alloc_enabled()) return realloc(old_ptr, new_size);
-    size_t old_size = alloc_table_remove(old_ptr);
+void *shim_realloc_tracked(void *old_ptr, size_t new_size,
+                            const char *file, int line)
+{
+    if (!rust_shim_alloc_enabled()) {
+        return realloc(old_ptr, new_size);
+    }
+
+    /*
+     * Remove the old pointer before calling realloc because after the call
+     * old_ptr may be invalid (freed and reused by another thread).
+     */
+    unsigned long long old_size = rust_shim_alloc_remove((unsigned long long)old_ptr);
     void *ptr = realloc(old_ptr, new_size);
     if (ptr) {
-        atomic_fetch_add(&g_total_reallocs, 1);
-        atomic_fetch_sub(&g_bytes_live, (long long)old_size);
-        atomic_fetch_add(&g_bytes_live, (long long)new_size);
-        atomic_fetch_add(&g_bytes_alloc, (unsigned long long)new_size);
-        atomic_fetch_add(&g_bytes_freed, (unsigned long long)old_size);
-        alloc_table_put(ptr, new_size, file, line);
-        update_peak();
+        rust_shim_alloc_record((unsigned long long)ptr,
+                               (unsigned long long)new_size, file, line);
+        rust_shim_alloc_record_realloc(old_size, (unsigned long long)new_size);
+    } else {
+        /*
+         * realloc failed; old_ptr is still valid. Re-insert it so the size
+         * information is not permanently lost from the tracking table.
+         */
+        rust_shim_alloc_record((unsigned long long)old_ptr, old_size, file, line);
     }
     return ptr;
 }
 
-void shim_free_tracked(void *ptr, const char *file, int line) {
-    (void)file; (void)line;
+void shim_free_tracked(void *ptr, const char *file, int line)
+{
+    (void)file;
+    (void)line;
     if (!ptr) return;
-    if (shim_alloc_enabled()) {
-        size_t size = alloc_table_remove(ptr);
-        atomic_fetch_add(&g_total_frees, 1);
-        atomic_fetch_add(&g_bytes_freed, (unsigned long long)size);
-        atomic_fetch_sub(&g_bytes_live, (long long)size);
+    if (rust_shim_alloc_enabled()) {
+        unsigned long long size = rust_shim_alloc_remove((unsigned long long)ptr);
+        rust_shim_alloc_record_free(size);
     }
     free(ptr);
 }
 
-char *shim_strdup_tracked(const char *s, const char *file, int line) {
+char *shim_strdup_tracked(const char *s, const char *file, int line)
+{
     if (!s) return NULL;
     size_t len = strlen(s) + 1;
     char *ptr = (char *)shim_malloc_tracked(len, file, line);
@@ -193,122 +150,29 @@ char *shim_strdup_tracked(const char *s, const char *file, int line) {
     return ptr;
 }
 
-void shim_alloc_get_stats(shim_alloc_stats_t *out) {
-    if (!out) return;
-    out->total_allocs   = atomic_load(&g_total_allocs);
-    out->total_frees    = atomic_load(&g_total_frees);
-    out->total_reallocs = atomic_load(&g_total_reallocs);
-    out->bytes_allocated = atomic_load(&g_bytes_alloc);
-    out->bytes_freed    = atomic_load(&g_bytes_freed);
-    out->bytes_live     = atomic_load(&g_bytes_live);
-    out->peak_live      = atomic_load(&g_peak_live);
+/* ---- Public API: delegate to Rust ---- */
+
+void shim_alloc_get_stats(shim_alloc_stats_t *out)
+{
+    rust_shim_alloc_get_stats(out);
 }
 
-void shim_alloc_log_summary(void) {
-    shim_alloc_stats_t s;
-    shim_alloc_get_stats(&s);
-    LOG_ERROR("SHIM_ALLOC: live=%lldKB peak=%lluKB allocs=%llu frees=%llu reallocs=%llu total_alloc=%lluKB total_freed=%lluKB",
-             s.bytes_live / 1024, s.peak_live / 1024,
-             s.total_allocs, s.total_frees, s.total_reallocs,
-             s.bytes_allocated / 1024, s.bytes_freed / 1024);
+void shim_alloc_log_summary(void)
+{
+    rust_shim_alloc_log_summary();
 }
 
-void shim_alloc_dump_leaks(void) {
-    /* Aggregate live allocations by file:line */
-    typedef struct {
-        const char *file;
-        int         line;
-        size_t      total_bytes;
-        int         count;
-    } leak_site_t;
-
-    #define MAX_SITES 256
-    leak_site_t sites[MAX_SITES];
-    int num_sites = 0;
-
-    for (int i = 0; i < ALLOC_TABLE_SIZE; i++) {
-        void *ptr = atomic_load(&g_alloc_table[i].ptr);
-        if (!ptr) continue;
-        size_t sz = atomic_load(&g_alloc_table[i].size);
-        const char *file = g_alloc_table[i].file;
-        int line = g_alloc_table[i].line;
-        if (!file) continue;
-
-        /* Find or insert site */
-        int found = -1;
-        for (int j = 0; j < num_sites; j++) {
-            if (sites[j].file == file && sites[j].line == line) {
-                found = j;
-                break;
-            }
-        }
-        if (found >= 0) {
-            sites[found].total_bytes += sz;
-            sites[found].count++;
-        } else if (num_sites < MAX_SITES) {
-            sites[num_sites].file = file;
-            sites[num_sites].line = line;
-            sites[num_sites].total_bytes = sz;
-            sites[num_sites].count = 1;
-            num_sites++;
-        }
-    }
-
-    if (num_sites == 0) return;
-
-    /* Sort by total_bytes descending (simple insertion sort) */
-    for (int i = 1; i < num_sites; i++) {
-        leak_site_t tmp = sites[i];
-        int j = i - 1;
-        while (j >= 0 && sites[j].total_bytes < tmp.total_bytes) {
-            sites[j + 1] = sites[j];
-            j--;
-        }
-        sites[j + 1] = tmp;
-    }
-
-    /* Log top 15 sites */
-    int top = num_sites < 15 ? num_sites : 15;
-    LOG_ERROR("SHIM_ALLOC_TRACE: %d leak sites, top %d:", num_sites, top);
-    for (int i = 0; i < top; i++) {
-        /* Strip path to just filename */
-        const char *name = sites[i].file;
-        const char *slash = strrchr(name, '/');
-        if (slash) name = slash + 1;
-        LOG_ERROR("  #%d %s:%d — %zu bytes in %d allocs",
-                  i + 1, name, sites[i].line,
-                  sites[i].total_bytes, sites[i].count);
-    }
-    #undef MAX_SITES
+void shim_alloc_maybe_log(void)
+{
+    rust_shim_alloc_maybe_log();
 }
 
-void shim_alloc_maybe_log(void) {
-    if (!shim_alloc_enabled()) return;
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    unsigned long long now = (unsigned long long)ts.tv_sec;
-    unsigned long long prev = atomic_load(&g_last_log_ts);
-    if (now - prev < 60) return;
-    /* CAS: only one thread logs per interval */
-    if (!atomic_compare_exchange_strong(&g_last_log_ts, &prev, now)) return;
-    shim_alloc_log_summary();
-    if (shim_alloc_trace_enabled()) {
-        shim_alloc_dump_leaks();
-    }
+void shim_alloc_dump_leaks(void)
+{
+    rust_shim_alloc_dump_leaks();
 }
 
-void shim_alloc_reset(void) {
-    atomic_store(&g_total_allocs, 0);
-    atomic_store(&g_total_frees, 0);
-    atomic_store(&g_total_reallocs, 0);
-    atomic_store(&g_bytes_alloc, 0);
-    atomic_store(&g_bytes_freed, 0);
-    atomic_store(&g_bytes_live, 0);
-    atomic_store(&g_peak_live, 0);
-    for (int i = 0; i < ALLOC_TABLE_SIZE; i++) {
-        atomic_store(&g_alloc_table[i].ptr, (void *)NULL);
-        atomic_store(&g_alloc_table[i].size, (size_t)0);
-        g_alloc_table[i].file = NULL;
-        g_alloc_table[i].line = 0;
-    }
+void shim_alloc_reset(void)
+{
+    rust_shim_alloc_reset();
 }

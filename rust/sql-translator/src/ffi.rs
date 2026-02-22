@@ -6,7 +6,7 @@
 ///   sql_translator_free()            — free a string returned by translate()
 ///   sql_translator_last_error()      — return last error message for this thread
 ///   sql_translator_translate_full()  — translate and return a full SqlTranslation struct
-///   sql_translator_translation_free()— free the sql field inside a SqlTranslation pointer
+///   sql_translator_translation_free()— free sql + param_names inside a SqlTranslation
 use std::cell::RefCell;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
@@ -34,7 +34,6 @@ fn set_last_error(msg: &str) {
 /// error description can be retrieved with `sql_translator_last_error()`.
 #[no_mangle]
 pub extern "C" fn sql_translator_translate(sql: *const c_char) -> *mut c_char {
-    // NULL input → error
     if sql.is_null() {
         set_last_error("sql_translator_translate: received NULL pointer");
         return std::ptr::null_mut();
@@ -70,7 +69,6 @@ pub extern "C" fn sql_translator_free(ptr: *mut c_char) {
     if ptr.is_null() {
         return;
     }
-    // Safety: ptr was created by CString::into_raw() in this crate.
     unsafe {
         drop(CString::from_raw(ptr));
     }
@@ -97,29 +95,35 @@ pub extern "C" fn sql_translator_last_error() -> *const c_char {
 ///
 /// - `sql`         — heap-allocated C string; free with `sql_translator_free()`.
 /// - `param_count` — number of bind parameters (`$1`, `$2`, …).
+/// - `param_names` — heap-allocated array of `param_count` C strings (or NULLs).
+///                   For `?` placeholders the entry is NULL; for `:name` it's the name.
+///                   The array AND each non-NULL string must be freed by the caller
+///                   (or use `sql_translator_translation_free()`).
 /// - `success`     — 1 on success, 0 on error.
 /// - `error`       — null-terminated error message (empty string on success).
 #[repr(C)]
 pub struct SqlTranslation {
-    /// Must be freed with sql_translator_free() when success == 1.
     pub sql: *mut c_char,
     pub param_count: i32,
-    /// 1 = ok, 0 = error
+    pub param_names: *mut *mut c_char,
     pub success: i32,
-    /// Null-terminated error message (only meaningful when success == 0).
     pub error: [u8; 256],
 }
 
 /// Translate SQLite SQL and return a full `SqlTranslation` struct.
 ///
-/// On success `success` is 1 and `sql` points to a heap-allocated C string that
-/// **must** be freed with `sql_translator_free()`.
-/// On failure `success` is 0, `sql` is NULL and `error` contains the message.
+/// On success `success` is 1 and `sql` points to a heap-allocated C string.
+/// `param_names` is a heap-allocated array of `param_count` pointers:
+///   - NULL for positional `?` placeholders
+///   - heap-allocated C string for named `:name` placeholders
+///
+/// Free everything with `sql_translator_translation_free()`.
 #[no_mangle]
 pub extern "C" fn sql_translator_translate_full(sql: *const c_char) -> SqlTranslation {
     let mut result = SqlTranslation {
         sql: std::ptr::null_mut(),
         param_count: 0,
+        param_names: std::ptr::null_mut(),
         success: 0,
         error: [0u8; 256],
     };
@@ -149,7 +153,29 @@ pub extern "C" fn sql_translator_translate_full(sql: *const c_char) -> SqlTransl
 
     match crate::translate(sql_str) {
         Ok(t) => {
-            result.param_count = t.param_names.len() as i32;
+            let count = t.param_names.len();
+            result.param_count = count as i32;
+
+            // Build param_names C array
+            if count > 0 {
+                let layout = std::alloc::Layout::array::<*mut c_char>(count).unwrap();
+                let arr = unsafe { std::alloc::alloc(layout) as *mut *mut c_char };
+                if !arr.is_null() {
+                    for (i, name) in t.param_names.iter().enumerate() {
+                        let ptr = match name {
+                            Some(n) => CString::new(n.as_str())
+                                .map(|cs| cs.into_raw())
+                                .unwrap_or(std::ptr::null_mut()),
+                            None => std::ptr::null_mut(),
+                        };
+                        unsafe {
+                            *arr.add(i) = ptr;
+                        }
+                    }
+                    result.param_names = arr;
+                }
+            }
+
             match CString::new(t.sql) {
                 Ok(cs) => {
                     result.sql = cs.into_raw();
@@ -160,6 +186,9 @@ pub extern "C" fn sql_translator_translate_full(sql: *const c_char) -> SqlTransl
                         &mut result.error,
                         &format!("translated SQL contains NUL: {e}"),
                     );
+                    // Clean up param_names on failure
+                    free_param_names(result.param_names, count);
+                    result.param_names = std::ptr::null_mut();
                 }
             }
         }
@@ -171,11 +200,29 @@ pub extern "C" fn sql_translator_translate_full(sql: *const c_char) -> SqlTransl
     result
 }
 
-/// Free the `sql` field inside a `SqlTranslation` pointer.
+/// Free the param_names array and its contents.
+fn free_param_names(arr: *mut *mut c_char, count: usize) {
+    if arr.is_null() {
+        return;
+    }
+    for i in 0..count {
+        let ptr = unsafe { *arr.add(i) };
+        if !ptr.is_null() {
+            unsafe {
+                drop(CString::from_raw(ptr));
+            }
+        }
+    }
+    let layout = std::alloc::Layout::array::<*mut c_char>(count).unwrap();
+    unsafe {
+        std::alloc::dealloc(arr as *mut u8, layout);
+    }
+}
+
+/// Free all heap-allocated fields inside a `SqlTranslation`.
 ///
-/// This is a convenience wrapper — it is equivalent to calling
-/// `sql_translator_free(t->sql)` followed by setting `t->sql = NULL`.
-/// Passing NULL is safe and a no-op.
+/// Frees `sql`, each non-NULL entry in `param_names`, and the `param_names`
+/// array itself.  Passing NULL is safe and a no-op.
 #[no_mangle]
 pub extern "C" fn sql_translator_translation_free(t: *mut SqlTranslation) {
     if t.is_null() {
@@ -187,6 +234,8 @@ pub extern "C" fn sql_translator_translation_free(t: *mut SqlTranslation) {
             drop(CString::from_raw(trans.sql));
             trans.sql = std::ptr::null_mut();
         }
+        free_param_names(trans.param_names, trans.param_count as usize);
+        trans.param_names = std::ptr::null_mut();
     }
 }
 
@@ -217,7 +266,7 @@ mod tests {
 
     #[test]
     fn ffi_free_null_is_safe() {
-        sql_translator_free(std::ptr::null_mut()); // should not crash
+        sql_translator_free(std::ptr::null_mut());
     }
 
     #[test]
@@ -229,6 +278,35 @@ mod tests {
         assert!(!result.sql.is_null());
         let s = unsafe { CStr::from_ptr(result.sql).to_string_lossy().into_owned() };
         assert!(s.contains("$1") && s.contains("$2"));
+        // param_names should be non-null with 2 entries (both NULL for ?)
+        assert!(!result.param_names.is_null());
+        unsafe {
+            assert!((*result.param_names.add(0)).is_null()); // ? → NULL
+            assert!((*result.param_names.add(1)).is_null()); // ? → NULL
+        }
         sql_translator_free(result.sql);
+        free_param_names(result.param_names, result.param_count as usize);
+    }
+
+    #[test]
+    fn ffi_full_struct_named_params() {
+        let sql = CString::new("SELECT * FROM t WHERE a = :foo AND b = :bar AND c = :foo").unwrap();
+        let result = sql_translator_translate_full(sql.as_ptr());
+        assert_eq!(result.success, 1);
+        // :foo and :bar → 2 unique params (but :foo reuses $1)
+        assert_eq!(result.param_count, 2);
+        assert!(!result.param_names.is_null());
+        unsafe {
+            let p0 = *result.param_names.add(0);
+            let p1 = *result.param_names.add(1);
+            assert!(!p0.is_null());
+            assert!(!p1.is_null());
+            let n0 = CStr::from_ptr(p0).to_string_lossy();
+            let n1 = CStr::from_ptr(p1).to_string_lossy();
+            assert_eq!(n0, "foo");
+            assert_eq!(n1, "bar");
+        }
+        let mut result = result;
+        sql_translator_translation_free(&mut result);
     }
 }

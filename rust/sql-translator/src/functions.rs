@@ -8,7 +8,7 @@ use sqlparser::ast::helpers::attached_token::AttachedToken;
 ///   last_insert_rowid()   → lastval()
 ///   json_each(x)          → json_array_elements(x)
 ///   SUBSTR(a,b,c)         → SUBSTRING(a,b,c)
-///   instr(a,b)            → STRPOS(b,a)   (arg order swapped)
+///   instr(a,b)            → STRPOS(a,b)   (same arg order)
 ///   strftime('%s',…)      → EXTRACT(EPOCH FROM …)::bigint
 ///   strftime('%Y-%m-%d',…)→ TO_CHAR(…, 'YYYY-MM-DD')
 ///   unixepoch(…)          → EXTRACT(EPOCH FROM …)::bigint
@@ -92,6 +92,20 @@ fn transform_select(sel: &mut Select) {
     for table in &mut sel.from {
         transform_table_with_joins(table);
     }
+
+    // After FROM transformation, check if json_array_elements is present.
+    // If so, cast bare `value` references in projection to ::text.
+    if has_json_array_elements_in_from(&sel.from) {
+        for item in &mut sel.projection {
+            match item {
+                SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } => {
+                    cast_json_value_to_text(e);
+                }
+                _ => {}
+            }
+        }
+    }
+
     if let Some(sel_where) = &mut sel.selection {
         transform_expr_inplace(sel_where);
     }
@@ -108,12 +122,65 @@ fn transform_select(sel: &mut Select) {
     }
 }
 
+/// Check if any FROM table is json_array_elements (was json_each before transformation)
+fn has_json_array_elements_in_from(from: &[TableWithJoins]) -> bool {
+    for twj in from {
+        if is_json_array_elements_table(&twj.relation) {
+            return true;
+        }
+        for join in &twj.joins {
+            if is_json_array_elements_table(&join.relation) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn is_json_array_elements_table(tf: &TableFactor) -> bool {
+    if let TableFactor::Table { name, .. } = tf {
+        let table_name = name
+            .0
+            .last()
+            .and_then(|p| match p {
+                ObjectNamePart::Identifier(i) => Some(i.value.to_lowercase()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        return table_name == "json_array_elements";
+    }
+    false
+}
+
+/// Cast bare `value` identifiers to ::text (for json_array_elements output)
+fn cast_json_value_to_text(expr: &mut Expr) {
+    if let Expr::Identifier(ref ident) = expr {
+        if ident.value.to_lowercase() == "value" {
+            let inner = std::mem::replace(
+                expr,
+                Expr::Value(ValueWithSpan {
+                    value: Value::Null,
+                    span: Span::empty(),
+                }),
+            );
+            *expr = Expr::Cast {
+                kind: CastKind::DoubleColon,
+                expr: Box::new(inner),
+                data_type: DataType::Text,
+                array: false,
+                format: None,
+            };
+        }
+    }
+}
+
 fn transform_table_with_joins(t: &mut TableWithJoins) {
     transform_table_factor(&mut t.relation);
     for join in &mut t.joins {
         transform_table_factor(&mut join.relation);
         match &mut join.join_operator {
-            JoinOperator::Inner(JoinConstraint::On(e))
+            JoinOperator::Join(JoinConstraint::On(e))
+            | JoinOperator::Inner(JoinConstraint::On(e))
             | JoinOperator::LeftOuter(JoinConstraint::On(e))
             | JoinOperator::RightOuter(JoinConstraint::On(e))
             | JoinOperator::FullOuter(JoinConstraint::On(e)) => {
@@ -125,8 +192,50 @@ fn transform_table_with_joins(t: &mut TableWithJoins) {
 }
 
 fn transform_table_factor(f: &mut TableFactor) {
-    if let TableFactor::Derived { subquery, .. } = f {
-        transform_query(subquery);
+    match f {
+        TableFactor::Derived { subquery, .. } => {
+            transform_query(subquery);
+        }
+        TableFactor::Table { name, args, .. } => {
+            // json_each(x) in FROM clause → json_array_elements(x::json)
+            let table_name = name
+                .0
+                .last()
+                .and_then(|p| match p {
+                    ObjectNamePart::Identifier(i) => Some(i.value.to_lowercase()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            if table_name == "json_each" {
+                // Rename to json_array_elements
+                if let Some(last) = name.0.last_mut() {
+                    if let ObjectNamePart::Identifier(ref mut i) = last {
+                        i.value = "json_array_elements".to_string();
+                    }
+                }
+                // Add ::json cast to the argument
+                if let Some(TableFunctionArgs { ref mut args, .. }) = args {
+                    for arg in args.iter_mut() {
+                        if let FunctionArg::Unnamed(FunctionArgExpr::Expr(ref mut e)) = arg {
+                            *e = Expr::Cast {
+                                kind: CastKind::DoubleColon,
+                                expr: Box::new(std::mem::replace(
+                                    e,
+                                    Expr::Value(ValueWithSpan {
+                                        value: Value::Null,
+                                        span: Span::empty(),
+                                    }),
+                                )),
+                                data_type: DataType::JSON,
+                                array: false,
+                                format: None,
+                            };
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -146,6 +255,14 @@ fn transform_expr(expr: Expr) -> Expr {
                     _ => None,
                 })
                 .unwrap_or_default();
+
+            // simplify_typeof_fixup: iif(typeof(X) in ('integer','real'), X, ...) → X
+            // Must run BEFORE iif→CASE conversion
+            if fn_name == "iif" {
+                if let Some(simplified) = try_simplify_typeof(&func) {
+                    return transform_expr(simplified);
+                }
+            }
 
             // First recurse into the args
             if let FunctionArguments::List(ref mut arg_list) = func.args {
@@ -237,15 +354,9 @@ fn transform_expr(expr: Expr) -> Expr {
                     Expr::Function(func)
                 }
 
-                // instr(a, b) → STRPOS(b, a)  (args swapped)
+                // instr(haystack, needle) → STRPOS(haystack, needle)  (same arg order)
                 "instr" => {
                     rename_function(&mut func, "STRPOS");
-                    // swap argument order
-                    if let FunctionArguments::List(ref mut al) = func.args {
-                        if al.args.len() == 2 {
-                            al.args.swap(0, 1);
-                        }
-                    }
                     Expr::Function(func)
                 }
 
@@ -347,11 +458,20 @@ fn transform_expr(expr: Expr) -> Expr {
             expr,
             list,
             negated,
-        } => Expr::InList {
-            expr: Box::new(transform_expr(*expr)),
-            list: list.into_iter().map(transform_expr).collect(),
-            negated,
-        },
+        } => {
+            let transformed_expr = transform_expr(*expr);
+            let mut transformed_list: Vec<Expr> = list.into_iter().map(transform_expr).collect();
+            // typeof type remapping: when expr is pg_typeof(...)::text,
+            // add PostgreSQL type aliases to the IN list
+            if is_pg_typeof_cast(&transformed_expr) {
+                add_typeof_remappings(&mut transformed_list);
+            }
+            Expr::InList {
+                expr: Box::new(transformed_expr),
+                list: transformed_list,
+                negated,
+            }
+        }
         Expr::Between {
             expr,
             negated,
@@ -398,6 +518,102 @@ fn transform_expr_inplace(expr: &mut Expr) {
 
 fn rename_function(func: &mut Function, new_name: &str) {
     func.name = ObjectName(vec![ObjectNamePart::Identifier(Ident::new(new_name))]);
+}
+
+/// Check if an expression is pg_typeof(...)::text (the result of typeof → pg_typeof conversion)
+fn is_pg_typeof_cast(expr: &Expr) -> bool {
+    if let Expr::Cast {
+        expr: inner,
+        data_type: DataType::Text,
+        ..
+    } = expr
+    {
+        if let Expr::Function(func) = inner.as_ref() {
+            let name = func
+                .name
+                .0
+                .first()
+                .and_then(|p| match p {
+                    ObjectNamePart::Identifier(i) => Some(i.value.to_lowercase()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            return name == "pg_typeof";
+        }
+    }
+    false
+}
+
+/// Remap PostgreSQL type names in an IN list for pg_typeof comparisons.
+/// SQLite typeof returns 'integer', 'real', etc. PostgreSQL pg_typeof returns
+/// 'bigint', 'double precision', etc.
+/// - 'integer' → keep AND add 'bigint'
+/// - 'real' → REPLACE with 'double precision'
+fn add_typeof_remappings(list: &mut Vec<Expr>) {
+    let mut additions = Vec::new();
+    for item in list.iter_mut() {
+        if let Expr::Value(ValueWithSpan {
+            value: Value::SingleQuotedString(ref mut s),
+            ..
+        }) = item
+        {
+            match s.to_lowercase().as_str() {
+                "integer" => {
+                    additions.push(make_string_literal("bigint"));
+                }
+                "real" => {
+                    // Replace 'real' with 'double precision' (not alongside)
+                    *s = "double precision".to_string();
+                }
+                _ => {}
+            }
+        }
+    }
+    list.extend(additions);
+}
+
+fn make_string_literal(s: &str) -> Expr {
+    Expr::Value(ValueWithSpan {
+        value: Value::SingleQuotedString(s.to_string()),
+        span: Span::empty(),
+    })
+}
+
+/// Detect the pattern: iif(typeof(X) in ('integer','real'), X, strftime('%s', X, 'utc'))
+/// and simplify to just X. In PostgreSQL, columns have fixed types so the
+/// conditional typeof check is unnecessary.
+fn try_simplify_typeof(func: &Function) -> Option<Expr> {
+    if let FunctionArguments::List(ref al) = func.args {
+        if al.args.len() >= 2 {
+            // First arg should be: typeof(X) IN ('integer', 'real', ...)
+            let first = match &al.args[0] {
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) => e,
+                _ => return None,
+            };
+            // Check if first arg is typeof(...) IN (...)
+            if let Expr::InList { expr, .. } = first {
+                if let Expr::Function(inner_func) = expr.as_ref() {
+                    let inner_name = inner_func
+                        .name
+                        .0
+                        .first()
+                        .and_then(|p| match p {
+                            ObjectNamePart::Identifier(i) => Some(i.value.to_lowercase()),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    if inner_name == "typeof" {
+                        // Second arg is the "then" value — just return it
+                        if let FunctionArg::Unnamed(FunctionArgExpr::Expr(then_expr)) = &al.args[1]
+                        {
+                            return Some(then_expr.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Extract all `FunctionArg::Unnamed(FunctionArgExpr::Expr(…))` args.
@@ -489,11 +705,8 @@ fn transform_strftime(mut func: Function) -> Expr {
         _ => return Expr::Function(func),
     };
 
-    let mut source = if is_now_literal(&time_arg) {
-        make_now_call()
-    } else {
-        time_arg
-    };
+    let is_now = is_now_literal(&time_arg);
+    let mut source = if is_now { make_now_call() } else { time_arg };
 
     // Apply interval if 3rd arg present
     if let Some(interval_expr) = interval_arg {
@@ -502,6 +715,11 @@ fn transform_strftime(mut func: Function) -> Expr {
 
     match fmt_str.as_str() {
         "%s" => {
+            // For non-NOW column sources, wrap in TO_TIMESTAMP() first
+            // because the column likely stores a Unix timestamp integer
+            if !is_now {
+                source = make_to_timestamp(source);
+            }
             // → EXTRACT(EPOCH FROM source)::bigint
             Expr::Cast {
                 kind: CastKind::DoubleColon,
@@ -552,6 +770,24 @@ fn translate_strftime_format(fmt: &str) -> String {
         }
     }
     result
+}
+
+/// Build a TO_TIMESTAMP(expr) function call.
+fn make_to_timestamp(source: Expr) -> Expr {
+    Expr::Function(Function {
+        name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("TO_TIMESTAMP"))]),
+        uses_odbc_syntax: false,
+        parameters: FunctionArguments::None,
+        args: FunctionArguments::List(FunctionArgumentList {
+            duplicate_treatment: None,
+            args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(source))],
+            clauses: vec![],
+        }),
+        filter: None,
+        null_treatment: None,
+        over: None,
+        within_group: vec![],
+    })
 }
 
 /// Build a TO_CHAR(expr, 'fmt') function call.

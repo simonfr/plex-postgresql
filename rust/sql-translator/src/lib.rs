@@ -4,6 +4,12 @@ pub mod ffi;
 pub mod functions;
 pub mod groupby;
 pub mod keywords;
+pub mod pg_client;
+pub mod pg_config;
+pub mod pg_logging;
+pub mod pg_mem_telemetry;
+pub mod pg_query_cache;
+pub mod pg_statement;
 /// sql-translator: SQLite → PostgreSQL SQL translation using sqlparser-rs AST
 ///
 /// Pipeline (in order):
@@ -18,6 +24,7 @@ pub mod keywords;
 pub mod placeholders;
 pub mod query;
 pub mod quotes;
+pub mod shim_alloc;
 pub mod types;
 pub mod upsert;
 

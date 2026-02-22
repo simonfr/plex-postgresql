@@ -251,7 +251,6 @@ fn groupby_complete_func_with_alias() {
 // auto-add NULLS FIRST to ORDER BY when GROUP BY is present.
 
 #[test]
-#[ignore]
 fn nulls_first_ordering() {
     // GAP: "SELECT a, count(*) FROM t GROUP BY a ORDER BY a" may add NULLS FIRST
     let t = translate("SELECT a, count(*) FROM t GROUP BY a ORDER BY a").unwrap();
@@ -288,7 +287,6 @@ fn nulls_first_existing_orderby() {
 }
 
 #[test]
-#[ignore]
 fn nulls_first_no_orderby() {
     // GAP: GROUP BY without ORDER BY → adds ORDER BY 1 NULLS FIRST
     let t = translate("SELECT a, count(*) FROM t GROUP BY a").unwrap();
@@ -301,7 +299,6 @@ fn nulls_first_no_orderby() {
 }
 
 #[test]
-#[ignore]
 fn nulls_first_before_limit() {
     // GAP: ORDER BY inserted before LIMIT
     let t = translate("SELECT a, count(*) FROM t GROUP BY a LIMIT 10").unwrap();

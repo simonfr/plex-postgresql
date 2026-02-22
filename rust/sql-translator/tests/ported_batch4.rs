@@ -92,7 +92,6 @@ fn collate_nocase_ne() {
 // ═══════════════════════════════════════════════════════════════════════
 
 #[test]
-#[ignore]
 fn fts_negation() {
     // GAP: FTS4 not implemented. MATCH -> to_tsquery with ! for negation
     let r =
@@ -111,7 +110,6 @@ fn fts_negation() {
 }
 
 #[test]
-#[ignore]
 fn fts_and_chain() {
     // GAP: FTS4 not implemented
     let r =
@@ -125,7 +123,6 @@ fn fts_and_chain() {
 }
 
 #[test]
-#[ignore]
 fn fts_or_chain() {
     // GAP: FTS4 not implemented
     let r = translate("SELECT * FROM fts4_metadata_titles WHERE title MATCH 'action OR comedy'")
@@ -139,7 +136,6 @@ fn fts_or_chain() {
 }
 
 #[test]
-#[ignore]
 fn fts_phrase() {
     // GAP: FTS4 not implemented
     let r = translate(r#"SELECT * FROM fts4_metadata_titles WHERE title MATCH '"action comedy"'"#)
@@ -153,7 +149,6 @@ fn fts_phrase() {
 }
 
 #[test]
-#[ignore]
 fn fts_single_escaped_quote() {
     // GAP: FTS4 not implemented
     let r = translate("SELECT * FROM fts4_metadata_titles WHERE title MATCH 'it''s'").unwrap();
@@ -166,7 +161,6 @@ fn fts_single_escaped_quote() {
 }
 
 #[test]
-#[ignore]
 fn fts_double_escaped_quote() {
     // GAP: FTS4 not implemented
     let r = translate("SELECT * FROM fts4_metadata_titles WHERE title MATCH 'it''''s'").unwrap();
@@ -179,7 +173,6 @@ fn fts_double_escaped_quote() {
 }
 
 #[test]
-#[ignore]
 fn fts_simple_term() {
     // GAP: FTS4 not implemented
     let r = translate("SELECT * FROM fts4_metadata_titles WHERE title MATCH 'action'").unwrap();
@@ -192,7 +185,6 @@ fn fts_simple_term() {
 }
 
 #[test]
-#[ignore]
 fn fts_mixed_quotes_and_terms() {
     // GAP: FTS4 not implemented
     let r =
@@ -281,7 +273,6 @@ fn int_text_mismatch_no_match() {
 }
 
 #[test]
-#[ignore]
 fn int_text_mismatch_pattern1() {
     // GAP: Integer/text mismatch fix not implemented
     let r = translate("SELECT * FROM metadata_items WHERE id = '123'").unwrap();
@@ -294,7 +285,6 @@ fn int_text_mismatch_pattern1() {
 }
 
 #[test]
-#[ignore]
 fn int_text_mismatch_pattern2_backtick() {
     // GAP: Integer/text mismatch fix not implemented
     let r = translate("SELECT * FROM t WHERE `status` = 1").unwrap();
@@ -307,7 +297,6 @@ fn int_text_mismatch_pattern2_backtick() {
 }
 
 #[test]
-#[ignore]
 fn int_text_mismatch_pattern2_quote() {
     // GAP: Integer/text mismatch fix not implemented
     let r = translate(r#"SELECT * FROM t WHERE "status" = 1"#).unwrap();
@@ -320,7 +309,6 @@ fn int_text_mismatch_pattern2_quote() {
 }
 
 #[test]
-#[ignore]
 fn int_text_mismatch_pattern4_download_backtick() {
     // GAP: Integer/text mismatch fix not implemented
     let r = translate("SELECT * FROM t WHERE `downloaded` = 1").unwrap();
@@ -333,7 +321,6 @@ fn int_text_mismatch_pattern4_download_backtick() {
 }
 
 #[test]
-#[ignore]
 fn int_text_mismatch_pattern4_download_quote() {
     // GAP: Integer/text mismatch fix not implemented
     let r = translate(r#"SELECT * FROM t WHERE "downloaded" = 1"#).unwrap();
@@ -346,7 +333,6 @@ fn int_text_mismatch_pattern4_download_quote() {
 }
 
 #[test]
-#[ignore]
 fn int_text_mismatch_generic_status_backtick() {
     // GAP: Integer/text mismatch fix not implemented
     let r = translate("SELECT * FROM t WHERE `state` = 0").unwrap();
@@ -359,7 +345,6 @@ fn int_text_mismatch_generic_status_backtick() {
 }
 
 #[test]
-#[ignore]
 fn int_text_mismatch_generic_status_quote() {
     // GAP: Integer/text mismatch fix not implemented
     let r = translate(r#"SELECT * FROM t WHERE "state" = 0"#).unwrap();
@@ -526,7 +511,6 @@ fn subquery_alias() {
 // ═══════════════════════════════════════════════════════════════════════
 
 #[test]
-#[ignore]
 fn collections_filter() {
     // GAP: Collections filter (metadata_type=18 removal) not implemented
     let r = translate(
