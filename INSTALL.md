@@ -6,11 +6,11 @@ Simple install steps for Docker, macOS, and Linux.
 
 ## 📦 Choose Your Platform
 
-**Latest Release:** [v0.9.40](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.40)
+**Latest Release:** [v0.9.41](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.41)
 
 Release assets are zip-only:
-- `plex-postgresql-v0.9.40-macos.zip`
-- `plex-postgresql-v0.9.40-linux.zip`
+- `plex-postgresql-v0.9.41-macos.zip`
+- `plex-postgresql-v0.9.41-linux.zip`
 
 - **[Docker](#docker-all-platforms)** - Easiest option, works on Linux/macOS/Windows
 - **[macOS](#macos-native)** - Native installation for Apple Silicon
@@ -191,7 +191,7 @@ docker-compose ps
 
 ### Option 1: Pre-compiled ZIP (Recommended)
 
-**Latest Release:** [v0.9.40](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.40)
+**Latest Release:** [v0.9.41](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.41)
 
 **1. Setup PostgreSQL**
 
@@ -210,7 +210,7 @@ psql -d plex -c "ALTER USER plex PASSWORD 'plex';"
 
 ```bash
 # Download latest macOS zip
-curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.40/plex-postgresql-v0.9.40-macos.zip -o /tmp/plex-pg-macos.zip
+curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.41/plex-postgresql-v0.9.41-macos.zip -o /tmp/plex-pg-macos.zip
 
 # Extract
 mkdir -p /tmp/plex-pg-macos && cd /tmp/plex-pg-macos
@@ -303,7 +303,7 @@ curl -s http://localhost:32400/library/sections | head -10
 
 ### Option 1: Pre-compiled ZIP (Recommended)
 
-**Latest Release:** [v0.9.40](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.40)
+**Latest Release:** [v0.9.41](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.41)
 
 **Available architectures:**
 - ✅ x86_64 (Intel/AMD 64-bit) - `db_interpose_pg-linux-x86_64.so`
@@ -331,7 +331,7 @@ sudo -u postgres psql -c "ALTER USER plex PASSWORD 'yourpassword';"
 
 ```bash
 # Download latest Linux zip
-curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.40/plex-postgresql-v0.9.40-linux.zip -o /tmp/plex-pg-linux.zip
+curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.41/plex-postgresql-v0.9.41-linux.zip -o /tmp/plex-pg-linux.zip
 
 # Extract
 mkdir -p /tmp/plex-pg-linux

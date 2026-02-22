@@ -7,21 +7,19 @@
 
 A small shim library that catches Plex SQLite calls and sends them to PostgreSQL. You do not need to change Plex source code.
 
-## 🎉 Latest Release: v0.9.40
+## 🎉 Latest Release: v0.9.41
 
-**Duplicate prepared statement handling** — SQLSTATE 42P05 detection, DEALLOCATE ALL at connection init, 299 unit tests.
+**SQL translator and PG modules migrated to Rust** — the entire SQLite-to-PostgreSQL translation pipeline now runs on Rust's `sqlparser-rs` AST engine, and all 7 backend modules have been migrated to hybrid C/Rust.
 
-- 🆕 **Duplicate stmt fix:** detects SQLSTATE 42P05 (locale-independent), replaces fragile text matching
-- 🆕 **Connection init cleanup:** DEALLOCATE ALL on new connections, eliminates PG log spam
-- ✅ Stale stmt recovery: SQLSTATE 26000, cache clear, re-prepare (v0.9.40)
-- ✅ Exec retry (Issue #8): pre-flight health check + retry wrapper for `sqlite3_exec`
-- ✅ Pool auto-grow (Issue #9): pool grows from configured size up to 200 on demand
-- ✅ **278 unit tests** (220 SQL + 41 shadow elimination + 17 connection isolation)
+- 🆕 **Rust SQL translator:** 525 Rust tests, full AST-based translation replacing the C string-manipulation translator
+- 🆕 **Rust PG modules:** pg_config, pg_logging, pg_mem_telemetry, shim_alloc, pg_query_cache, pg_statement, pg_client — all core logic in Rust
+- 🆕 **Log level cleanup:** informational pool messages demoted from ERROR to INFO
+- ✅ **1,075+ tests** (525 Rust + ~550 C across 25 suites)
 
-[📥 Download v0.9.40](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.40) | [📋 Full Release Notes](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.40)
+[📥 Download v0.9.41](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.41) | [📋 Full Release Notes](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.41)
 
 Linux and macOS release zips are built by GitHub Actions on tag push via `.github/workflows/release-linux-artifacts.yml` and `.github/workflows/release-macos-artifacts.yml`.
-Pull requests and `main` pushes run `.github/workflows/ci.yml` (script validation + Linux amd64 build check + **278 unit tests**).
+Pull requests and `main` pushes run `.github/workflows/ci.yml` (script validation + Linux amd64 build check + **1,075+ tests**).
 Docker images are published to GHCR on release tags via `.github/workflows/docker-publish.yml`:
 - `ghcr.io/cgnl/plex-postgresql-linuxserver`
 - `ghcr.io/cgnl/plex-postgresql-plexinc`
@@ -32,7 +30,7 @@ Docker images are published to GHCR on release tags via `.github/workflows/docke
 
 **macOS:**
 ```bash
-curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.40/plex-postgresql-v0.9.40-macos.zip \
+curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.41/plex-postgresql-v0.9.41-macos.zip \
   -o /tmp/plex-pg-macos.zip
 mkdir -p /tmp/plex-pg-macos && cd /tmp/plex-pg-macos
 unzip /tmp/plex-pg-macos.zip
@@ -42,7 +40,7 @@ pkill -f "Plex Media Server" 2>/dev/null || true
 
 **Linux (x86_64):**
 ```bash
-sudo curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.40/plex-postgresql-v0.9.40-linux.zip \
+sudo curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.41/plex-postgresql-v0.9.41-linux.zip \
   -o /tmp/plex-postgresql-linux.zip
 sudo unzip -j /tmp/plex-postgresql-linux.zip db_interpose_pg-linux-x86_64.so -d /usr/local/lib
 sudo mv /usr/local/lib/db_interpose_pg-linux-x86_64.so /usr/local/lib/db_interpose_pg.so
@@ -142,7 +140,7 @@ docker-compose logs -f plex
 
 **What happens:**
 - ✅ PostgreSQL schema auto-created (empty)
-- ✅ Fresh install works out of the box (v0.9.40 fixes blobs.db crash)
+- ✅ Fresh install works out of the box (v0.9.41 fixes blobs.db crash)
 - ✅ Claim flow works with both linuxserver and plexinc images
 - ✅ Multi-arch support (x86_64 + ARM64)
 - ✅ All directories pre-created (Plug-ins, Metadata, Cache)
@@ -216,7 +214,7 @@ volumes:
 Use the latest macOS zip and run the wrapper installer. The installer copies the shim dylib into `Plex Media Server.app`, patches the binaries, and sets up the wrapper script. Everything lives inside the Plex app bundle.
 
 ```bash
-curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.40/plex-postgresql-v0.9.40-macos.zip -o /tmp/plex-pg-macos.zip
+curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.41/plex-postgresql-v0.9.41-macos.zip -o /tmp/plex-pg-macos.zip
 mkdir -p /tmp/plex-pg-macos && cd /tmp/plex-pg-macos
 unzip /tmp/plex-pg-macos.zip
 
@@ -239,7 +237,7 @@ pkill -f "Plex Media Server" 2>/dev/null || true
 Use the latest Linux zip and install the binary for your CPU.
 
 ```bash
-curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.40/plex-postgresql-v0.9.40-linux.zip -o /tmp/plex-pg-linux.zip
+curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.41/plex-postgresql-v0.9.41-linux.zip -o /tmp/plex-pg-linux.zip
 mkdir -p /tmp/plex-pg-linux
 cd /tmp/plex-pg-linux
 unzip /tmp/plex-pg-linux.zip
@@ -317,6 +315,12 @@ The speed difference is small. The main win is fewer database locks.
 
 The shim catches `sqlite3_*` calls, rewrites SQLite SQL to PostgreSQL SQL, and runs it through libpq.
 
+```
+Layer 4+3: C interposer (~9,400 lines)        — fishhook, DYLD_INTERPOSE, LD_PRELOAD
+Layer 2:   Rust PG modules (hybrid C/Rust)     — pool, statement, cache, config, logging
+Layer 1:   Rust SQL translator (sqlparser-rs)   — full AST-based SQLite → PostgreSQL translation
+```
+
 **Streaming mode** (v0.9.28+): READ queries use PostgreSQL's single-row streaming (`PQsetSingleRowMode`) to fetch results row by row instead of loading the entire result set into memory. This is always on with automatic fallback to eager fetch if streaming fails. Each streaming query gets exclusive use of its connection — other queries automatically use a different connection from the pool.
 
 More technical details are in **[wiki/How It Works](https://github.com/cgnl/plex-postgresql/wiki/How-It-Works)**.
@@ -324,8 +328,9 @@ More technical details are in **[wiki/How It Works](https://github.com/cgnl/plex
 ## Testing
 
 ```bash
-make unit-test       # All unit tests (24 suites)
+make unit-test       # All C unit tests (25 suites, ~550 tests)
 make ci-test         # CI-safe subset (no LD_PRELOAD)
+cargo test           # Rust tests (525 tests) — in rust/sql-translator/
 make benchmark       # Shim micro-benchmarks
 ```
 

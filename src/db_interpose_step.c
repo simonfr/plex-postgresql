@@ -816,7 +816,7 @@ static int my_sqlite3_step_impl(sqlite3_stmt *pStmt) {
                         if (PQstatus(new_read_conn) == CONNECTION_OK) {
                             exec_conn->conn = new_read_conn;
                             exec_conn->is_pg_active = 1;
-                            LOG_ERROR("STEP READ: fresh connection succeeded (reconnected)");
+                            LOG_INFO("STEP READ: fresh connection succeeded (reconnected)");
                         } else {
                             const char *reset_err = PQerrorMessage(new_read_conn);
                             LOG_ERROR("STEP READ: fresh connection also failed: %s", reset_err ? reset_err : "(null)");
@@ -1284,7 +1284,7 @@ static int my_sqlite3_step_impl(sqlite3_stmt *pStmt) {
                     if (PQstatus(new_write_conn) == CONNECTION_OK) {
                         exec_conn->conn = new_write_conn;
                         exec_conn->is_pg_active = 1;
-                        LOG_ERROR("STEP WRITE: fresh connection succeeded (reconnected)");
+                        LOG_INFO("STEP WRITE: fresh connection succeeded (reconnected)");
                     } else {
                         const char *reset_err = PQerrorMessage(new_write_conn);
                         LOG_ERROR("STEP WRITE: fresh connection also failed: %s", reset_err ? reset_err : "(null)");

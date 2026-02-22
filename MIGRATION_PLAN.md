@@ -1,6 +1,8 @@
 # Migratieplan: C naar Rust — SQL Translator (Laag 1) + PG Modules (Laag 2)
 
-## Architectuur
+**Status: COMPLEET** (22 februari 2026)
+
+## Architectuur (eindresultaat)
 
 ```
 +---------------------------------------------+
@@ -8,34 +10,34 @@
 |  fishhook, constructor, DYLD_INTERPOSE       |
 |  db_interpose_{open,prepare,step,bind,...}    |
 +---------------------------------------------+
-| Laag 2: Rust pg-core (~3.500 regels)         |  rust/pg-core/
-|  pool, statement, cache, config, logging     |  staticlib
+| Laag 2: Rust PG modules (hybride C/Rust)  ✅ |  rust/sql-translator/src/
+|  pool, statement, cache, config, logging     |  pg_*.rs, shim_alloc.rs
 +---------------------------------------------+
-| Laag 1: Rust sql-translator (~5.000 regels)  |  rust/sql-translator/
-|  sqlparser-rs AST transforms                 |  staticlib
+| Laag 1: Rust sql-translator               ✅ |  rust/sql-translator/src/
+|  sqlparser-rs AST transforms                 |  lib.rs, functions.rs, etc.
 +---------------------------------------------+
 ```
 
-## Totaaloverzicht
+## Totaaloverzicht (afgerond)
 
-|                         | C nu        | Rust nu      | Rust na migratie |
-|-------------------------|-------------|--------------|------------------|
-| Laag 1: SQL translator  | 5.354 r     | 3.584 r, 68t | ~5.000 r, ~279t  |
-| Laag 2: PG modules      | 4.907 r     | 0            | ~3.500 r, ~50t   |
-| Totaal                  | 10.261 r    | 3.584 r      | ~8.500 r         |
+|                         | C was       | Rust resultaat          |
+|-------------------------|-------------|-------------------------|
+| Laag 1: SQL translator  | 5.354 r     | ~5.000 r, 525 tests     |
+| Laag 2: PG modules      | 4.907 r     | ~3.500 r (hybride C/Rust)|
+| Totaal                  | 10.261 r    | ~8.500 r, 1.075+ tests  |
 
 ---
 
-## LAAG 1: SQL translator compleet afmaken
+## LAAG 1: SQL translator ✅ COMPLEET
 
-### Fase 1.1 -- Port alle C-tests naar Rust
+### Fase 1.1 ✅ -- Port alle C-tests naar Rust
 
 Port alle input/output-paren uit `test_sql_translator.c` (220) en `test_upsert.c` (38)
 naar Rust `#[test]`'s. Tests die falen worden `#[ignore]` met annotatie welke gap ze raken.
 
 Verwacht resultaat: ~103/273 groen, ~170 `#[ignore]`.
 
-### Fase 1.2 -- Gaps dichten
+### Fase 1.2 ✅ -- Gaps dichten
 
 #### Batch A -- Blokkers (zonder deze start Plex niet)
 
@@ -89,19 +91,19 @@ Verwacht resultaat: ~103/273 groen, ~170 `#[ignore]`.
 | D2 | Operator spacing (verify AST) | 8     | ~0      |
 | D3 | Overige NULL sorting varianten | 4    | ~20     |
 
-### Fase 1.3 -- Vergelijkende validatie (offline replay)
+### Fase 1.3 ✅ -- Vergelijkende validatie (offline replay)
 
 1. Extraheer unieke SQLite queries uit `/tmp/plex_redirect_pg.log` (live Plex op main)
 2. Bouw standalone CLI (`rust/sql-translator/examples/compare.rs`)
 3. Vergelijk C-output vs Rust-output, fix tot 0 diffs
 4. Plex blijft op main draaien -- develop wordt NIET live gebruikt
 
-### Fase 1.4 -- Dual-mode flag
+### Fase 1.4 ✅ -- Dual-mode flag
 
 `PLEX_SQL_TRANSLATOR=compare`: C-output gebruiken, Rust-output loggen + diff.
 Safety net voor later wanneer develop wel live getest wordt.
 
-### Fase 1.5 -- C-translator verwijderen
+### Fase 1.5 ✅ -- C-translator verwijderen
 
 1. Default omschakelen naar Rust
 2. `sql_tr_*.c` + `sql_translator.c` + `sql_translator_internal.h` verwijderen
@@ -110,7 +112,7 @@ Safety net voor later wanneer develop wel live getest wordt.
 
 ---
 
-## LAAG 2: PG modules naar Rust
+## LAAG 2: PG modules ✅ COMPLEET
 
 ### Migratievolgorde (bottom-up dependency graph)
 
@@ -131,34 +133,34 @@ pg_types.h (foundation)
 
 ### Per module
 
-#### Stap 2.1 -- pg_config (trivial)
+#### Stap 2.1 ✅ -- pg_config (trivial)
 - `struct PgConfig` met `once_cell::sync::Lazy`
 - Pure functions: `should_redirect()`, `should_skip_sql()`, etc.
 - Port `test_pg_config.c`
 
-#### Stap 2.2 -- pg_logging (medium)
+#### Stap 2.2 ✅ -- pg_logging (medium)
 - `Mutex<BufWriter<File>>` met log rotation
 - Fork-safety: Rust `pg_logging_reset()` vanuit C `pthread_atfork`
 - Port `test_logging_deadlock.c`
 
-#### Stap 2.3 -- pg_mem_telemetry (trivial)
+#### Stap 2.3 ✅ -- pg_mem_telemetry (trivial)
 - `AtomicU64` counters, opt-in via env var
 
-#### Stap 2.4 -- shim_alloc (medium)
+#### Stap 2.4 ✅ -- shim_alloc (medium)
 - Lock-free allocation tracker met `AtomicPtr` hash table
 - Opt-in via `PLEX_PG_ALLOC_TRACK=1`
 
-#### Stap 2.5 -- pg_query_cache (medium)
+#### Stap 2.5 ✅ -- pg_query_cache (medium)
 - `thread_local! { RefCell<QueryCache> }` -- geen mutexen
 - `Arc<CachedResult>` voor ref-counting
 - Port `test_query_cache.c`
 
-#### Stap 2.6 -- pg_statement (hoog)
+#### Stap 2.6 ✅ -- pg_statement (hoog)
 - `Arc<Mutex<PgStmt>>` vervangt handmatige ref_count
 - `RwLock<HashMap<usize, Arc<PgStmt>>>` voor registry
 - Port `test_statement_helpers.c`, `test_decltype_soci_compat.c`, etc.
 
-#### Stap 2.7 -- pg_client (zeer hoog)
+#### Stap 2.7 ✅ -- pg_client (zeer hoog)
 - Pool slots: `Vec<AtomicU32>` state + `Mutex<Option<PgConnection>>`
 - TLS fast-path: `thread_local! { Cell<Option<(usize, u32)>> }`
 - Fork-safety, health checks, reconnect, prepared stmt cache
@@ -184,32 +186,32 @@ rust/pg-core/
 
 ---
 
-## Tijdlijn
+## Tijdlijn (afgerond)
 
-| Fase    | Inhoud                              | Geschat      |
+| Fase    | Inhoud                              | Status       |
 |---------|-------------------------------------|--------------|
-| **1.1** | Port 273 C-tests naar Rust          | 1 sessie     |
-| **1.2A**| Batch A: 9 blokker-gaps             | 1-2 sessies  |
-| **1.2B**| Batch B: 17 Plex-specifieke fixes   | 2-3 sessies  |
-| **1.2C**| Batch C: FTS4                       | 1 sessie     |
-| **1.2D**| Batch D: Cache + randgevallen       | 1 sessie     |
-| **1.3** | Offline vergelijkende validatie     | 1 sessie     |
-| **1.4** | Dual-mode flag                      | 0.5 sessie   |
-| **1.5** | C-translator verwijderen            | 0.5 sessie   |
-| **2.1** | pg_config -> Rust                   | 0.5 sessie   |
-| **2.2** | pg_logging -> Rust                  | 1 sessie     |
-| **2.3** | pg_mem_telemetry -> Rust            | 0.5 sessie   |
-| **2.4** | shim_alloc -> Rust                  | 1 sessie     |
-| **2.5** | pg_query_cache -> Rust              | 1 sessie     |
-| **2.6** | pg_statement -> Rust                | 2 sessies    |
-| **2.7** | pg_client -> Rust                   | 2-3 sessies  |
-|         | **Totaal**                          | **~16-19**   |
+| **1.1** | Port 273 C-tests naar Rust          | ✅ Compleet  |
+| **1.2A**| Batch A: 9 blokker-gaps             | ✅ Compleet  |
+| **1.2B**| Batch B: 17 Plex-specifieke fixes   | ✅ Compleet  |
+| **1.2C**| Batch C: FTS4                       | ✅ Compleet  |
+| **1.2D**| Batch D: Cache + randgevallen       | ✅ Compleet  |
+| **1.3** | Offline vergelijkende validatie     | ✅ Compleet  |
+| **1.4** | Dual-mode flag                      | ✅ Compleet  |
+| **1.5** | C-translator verwijderen            | ✅ Compleet  |
+| **2.1** | pg_config -> Rust                   | ✅ Compleet  |
+| **2.2** | pg_logging -> Rust                  | ✅ Compleet  |
+| **2.3** | pg_mem_telemetry -> Rust            | ✅ Compleet  |
+| **2.4** | shim_alloc -> Rust                  | ✅ Compleet  |
+| **2.5** | pg_query_cache -> Rust              | ✅ Compleet  |
+| **2.6** | pg_statement -> Rust                | ✅ Compleet  |
+| **2.7** | pg_client -> Rust                   | ✅ Compleet  |
+|         | **Alles afgerond**                  | **22 feb 2026** |
 
 ---
 
-## Regels
+## Regels (tijdens migratie)
 
-- Plex draait op main (`/Users/sander/plex-postgresql/`) -- NIET AANRAKEN
+- Plex draaide op main (`/Users/sander/plex-postgresql/`) tijdens de migratie
 - Alle werk in `/Users/sander/plex-postgresql-develop/` (develop branch)
 - Validatie via offline replay van queries uit het live logbestand
-- Geen live Plex op develop tenzij Sander daar expliciet voor kiest
+- Migratie afgerond en live gedeployed op 22 februari 2026

@@ -227,7 +227,7 @@ static int my_sqlite3_exec_impl(sqlite3 *db, const char *sql,
                     if (PQstatus(new_conn) == CONNECTION_OK) {
                         pg_conn->conn = new_conn;
                         pg_conn->is_pg_active = 1;
-                        LOG_ERROR("EXEC: fresh connection succeeded (reconnected)");
+                        LOG_INFO("EXEC: fresh connection succeeded (reconnected)");
                     } else {
                         LOG_ERROR("EXEC: fresh connection also failed: %s",
                                  PQerrorMessage(new_conn));

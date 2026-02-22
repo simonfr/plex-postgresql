@@ -5,6 +5,20 @@ All notable changes to plex-postgresql will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.41] - 2026-02-22
+
+### Changed
+- **SQL translator fully migrated to Rust (Phase 1)** — the entire SQLite-to-PostgreSQL SQL translation pipeline now runs on Rust's `sqlparser-rs` AST engine. The C translator (`sql_tr_*.c`, `sql_translator.c`) has been removed. 525 Rust tests cover all translation paths (318 lib + 54 batch1 + 51 batch2 + 42 batch3 + 60 batch4).
+- **PG modules migrated to hybrid C/Rust (Phase 2)** — all 7 backend modules now have their core logic in Rust with thin C shims: `pg_config`, `pg_logging`, `pg_mem_telemetry`, `shim_alloc`, `pg_query_cache`, `pg_statement`, `pg_client`. ~550 C tests across 25 suites continue to pass.
+- **`transform_expr` refactored to `&mut Expr`** — functions.rs, keywords.rs, and query.rs now use in-place mutation instead of by-value transform, reducing unnecessary AST cloning.
+- **Log level demotion** — 5 informational `LOG_ERROR` messages demoted to `LOG_INFO` (pool init, fresh connection succeeded). These are filtered at the default `PLEX_PG_LOG_LEVEL=ERROR` setting, reducing log noise in production.
+
+### Removed
+- **C SQL translator** — `sql_tr_*.c`, `sql_translator.c`, `sql_translator_internal.h` and all `SQL_TR_OBJS` from Makefile. The Rust translator is now the sole implementation.
+
+### Fixed
+- **Git repository size** — removed accidentally committed `rust/sql-translator/target/` from all history via `git-filter-repo`. Repository size reduced from 243MB to 60MB.
+
 ## [0.9.40] - 2026-02-22
 
 ### Fixed

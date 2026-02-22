@@ -213,8 +213,8 @@ static void do_client_init(void) {
 
     int pool_sz = atomic_load(&configured_pool_size);
     client_initialized = 1;
-    LOG_ERROR("pg_client initialized: pool_size=%d, max=%d, idle_timeout=%ds, auto_grow=yes",
-              pool_sz, POOL_SIZE_MAX, pool_idle_timeout);
+    LOG_INFO("pg_client initialized: pool_size=%d, max=%d, idle_timeout=%ds, auto_grow=yes",
+             pool_sz, POOL_SIZE_MAX, pool_idle_timeout);
 }
 
 void pg_client_init(void) {
@@ -1204,7 +1204,7 @@ int pg_pool_check_connection_health(pg_connection_t *conn) {
                         conn->conn = new_pg;
                         conn->is_pg_active = 1;
                         library_pool[i].last_used = time(NULL);
-                        LOG_ERROR("Pool: fresh connection succeeded for slot %d (reconnected)", i);
+                        LOG_INFO("Pool: fresh connection succeeded for slot %d (reconnected)", i);
                         atomic_store(&library_pool[i].state, SLOT_READY);
                         return 1;
                     } else {
