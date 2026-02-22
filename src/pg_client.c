@@ -71,7 +71,7 @@ static inline uint32_t hash_ptr(const void *ptr) {
     val = (val >> 16) ^ val;
     return (uint32_t)(val & (CONN_HASH_BUCKETS - 1));
 }
-static volatile int client_initialized = 0;
+static _Atomic int client_initialized = 0;
 static pthread_once_t client_init_once = PTHREAD_ONCE_INIT;
 
 // PID tracking for fork detection (posix_spawn doesn't trigger pthread_atfork)

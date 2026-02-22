@@ -470,13 +470,19 @@ void pg_stmt_free(pg_stmt_t *stmt) {
     LOG_DEBUG("pg_stmt_free: START stmt=%p sql=%p pg_sql=%p",
               (void*)stmt, (void*)stmt->sql, (void*)stmt->pg_sql);
 
+    /* Save whether pg_sql is a separate allocation BEFORE freeing sql,
+     * because comparing pointers to freed memory is undefined behavior. */
+    int pg_sql_is_separate = (stmt->pg_sql && stmt->pg_sql != stmt->sql);
+
     if (stmt->sql) {
         LOG_DEBUG("pg_stmt_free: freeing sql=%p (%.50s)", (void*)stmt->sql, stmt->sql);
         free(stmt->sql);
+        stmt->sql = NULL;
     }
-    if (stmt->pg_sql && stmt->pg_sql != stmt->sql) {
+    if (pg_sql_is_separate) {
         LOG_DEBUG("pg_stmt_free: freeing pg_sql=%p (%.50s)", (void*)stmt->pg_sql, stmt->pg_sql);
         free(stmt->pg_sql);
+        stmt->pg_sql = NULL;
     }
     if (stmt->result) {
         LOG_DEBUG("pg_stmt_free: PQclear result=%p", (void*)stmt->result);

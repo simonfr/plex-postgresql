@@ -40,6 +40,8 @@ extern void               sql_translator_translation_free(RustSqlTranslation *t)
 
 /* ── Thread-local translation cache ────────────────────────────────────────── */
 
+#include <pthread.h>
+
 #define CACHE_SIZE 256
 
 typedef struct {
@@ -50,8 +52,57 @@ typedef struct {
     int      param_count;
 } cache_entry_t;
 
-static __thread cache_entry_t cache[CACHE_SIZE];
-static __thread int cache_inited = 0;
+typedef struct {
+    cache_entry_t entries[CACHE_SIZE];
+    int           inited;
+} trans_cache_t;
+
+static pthread_key_t   trans_cache_key;
+static pthread_once_t  trans_cache_once = PTHREAD_ONCE_INIT;
+
+/* Free a single cache entry's heap data */
+static void free_cache_entry(cache_entry_t *e) {
+    free(e->input);
+    e->input = NULL;
+    free(e->sql);
+    e->sql = NULL;
+    if (e->param_names) {
+        for (int i = 0; i < e->param_count; i++)
+            free(e->param_names[i]);
+        free(e->param_names);
+        e->param_names = NULL;
+    }
+    e->param_count = 0;
+    e->hash = 0;
+}
+
+/* TLS destructor: called on thread exit to free all cached translations */
+static void trans_cache_destructor(void *ptr) {
+    trans_cache_t *tc = (trans_cache_t *)ptr;
+    if (!tc) return;
+    for (int i = 0; i < CACHE_SIZE; i++) {
+        if (tc->entries[i].input)
+            free_cache_entry(&tc->entries[i]);
+    }
+    free(tc);
+}
+
+static void create_trans_cache_key(void) {
+    pthread_key_create(&trans_cache_key, trans_cache_destructor);
+}
+
+static trans_cache_t *get_thread_cache(void) {
+    pthread_once(&trans_cache_once, create_trans_cache_key);
+    trans_cache_t *tc = (trans_cache_t *)pthread_getspecific(trans_cache_key);
+    if (!tc) {
+        tc = (trans_cache_t *)calloc(1, sizeof(trans_cache_t));
+        if (tc) {
+            tc->inited = 1;
+            pthread_setspecific(trans_cache_key, tc);
+        }
+    }
+    return tc;
+}
 
 static uint64_t hash_sql(const char *sql) {
     /* FNV-1a 64-bit */
@@ -64,9 +115,10 @@ static uint64_t hash_sql(const char *sql) {
 }
 
 static cache_entry_t *cache_lookup(const char *sql, uint64_t hash) {
-    if (!cache_inited) return NULL;
+    trans_cache_t *tc = get_thread_cache();
+    if (!tc || !tc->inited) return NULL;
     int idx = (int)(hash % CACHE_SIZE);
-    cache_entry_t *e = &cache[idx];
+    cache_entry_t *e = &tc->entries[idx];
     if (e->input && e->hash == hash && strcmp(e->input, sql) == 0) {
         return e;
     }
@@ -75,21 +127,14 @@ static cache_entry_t *cache_lookup(const char *sql, uint64_t hash) {
 
 static void cache_store(const char *input, uint64_t hash,
                         const char *sql, int param_count, char **param_names) {
-    if (!cache_inited) {
-        memset(cache, 0, sizeof(cache));
-        cache_inited = 1;
-    }
+    trans_cache_t *tc = get_thread_cache();
+    if (!tc) return;
+
     int idx = (int)(hash % CACHE_SIZE);
-    cache_entry_t *e = &cache[idx];
+    cache_entry_t *e = &tc->entries[idx];
 
     /* Evict old entry */
-    free(e->input);
-    free(e->sql);
-    if (e->param_names) {
-        for (int i = 0; i < e->param_count; i++)
-            free(e->param_names[i]);
-        free(e->param_names);
-    }
+    free_cache_entry(e);
 
     e->hash = hash;
     e->input = strdup(input);

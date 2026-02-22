@@ -328,7 +328,7 @@ static int my_sqlite3_step_impl(sqlite3_stmt *pStmt) {
                             pg_stmt_cache_clear_local(cached_exec_conn);
                             if (insert_sql) free(insert_sql);
                             PQclear(res);
-                            pthread_mutex_unlock(&cached_exec_conn->mutex);
+                            /* Note: mutex already unlocked at line 310 — do NOT unlock again */
                             sql_translation_free(&trans);
                             if (expanded_sql) sqlite3_free(expanded_sql);
                             do { step_pg_conn_error = 1; return SQLITE_ERROR; } while(0);

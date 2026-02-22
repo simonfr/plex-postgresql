@@ -38,7 +38,7 @@ typedef struct {
 static decltype_cache_entry_t decltype_cache[DECLTYPE_CACHE_SIZE];
 static pthread_mutex_t decltype_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int decltype_cache_initialized = 0;
-static int decltype_cache_loaded = 0;  // Have we loaded from DB?
+static _Atomic int decltype_cache_loaded = 0;  // Have we loaded from DB?
 
 // Hash function for cache lookup
 static unsigned int decltype_hash(const char *str) {
@@ -417,13 +417,15 @@ typedef struct {
 } oid_cache_entry_t;
 
 static oid_cache_entry_t oid_table_cache[OID_CACHE_SIZE];
-static int oid_cache_count = 0;
+static _Atomic int oid_cache_count = 0;
 static pthread_mutex_t oid_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-// Lookup OID in cache - returns table name or NULL if not found
+// Lookup OID in cache - lock-free read with acquire semantics.
+// Safe because: (1) oid_cache_count is atomic with acquire ordering,
+// (2) entries at indices < count are fully written before count is incremented
+//     (release ordering in oid_cache_add ensures this).
 static const char* oid_cache_lookup(Oid oid) {
-    // Fast path: check without lock first (read-only, atomic int read)
-    int count = oid_cache_count;
+    int count = atomic_load_explicit(&oid_cache_count, memory_order_acquire);
     for (int i = 0; i < count && i < OID_CACHE_SIZE; i++) {
         if (oid_table_cache[i].oid == oid) {
             return oid_table_cache[i].name;
@@ -432,12 +434,13 @@ static const char* oid_cache_lookup(Oid oid) {
     return NULL;
 }
 
-// Add OID → name mapping to cache
+// Add OID → name mapping to cache (mutex-protected write)
 static void oid_cache_add(Oid oid, const char *name) {
     pthread_mutex_lock(&oid_cache_mutex);
     
-    // Check if already exists (race condition check)
-    for (int i = 0; i < oid_cache_count && i < OID_CACHE_SIZE; i++) {
+    int count = atomic_load_explicit(&oid_cache_count, memory_order_relaxed);
+    // Check if already exists
+    for (int i = 0; i < count && i < OID_CACHE_SIZE; i++) {
         if (oid_table_cache[i].oid == oid) {
             pthread_mutex_unlock(&oid_cache_mutex);
             return;  // Already cached
@@ -445,12 +448,13 @@ static void oid_cache_add(Oid oid, const char *name) {
     }
     
     // Add new entry if space available
-    if (oid_cache_count < OID_CACHE_SIZE) {
-        oid_table_cache[oid_cache_count].oid = oid;
-        strncpy(oid_table_cache[oid_cache_count].name, name, 63);
-        oid_table_cache[oid_cache_count].name[63] = '\0';
-        oid_cache_count++;
-        LOG_DEBUG("OID_CACHE: Added oid=%u -> '%s' (total: %d)", oid, name, oid_cache_count);
+    if (count < OID_CACHE_SIZE) {
+        oid_table_cache[count].oid = oid;
+        strncpy(oid_table_cache[count].name, name, 63);
+        oid_table_cache[count].name[63] = '\0';
+        // Release ensures the entry data is visible before count increment
+        atomic_store_explicit(&oid_cache_count, count + 1, memory_order_release);
+        LOG_DEBUG("OID_CACHE: Added oid=%u -> '%s' (total: %d)", oid, name, count + 1);
     }
     
     pthread_mutex_unlock(&oid_cache_mutex);
