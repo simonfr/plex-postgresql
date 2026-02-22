@@ -16,30 +16,45 @@ permissions:
   packages: write
 
 jobs:
-  publish:
-    name: Publish ${{ matrix.name }} image
-    runs-on: ubuntu-latest
+  build:
+    name: Build ${{ matrix.name }} / ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
+          # linuxserver variant
           - name: linuxserver
             dockerfile: Dockerfile
             image: ghcr.io/${{ github.repository_owner }}/plex-postgresql-linuxserver
-            legacy_image: ""
+            arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - name: linuxserver
+            dockerfile: Dockerfile
+            image: ghcr.io/${{ github.repository_owner }}/plex-postgresql-linuxserver
+            arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+          # plexinc variant
           - name: plexinc
             dockerfile: Dockerfile.standalone
             image: ghcr.io/${{ github.repository_owner }}/plex-postgresql-plexinc
-            legacy_image: ""
+            arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - name: plexinc
+            dockerfile: Dockerfile.standalone
+            image: ghcr.io/${{ github.repository_owner }}/plex-postgresql-plexinc
+            arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref }}
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -61,29 +76,61 @@ jobs:
             echo "value=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Resolve image tags
-        id: tags
-        run: |
-          set -eu
-          VERSION="${{ steps.version.outputs.value }}"
-          LEGACY_IMAGE="${{ matrix.legacy_image }}"
-          {
-            echo "value<<EOF"
-            echo "${{ matrix.image }}:${VERSION}"
-            echo "${{ matrix.image }}:latest"
-            if [ -n "$LEGACY_IMAGE" ]; then
-              echo "${LEGACY_IMAGE}:${VERSION}"
-              echo "${LEGACY_IMAGE}:latest"
-            fi
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Build and push image
+      - name: Build and push per-platform image
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ${{ matrix.dockerfile }}
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.platform }}
           push: true
           provenance: false
-          tags: ${{ steps.tags.outputs.value }}
+          tags: ${{ matrix.image }}:${{ steps.version.outputs.value }}-${{ matrix.arch }}
+
+  manifest:
+    name: Create multi-arch manifest for ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linuxserver
+            image: ghcr.io/${{ github.repository_owner }}/plex-postgresql-linuxserver
+          - name: plexinc
+            image: ghcr.io/${{ github.repository_owner }}/plex-postgresql-plexinc
+
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve version
+        id: version
+        run: |
+          set -eu
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "value=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create and push multi-arch manifest
+        run: |
+          set -eux
+          VERSION="${{ steps.version.outputs.value }}"
+          IMAGE="${{ matrix.image }}"
+
+          # Create versioned manifest
+          docker manifest create "${IMAGE}:${VERSION}" \
+            "${IMAGE}:${VERSION}-amd64" \
+            "${IMAGE}:${VERSION}-arm64"
+          docker manifest push "${IMAGE}:${VERSION}"
+
+          # Create latest manifest
+          docker manifest create "${IMAGE}:latest" \
+            "${IMAGE}:${VERSION}-amd64" \
+            "${IMAGE}:${VERSION}-arm64"
+          docker manifest push "${IMAGE}:latest"
