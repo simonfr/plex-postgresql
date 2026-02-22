@@ -110,7 +110,7 @@ jobs:
           cp release-assets/linux-aarch64/db_interpose_pg-linux-aarch64.so "$STAGE/"
           cp release-assets/linux-aarch64/libpq.so.5 "$STAGE/"
 
-          cp README.md CHANGELOG.md INSTALL.md LICENSE "$STAGE/"
+          cp README.md CHANGELOG.md INSTALL.md LICENSE THIRD_PARTY_LICENSES "$STAGE/"
           cp -R scripts/* "$STAGE/scripts/"
 
           (cd "$STAGE" && zip -r "../$OUT" .)

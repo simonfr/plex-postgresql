@@ -102,7 +102,7 @@ jobs:
           cp release-assets/macos-arm64/db_interpose_pg-arm64.dylib "$STAGE/"
           cp release-assets/macos-arm64/db_interpose_pg.dylib "$STAGE/"
 
-          cp README.md CHANGELOG.md INSTALL.md LICENSE "$STAGE/"
+          cp README.md CHANGELOG.md INSTALL.md LICENSE THIRD_PARTY_LICENSES "$STAGE/"
           cp -R scripts/* "$STAGE/scripts/"
 
           (cd "$STAGE" && zip -r "../$OUT" .)

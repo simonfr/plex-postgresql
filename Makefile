@@ -743,7 +743,7 @@ release: release-universal
 	@echo "Packaging macOS release..."
 	@cd $(RELEASE_DIR)/v$(VERSION) && \
 		mkdir -p scripts && \
-		cp ../../README.md ../../LICENSE ../../CHANGELOG.md ../../RELEASE_NOTES.md ../../INSTALL.md . 2>/dev/null || true && \
+		cp ../../README.md ../../LICENSE ../../THIRD_PARTY_LICENSES ../../CHANGELOG.md ../../RELEASE_NOTES.md ../../INSTALL.md . 2>/dev/null || true && \
 		cp ../../scripts/install_wrappers.sh scripts/ && \
 		cp ../../scripts/install_wrappers_linux.sh scripts/ && \
 		cp ../../scripts/uninstall_wrappers.sh scripts/ && \
@@ -751,7 +751,7 @@ release: release-universal
 		cp ../../scripts/migrate_sqlite_to_pg.sh scripts/ && \
 		cp ../../scripts/docker-entrypoint.sh scripts/ && \
 		tar -czf ../plex-postgresql-v$(VERSION)-macos.tar.gz \
-			*.dylib README.md LICENSE CHANGELOG.md RELEASE_NOTES.md INSTALL.md scripts/
+			*.dylib README.md LICENSE THIRD_PARTY_LICENSES CHANGELOG.md RELEASE_NOTES.md INSTALL.md scripts/
 	@echo "  ✓ $(RELEASE_DIR)/plex-postgresql-v$(VERSION)-macos.tar.gz"
 	@ls -lh $(RELEASE_DIR)/plex-postgresql-v$(VERSION)-macos.tar.gz
 
@@ -777,7 +777,7 @@ release-linux:
 	@# Package
 	@cd $(RELEASE_DIR)/v$(VERSION) && \
 		mkdir -p scripts && \
-		cp ../../README.md ../../LICENSE ../../CHANGELOG.md ../../RELEASE_NOTES.md ../../INSTALL.md . 2>/dev/null || true && \
+		cp ../../README.md ../../LICENSE ../../THIRD_PARTY_LICENSES ../../CHANGELOG.md ../../RELEASE_NOTES.md ../../INSTALL.md . 2>/dev/null || true && \
 		cp ../../scripts/install_wrappers.sh scripts/ && \
 		cp ../../scripts/install_wrappers_linux.sh scripts/ && \
 		cp ../../scripts/uninstall_wrappers.sh scripts/ && \
@@ -786,7 +786,7 @@ release-linux:
 		cp ../../scripts/docker-entrypoint.sh scripts/ && \
 		tar -czf ../plex-postgresql-v$(VERSION)-linux.tar.gz \
 			db_interpose_pg-linux-*.so libpq.so.5 \
-			README.md LICENSE CHANGELOG.md RELEASE_NOTES.md INSTALL.md scripts/
+			README.md LICENSE THIRD_PARTY_LICENSES CHANGELOG.md RELEASE_NOTES.md INSTALL.md scripts/
 	@echo "  ✓ $(RELEASE_DIR)/plex-postgresql-v$(VERSION)-linux.tar.gz"
 	@ls -lh $(RELEASE_DIR)/plex-postgresql-v$(VERSION)-linux.tar.gz
 
