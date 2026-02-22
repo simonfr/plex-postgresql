@@ -13,16 +13,16 @@ Una librería shim pequeña que captura las llamadas SQLite de Plex y las envía
 | Linux (Docker) | ✅ Funciona (init y ejecución probados, no probado en producción) |
 | Linux (Nativo) | ⚠️ No probado |
 
-## Última versión: v0.9.37
+## Última versión: v0.9.38
 
-**Pool auto-grow (Issue #9)** — el pool de conexiones crece automáticamente cuando Plex crea más hilos que slots configurados. Conexiones inactivas se cierran tras `PLEX_PG_IDLE_TIMEOUT` (default 300s).
+**Exec retry (Issue #8)** — `sqlite3_exec` ahora tiene la misma lógica de recuperación y reintentos que `sqlite3_step`. Conexiones muertas se detectan y reconectan inmediatamente.
 
-- 🆕 **Pool auto-grow:** el pool crece desde el tamaño configurado hasta 200, sin bloqueo de hilos
+- 🆕 **Exec retry:** verificación de conexión + reintentos para `sqlite3_exec`, igual que step
+- ✅ Pool auto-grow (Issue #9): el pool crece desde el tamaño configurado hasta 200
 - ✅ Fix chown Docker (PR #7): eliminado `chown -R` lento del entrypoint standalone
-- ✅ Recuperación tras reinicio de PG (Issue #8): reintentos pool + step
 - ✅ **278 tests unitarios** (220 SQL + 41 shadow elimination + 17 connection isolation)
 
-Descarga: https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.37
+Descarga: https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.38
 
 ## ¿Por qué PostgreSQL?
 
@@ -91,7 +91,7 @@ psql -d plex -c "ALTER USER plex PASSWORD 'plex';"
 ### 2. Instalar (ZIP recomendado)
 
 ```bash
-curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.37/plex-postgresql-v0.9.37-macos.zip -o /tmp/plex-pg-macos.zip
+curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.38/plex-postgresql-v0.9.38-macos.zip -o /tmp/plex-pg-macos.zip
 mkdir -p /tmp/plex-pg-macos && cd /tmp/plex-pg-macos
 unzip /tmp/plex-pg-macos.zip
 
@@ -142,7 +142,7 @@ psql -U plex -d plex -c "CREATE SCHEMA plex;"
 ### 2. Instalar (ZIP recomendado)
 
 ```bash
-curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.37/plex-postgresql-v0.9.37-linux.zip -o /tmp/plex-pg-linux.zip
+curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.38/plex-postgresql-v0.9.38-linux.zip -o /tmp/plex-pg-linux.zip
 mkdir -p /tmp/plex-pg && cd /tmp/plex-pg
 unzip /tmp/plex-pg-linux.zip
 
