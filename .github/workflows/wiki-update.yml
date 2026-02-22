@@ -16,37 +16,15 @@ jobs:
       - name: Checkout main repo
         uses: actions/checkout@v4
 
-      - name: Determine old and new version
+      # README version refs are updated manually before tagging.
+      # The old auto-sed approach was fragile (broke on major version bumps).
+
+      - name: Determine new version
         id: ver
         run: |
           set -eux
           NEW="$(cat VERSION)"
-          # Find the previous tag to know what to replace
-          OLD="$(git tag -l 'v0.9.*' | sort -V | tail -2 | head -1 | sed 's/^v//')"
           echo "new=${NEW}" >> "$GITHUB_OUTPUT"
-          echo "old=${OLD}" >> "$GITHUB_OUTPUT"
-          echo "Updating v${OLD} → v${NEW}"
-
-      - name: Update README.md and README.es.md
-        run: |
-          set -eux
-          OLD="${{ steps.ver.outputs.old }}"
-          NEW="${{ steps.ver.outputs.new }}"
-          for f in README.md README.es.md; do
-            [ -f "$f" ] || continue
-            sed -i "s|v${OLD}|v${NEW}|g" "$f"
-            echo "Updated $f"
-          done
-
-      - name: Commit README changes
-        run: |
-          set -eux
-          git diff --quiet README.md README.es.md && { echo "No README changes"; exit 0; }
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add README.md README.es.md
-          git commit -m "auto: bump version refs in READMEs to v${{ steps.ver.outputs.new }}"
-          git push origin HEAD:main
 
       - name: Clone wiki
         run: |
