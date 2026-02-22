@@ -5,6 +5,11 @@ All notable changes to plex-postgresql will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.38] - 2026-02-22
+
+### Fixed
+- **`sqlite3_exec` retry + reconnect (Issue #8)** — `sqlite3_exec` now has the same pre-flight connection health check and retry wrapper that `sqlite3_step` already had. Dead connections are detected immediately via `PQstatus`, reconnected inline, and retried with `PLEX_PG_RETRY_DELAYS` backoff. Previously, `sqlite3_exec` would silently swallow connection errors.
+
 ## [0.9.37] - 2026-02-21
 
 ### Changed
