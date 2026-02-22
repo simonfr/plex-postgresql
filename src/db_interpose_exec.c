@@ -137,12 +137,63 @@ static void free_normalized_sql(normalized_sql_t *n) {
 }
 
 // ============================================================================
-// Exec Function
+// Exec Function - Retry Wrapper (same pattern as step retry in db_interpose_step.c)
 // ============================================================================
+
+// Thread-local flag: set to 1 by exec_impl when error is connection-related.
+static __thread int exec_pg_conn_error = 0;
+
+// Forward declaration of inner implementation
+static int my_sqlite3_exec_impl(sqlite3 *db, const char *sql,
+                                int (*callback)(void*, int, char**, char**),
+                                void *arg, char **errmsg);
 
 int my_sqlite3_exec(sqlite3 *db, const char *sql,
                     int (*callback)(void*, int, char**, char**),
                     void *arg, char **errmsg) {
+    static __thread int exec_retry_count = 0;
+
+    int rc = my_sqlite3_exec_impl(db, sql, callback, arg, errmsg);
+
+    // Backoff schedule from PLEX_PG_RETRY_DELAYS (default: 500,1000,2000,3000,4000 ms)
+    int exec_retry_delays_ms[PG_RETRY_MAX_DELAYS];
+    int exec_max_retries = 0;
+    pg_get_retry_delays(exec_retry_delays_ms, &exec_max_retries);
+
+    if (rc == SQLITE_ERROR && exec_retry_count < exec_max_retries && exec_pg_conn_error) {
+        exec_pg_conn_error = 0;
+        int delay = exec_retry_delays_ms[exec_retry_count];
+        exec_retry_count++;
+        LOG_ERROR("exec: PG conn error, retry %d/%d in %dms (thread %p)",
+                 exec_retry_count, exec_max_retries, delay, (void*)pthread_self());
+
+        usleep(delay * 1000);
+        exec_pg_conn_error = 0;
+        rc = my_sqlite3_exec(db, sql, callback, arg, errmsg);  // recursive retry
+
+        if (exec_retry_count > 0 && rc != SQLITE_ERROR) {
+            LOG_ERROR("exec: retry succeeded after %d attempt(s)", exec_retry_count);
+        }
+        exec_retry_count = 0;
+        return rc;
+    }
+
+    if (exec_retry_count > 0) {
+        if (rc == SQLITE_ERROR) {
+            LOG_ERROR("exec: retries exhausted, returning SQLITE_ERROR");
+        }
+        exec_retry_count = 0;
+    }
+    return rc;
+}
+
+// ============================================================================
+// Exec Function - Inner Implementation
+// ============================================================================
+
+static int my_sqlite3_exec_impl(sqlite3 *db, const char *sql,
+                                int (*callback)(void*, int, char**, char**),
+                                void *arg, char **errmsg) {
     // CRITICAL FIX: NULL check to prevent crash in strcasestr
     if (!sql) {
         LOG_ERROR("exec called with NULL SQL");
@@ -151,7 +202,90 @@ int my_sqlite3_exec(sqlite3 *db, const char *sql,
 
     pg_connection_t *pg_conn = pg_find_connection(db);
 
-    if (pg_conn && pg_conn->conn && pg_conn->is_pg_active) {
+    if (pg_conn && pg_conn->is_pg_active) {
+        // Pre-flight connection health check (mirrors step_impl pattern)
+        if (!pg_conn->conn || PQstatus(pg_conn->conn) != CONNECTION_OK) {
+            LOG_ERROR("EXEC: CONNECTION_BAD pre-flight, attempting reconnect (thread %p)",
+                     (void*)pthread_self());
+            pthread_mutex_lock(&pg_conn->mutex);
+            if (pg_conn->conn) {
+                PQreset(pg_conn->conn);
+                if (PQstatus(pg_conn->conn) != CONNECTION_OK) {
+                    LOG_ERROR("EXEC: PQreset failed, trying fresh PQconnectdb...");
+                    pg_stmt_cache_clear(pg_conn);
+                    PQfinish(pg_conn->conn);
+                    pg_conn->conn = NULL;
+
+                    pg_conn_config_t *rcfg = pg_config_get();
+                    char rconninfo[1024];
+                    snprintf(rconninfo, sizeof(rconninfo),
+                             "host=%s port=%d dbname=%s user=%s password=%s "
+                             "connect_timeout=5 keepalives=1 keepalives_idle=30 "
+                             "keepalives_interval=10 keepalives_count=3",
+                             rcfg->host, rcfg->port, rcfg->database, rcfg->user, rcfg->password);
+                    PGconn *new_conn = PQconnectdb(rconninfo);
+                    if (PQstatus(new_conn) == CONNECTION_OK) {
+                        pg_conn->conn = new_conn;
+                        pg_conn->is_pg_active = 1;
+                        LOG_ERROR("EXEC: fresh connection succeeded (reconnected)");
+                    } else {
+                        LOG_ERROR("EXEC: fresh connection also failed: %s",
+                                 PQerrorMessage(new_conn));
+                        PQfinish(new_conn);
+                        pg_conn->is_pg_active = 0;
+                        pthread_mutex_unlock(&pg_conn->mutex);
+                        exec_pg_conn_error = 1;
+                        return SQLITE_ERROR;
+                    }
+                } else {
+                    LOG_ERROR("EXEC: PQreset succeeded, connection recovered");
+                }
+                // Re-apply search_path and statement_timeout after reconnect
+                pg_conn_config_t *cfg = pg_config_get();
+                if (cfg) {
+                    char schema_cmd[256];
+                    snprintf(schema_cmd, sizeof(schema_cmd), "SET search_path TO %s, public", cfg->schema);
+                    PGresult *r = PQexec(pg_conn->conn, schema_cmd);
+                    PQclear(r);
+                    r = PQexec(pg_conn->conn, "SET statement_timeout = '5min'");
+                    PQclear(r);
+                }
+            } else {
+                // conn is NULL, try fresh connection
+                pg_conn_config_t *rcfg = pg_config_get();
+                char rconninfo[1024];
+                snprintf(rconninfo, sizeof(rconninfo),
+                         "host=%s port=%d dbname=%s user=%s password=%s "
+                         "connect_timeout=5 keepalives=1 keepalives_idle=30 "
+                         "keepalives_interval=10 keepalives_count=3",
+                         rcfg->host, rcfg->port, rcfg->database, rcfg->user, rcfg->password);
+                PGconn *new_conn = PQconnectdb(rconninfo);
+                if (PQstatus(new_conn) == CONNECTION_OK) {
+                    pg_conn->conn = new_conn;
+                    pg_conn->is_pg_active = 1;
+                    LOG_ERROR("EXEC: fresh connection from NULL succeeded");
+                    pg_conn_config_t *cfg = pg_config_get();
+                    if (cfg) {
+                        char schema_cmd[256];
+                        snprintf(schema_cmd, sizeof(schema_cmd), "SET search_path TO %s, public", cfg->schema);
+                        PGresult *r = PQexec(pg_conn->conn, schema_cmd);
+                        PQclear(r);
+                        r = PQexec(pg_conn->conn, "SET statement_timeout = '5min'");
+                        PQclear(r);
+                    }
+                } else {
+                    LOG_ERROR("EXEC: fresh connection from NULL failed: %s",
+                             PQerrorMessage(new_conn));
+                    PQfinish(new_conn);
+                    pg_conn->is_pg_active = 0;
+                    pthread_mutex_unlock(&pg_conn->mutex);
+                    exec_pg_conn_error = 1;
+                    return SQLITE_ERROR;
+                }
+            }
+            pthread_mutex_unlock(&pg_conn->mutex);
+        }
+
         // Rewrite schema_migrations for blobs.db connections
         char *blobs_rewrite = rewrite_blobs_schema_migrations(sql, pg_conn->db_path);
         if (blobs_rewrite) sql = blobs_rewrite;
@@ -300,9 +434,18 @@ int my_sqlite3_exec(sqlite3 *db, const char *sql,
                 } else {
                     const char *err = (pg_conn && pg_conn->conn) ? PQerrorMessage(pg_conn->conn) : "NULL connection";
                     LOG_ERROR("PostgreSQL exec error: %s", err);
-                    // CRITICAL: Check if connection is corrupted and needs reset
-                    // Note: pg_conn may be a pool connection for library.db
+                    // Check if this is a connection error (not a SQL logic error)
+                    int is_conn_error = (!pg_conn->conn || PQstatus(pg_conn->conn) != CONNECTION_OK);
                     pg_pool_check_connection_health(pg_conn);
+                    if (is_conn_error) {
+                        if (insert_sql) free(insert_sql);
+                        PQclear(res);
+                        pthread_mutex_unlock(&pg_conn->mutex);
+                        sql_translation_free(&trans);
+                        if (blobs_rewrite) free(blobs_rewrite);
+                        exec_pg_conn_error = 1;
+                        return SQLITE_ERROR;
+                    }
                 }
 
                 if (insert_sql) free(insert_sql);
