@@ -325,6 +325,16 @@ static int my_sqlite3_step_impl(sqlite3_stmt *pStmt) {
                     } else {
                         const char *err = (pg_conn && pg_conn->conn) ? PQerrorMessage(pg_conn->conn) : "NULL connection";
                         log_sql_fallback(sql, exec_sql, err, "CACHED WRITE");
+                        // v0.9.38: Stale prepared statement recovery (SQLSTATE 26000)
+                        if (pg_is_stale_prepared_stmt(res)) {
+                            pg_stmt_cache_clear_local(cached_exec_conn);
+                            if (insert_sql) free(insert_sql);
+                            PQclear(res);
+                            pthread_mutex_unlock(&cached_exec_conn->mutex);
+                            sql_translation_free(&trans);
+                            if (expanded_sql) sqlite3_free(expanded_sql);
+                            do { step_pg_conn_error = 1; return SQLITE_ERROR; } while(0);
+                        }
                         // CRITICAL: Check if connection is corrupted and needs reset
                         pg_pool_check_connection_health(cached_exec_conn);
                     }
@@ -497,6 +507,15 @@ static int my_sqlite3_step_impl(sqlite3_stmt *pStmt) {
                             } else {
                                 const char *err = (cached_read_conn && cached_read_conn->conn) ? PQerrorMessage(cached_read_conn->conn) : "NULL connection";
                                 log_sql_fallback(sql, trans.sql, err, "CACHED READ");
+                                // v0.9.38: Stale prepared statement recovery (SQLSTATE 26000)
+                                if (pg_is_stale_prepared_stmt(new_stmt->result)) {
+                                    pg_stmt_cache_clear_local(cached_read_conn);
+                                    PQclear(new_stmt->result);
+                                    new_stmt->result = NULL;
+                                    sql_translation_free(&trans);
+                                    if (expanded_sql) sqlite3_free(expanded_sql);
+                                    do { step_pg_conn_error = 1; return SQLITE_ERROR; } while(0);
+                                }
                                 PQclear(new_stmt->result);
                                 new_stmt->result = NULL;
                                 // CRITICAL: Check if connection is corrupted and needs reset
@@ -921,6 +940,11 @@ static int my_sqlite3_step_impl(sqlite3_stmt *pStmt) {
                 if (!send_ok) {
                     const char *err = PQerrorMessage(exec_conn->conn);
                     LOG_ERROR("PQsend* failed: %s sql=%.200s", err ? err : "(null)", pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
+                    // v0.9.38: Stale prepared statement recovery
+                    // PQsend* doesn't return PGresult, so check error message
+                    if (err && strstr(err, "does not exist")) {
+                        pg_stmt_cache_clear_local(exec_conn);
+                    }
                     pthread_mutex_unlock(&exec_conn->mutex);
                     pg_pool_check_connection_health(exec_conn);
                     pthread_mutex_unlock(&pg_stmt->mutex);
@@ -1017,6 +1041,11 @@ static int my_sqlite3_step_impl(sqlite3_stmt *pStmt) {
                     const char *err = PQerrorMessage(exec_conn->conn);
                     LOG_ERROR("STREAM first fetch error: %s (status=%d) sql=%.200s",
                              err ? err : "(null)", (int)first_status, pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
+                    // v0.9.38: Stale prepared statement recovery (SQLSTATE 26000)
+                    // Check BEFORE PQclear since we need the PGresult
+                    if (pg_is_stale_prepared_stmt(first_res)) {
+                        pg_stmt_cache_clear_local(exec_conn);
+                    }
                     PQclear(first_res);
                     PGresult *drain;
                     while ((drain = PQgetResult(exec_conn->conn)) != NULL) PQclear(drain);
@@ -1387,6 +1416,13 @@ static int my_sqlite3_step_impl(sqlite3_stmt *pStmt) {
                 LOG_ERROR("STEP PG write error: %s", err);
                 LOG_ERROR("  Original SQL: %.300s", pg_stmt->sql ? pg_stmt->sql : "(null)");
                 LOG_ERROR("  Translated SQL: %.300s", pg_stmt->pg_sql ? pg_stmt->pg_sql : "(null)");
+                // v0.9.38: Stale prepared statement recovery (SQLSTATE 26000)
+                if (pg_is_stale_prepared_stmt(res)) {
+                    pg_stmt_cache_clear_local(exec_conn);
+                    PQclear(res);
+                    pthread_mutex_unlock(&pg_stmt->mutex);
+                    do { step_pg_conn_error = 1; return SQLITE_ERROR; } while(0);
+                }
                 // CRITICAL: Check if connection is corrupted and needs reset
                 pg_pool_check_connection_health(exec_conn);
             }
