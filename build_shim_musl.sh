@@ -36,7 +36,7 @@ for f in $LINUX_FILES; do
     obj=$(basename "$f" .c).o
     echo "  Compiling $f -> $obj"
     gcc -c -fPIC -O2 -fno-stack-protector \
-        -std=c11 -D_XOPEN_SOURCE=700 -mno-outline-atomics \
+        -std=c11 -D_GNU_SOURCE -mno-outline-atomics \
         -I/usr/include/postgresql -Iinclude -Isrc \
         -o "src/$obj" "src/$f" 2>&1 || { echo "FAILED: $f"; exit 1; }
 done

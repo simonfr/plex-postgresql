@@ -11,16 +11,13 @@ RUN apk add --no-cache \
     curl \
     perl
 
-# Install Rust toolchain (needed for sql-translator)
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
-ENV PATH="/root/.cargo/bin:${PATH}"
-
 # Verify musl version matches Plex (1.2.2)
 RUN /lib/ld-musl-*.so.1 --version 2>&1 | head -2
 
 WORKDIR /build
 
 # Download and build PostgreSQL with minimal features (just libpq)
+# This must happen BEFORE Rust install to avoid rustup env interfering with gcc
 RUN curl -L https://ftp.postgresql.org/pub/source/v15.10/postgresql-15.10.tar.gz | tar xz
 RUN cd postgresql-15.10 && \
     # Configure WITHOUT OpenSSL to avoid ENGINE symbol conflicts
@@ -41,6 +38,10 @@ RUN cd postgresql-15.10 && \
     cd ../interfaces/libpq && make && make install && \
     # Build pg_config for headers
     cd ../../bin/pg_config && make && make install
+
+# Install Rust toolchain (after PG build to avoid env interference with gcc)
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+ENV PATH="/root/.cargo/bin:${PATH}"
 
 # Copy source files
 COPY src/ src/
@@ -64,7 +65,7 @@ RUN ARCH=$(uname -m) && \
         echo "x86_64 detected: skipping ARM-specific flags"; \
     fi && \
     gcc -shared -fPIC -O2 -fno-stack-protector \
-        -std=c11 -D_XOPEN_SOURCE=700 $ARCH_FLAGS \
+        -std=c11 -D_GNU_SOURCE $ARCH_FLAGS \
         -o db_interpose_pg.so \
         src/db_interpose_core_linux.c \
         src/db_interpose_common.c src/platform_backtrace.c \
