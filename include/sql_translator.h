@@ -36,6 +36,12 @@ typedef struct {
 // Initialize translator (call once at startup)
 void sql_translator_init(void);
 
+// Runtime backend selection
+int use_rust_translator(void);
+
+// Rust backend (when PLEX_SQL_TRANSLATOR=rust)
+sql_translation_t sql_translate_via_rust(const char *sqlite_sql);
+
 // Cleanup translator
 void sql_translator_cleanup(void);
 

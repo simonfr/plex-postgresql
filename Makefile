@@ -30,10 +30,15 @@ else
     SHARED_FLAGS = -shared
 endif
 
+# Rust sql-translator static library (sqlparser-rs backend)
+RUST_TRANSLATOR_DIR = rust/sql-translator
+RUST_TRANSLATOR_LIB = $(RUST_TRANSLATOR_DIR)/target/release/libsql_translator.a
+
 # SQL Translator modules
 SQL_TR_OBJS = src/sql_translator.o src/sql_tr_helpers.o src/sql_tr_placeholders.o \
               src/sql_tr_functions.o src/sql_tr_query.o src/sql_tr_groupby.o src/sql_tr_types.o \
-              src/sql_tr_quotes.o src/sql_tr_keywords.o src/sql_tr_upsert.o
+              src/sql_tr_quotes.o src/sql_tr_keywords.o src/sql_tr_upsert.o \
+              src/sql_translator_rust_bridge.o
 
 # PG modules
 PG_MODULES = src/pg_config.o src/pg_logging.o src/pg_client.o src/pg_statement.o src/pg_query_cache.o src/pg_mem_telemetry.o src/shim_alloc.o
@@ -65,9 +70,13 @@ LINUX_OBJECTS = $(SQL_TR_OBJS) $(PG_MODULES) $(DB_INTERPOSE_SHARED) src/db_inter
 
 all: $(TARGET)
 
+# Build Rust sql-translator static library
+$(RUST_TRANSLATOR_LIB):
+	cd $(RUST_TRANSLATOR_DIR) && cargo build --release
+
 # Build the shim library (auto-detect platform) - uses modular approach
-$(TARGET): $(OBJECTS)
-	$(CC) $(SHARED_FLAGS) -o $@ $(OBJECTS) $(CFLAGS) $(LDFLAGS)
+$(TARGET): $(OBJECTS) $(RUST_TRANSLATOR_LIB)
+	$(CC) $(SHARED_FLAGS) -o $@ $(OBJECTS) $(RUST_TRANSLATOR_LIB) $(CFLAGS) $(LDFLAGS)
 
 # Explicit macOS build - always clean first to avoid corrupt object files
 macos: clean
@@ -124,6 +133,9 @@ src/sql_tr_keywords.o: src/sql_tr_keywords.c include/sql_translator.h src/sql_tr
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
 src/sql_tr_upsert.o: src/sql_tr_upsert.c src/sql_translator_internal.h
+	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
+
+src/sql_translator_rust_bridge.o: src/sql_translator_rust_bridge.c include/sql_translator.h
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
 src/pg_config.o: src/pg_config.c src/pg_config.h src/pg_types.h
@@ -189,7 +201,7 @@ src/db_interpose_metadata.o: src/db_interpose_metadata.c src/db_interpose.h
 
 # Clean build artifacts
 clean:
-	rm -f db_interpose_pg.dylib db_interpose_pg.so $(OBJECTS) $(PG_MODULES) $(DB_INTERPOSE_OBJS)
+	rm -f db_interpose_pg.dylib db_interpose_pg.so $(OBJECTS) $(PG_MODULES) $(DB_INTERPOSE_OBJS) src/sql_translator_rust_bridge.o
 
 # Install to system location
 install: $(TARGET)
@@ -289,10 +301,10 @@ test-stack-macos: $(TARGET) $(TEST_BIN_DIR)/test_stack_macos
 	@./$(TEST_BIN_DIR)/test_stack_macos ./$(TARGET)
 	@echo ""
 
-# SQL translator unit tests (links against translator objects + logging)
-$(TEST_BIN_DIR)/test_sql_translator: $(TEST_DIR)/test_sql_translator.c $(SQL_TR_OBJS) src/pg_logging.o src/shim_alloc.o
+# SQL translator unit tests (links against translator objects + logging + Rust lib)
+$(TEST_BIN_DIR)/test_sql_translator: $(TEST_DIR)/test_sql_translator.c $(SQL_TR_OBJS) src/pg_logging.o src/shim_alloc.o $(RUST_TRANSLATOR_LIB)
 	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $< $(SQL_TR_OBJS) src/pg_logging.o src/shim_alloc.o -Iinclude -Isrc -Wall -Wextra
+	$(CC) -o $@ $< $(SQL_TR_OBJS) src/pg_logging.o src/shim_alloc.o $(RUST_TRANSLATOR_LIB) -Iinclude -Isrc -Wall -Wextra
 
 test-sql: $(TEST_BIN_DIR)/test_sql_translator
 	@echo ""
@@ -371,9 +383,9 @@ test-reaper: $(TEST_BIN_DIR)/test_pool_reaper
 	@echo ""
 
 # Micro-benchmarks (shim component performance)
-$(TEST_BIN_DIR)/test_benchmark: $(TEST_DIR)/test_benchmark.c $(SQL_TR_OBJS) src/pg_logging.o src/shim_alloc.o
+$(TEST_BIN_DIR)/test_benchmark: $(TEST_DIR)/test_benchmark.c $(SQL_TR_OBJS) src/pg_logging.o src/shim_alloc.o $(RUST_TRANSLATOR_LIB)
 	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -O3 -o $@ $< $(SQL_TR_OBJS) src/pg_logging.o src/shim_alloc.o -Iinclude -Isrc -Wall -Wextra
+	$(CC) -O3 -o $@ $< $(SQL_TR_OBJS) src/pg_logging.o src/shim_alloc.o $(RUST_TRANSLATOR_LIB) -Iinclude -Isrc -Wall -Wextra
 
 benchmark: $(TEST_BIN_DIR)/test_benchmark
 	@./$(TEST_BIN_DIR)/test_benchmark
@@ -499,9 +511,9 @@ test-groupby: $(TEST_BIN_DIR)/test_group_by_rewriter
 	@echo ""
 
 # UPSERT (INSERT OR REPLACE) unit tests
-$(TEST_BIN_DIR)/test_upsert: $(TEST_DIR)/test_upsert.c $(SQL_TR_OBJS) src/pg_logging.o src/shim_alloc.o
+$(TEST_BIN_DIR)/test_upsert: $(TEST_DIR)/test_upsert.c $(SQL_TR_OBJS) src/pg_logging.o src/shim_alloc.o $(RUST_TRANSLATOR_LIB)
 	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $< $(SQL_TR_OBJS) src/pg_logging.o src/shim_alloc.o -Iinclude -Isrc -Wall -Wextra
+	$(CC) -o $@ $< $(SQL_TR_OBJS) src/pg_logging.o src/shim_alloc.o $(RUST_TRANSLATOR_LIB) -Iinclude -Isrc -Wall -Wextra
 
 test-upsert: $(TEST_BIN_DIR)/test_upsert
 	@echo ""

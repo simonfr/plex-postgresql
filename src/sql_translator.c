@@ -370,6 +370,11 @@ sql_translation_t sql_translate(const char *sqlite_sql) {
         return result;
     }
 
+    // Rust backend: delegate entirely when PLEX_SQL_TRANSLATOR=rust
+    if (use_rust_translator()) {
+        return sql_translate_via_rust(sqlite_sql);
+    }
+
     // Check thread-local cache first (lock-free, ~500x faster than translation)
     uint64_t hash = hash_sql(sqlite_sql);
     sql_translation_t *cached = cache_lookup(sqlite_sql, hash);
@@ -516,6 +521,5 @@ void sql_translation_free(sql_translation_t *result) {
     result->success = 0;
 }
 
-void sql_translator_free(char *sql) {
-    free(sql);
-}
+/* sql_translator_free() is provided by the Rust static library (ffi.rs).
+ * The declaration in sql_translator.h routes callers to that symbol. */
