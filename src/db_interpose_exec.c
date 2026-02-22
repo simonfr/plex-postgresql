@@ -434,10 +434,13 @@ static int my_sqlite3_exec_impl(sqlite3 *db, const char *sql,
                 } else {
                     const char *err = (pg_conn && pg_conn->conn) ? PQerrorMessage(pg_conn->conn) : "NULL connection";
                     LOG_ERROR("PostgreSQL exec error: %s", err);
-                    // Check if this is a connection error (not a SQL logic error)
+                    // Check if this is a connection error or stale prepared statement
                     int is_conn_error = (!pg_conn->conn || PQstatus(pg_conn->conn) != CONNECTION_OK);
+                    // v0.9.38: Stale prepared statement recovery (SQLSTATE 26000)
+                    int is_stale_stmt = pg_is_stale_prepared_stmt(res);
+                    if (is_stale_stmt) pg_stmt_cache_clear_local(pg_conn);
                     pg_pool_check_connection_health(pg_conn);
-                    if (is_conn_error) {
+                    if (is_conn_error || is_stale_stmt) {
                         if (insert_sql) free(insert_sql);
                         PQclear(res);
                         pthread_mutex_unlock(&pg_conn->mutex);

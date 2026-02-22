@@ -1614,6 +1614,22 @@ int pg_stmt_cache_add(pg_connection_t *conn, uint64_t sql_hash, const char *stmt
     return -1;
 }
 
+// Check if a PGresult is a "prepared statement does not exist" error.
+// Uses SQLSTATE 26000 (invalid_sql_statement_name) — locale-independent.
+int pg_is_stale_prepared_stmt(PGresult *res) {
+    if (!res) return 0;
+    const char *sqlstate = PQresultErrorField(res, PG_DIAG_SQLSTATE);
+    return sqlstate && strcmp(sqlstate, "26000") == 0;
+}
+
+// Clear local prepared statement cache without sending DEALLOCATE to server.
+// Use after PG restart when server-side statements are already gone.
+void pg_stmt_cache_clear_local(pg_connection_t *conn) {
+    if (!conn) return;
+    memset(&conn->stmt_cache, 0, sizeof(stmt_cache_t));
+    LOG_ERROR("Cleared prepared statement cache (local only) for connection %p", (void*)conn);
+}
+
 // Clear all cached statements for a connection (called on disconnect/reset)
 void pg_stmt_cache_clear(pg_connection_t *conn) {
     if (!conn) return;

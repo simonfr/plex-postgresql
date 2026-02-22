@@ -54,6 +54,8 @@ uint64_t pg_hash_sql(const char *sql);
 int pg_stmt_cache_lookup(pg_connection_t *conn, uint64_t sql_hash, const char **stmt_name);
 int pg_stmt_cache_add(pg_connection_t *conn, uint64_t sql_hash, const char *stmt_name, int param_count);
 void pg_stmt_cache_clear(pg_connection_t *conn);
+void pg_stmt_cache_clear_local(pg_connection_t *conn);  // Clear local cache only (no DEALLOCATE)
+int pg_is_stale_prepared_stmt(PGresult *res);            // Check SQLSTATE 26000
 
 // Fork safety - clean up connection pool in child process after fork()
 // Called by pthread_atfork handler to prevent child from using parent's connections
