@@ -384,7 +384,8 @@ static int my_sqlite3_exec_impl(sqlite3 *db, const char *sql,
                         snprintf(stmt_name, sizeof(stmt_name), "nx_%llx", (unsigned long long)norm_hash);
                         PGresult *prep_res = PQprepare(pg_conn->conn, stmt_name, 
                                                        normalized->normalized_sql, 0, NULL);
-                        if (PQresultStatus(prep_res) == PGRES_COMMAND_OK) {
+                        if (PQresultStatus(prep_res) == PGRES_COMMAND_OK ||
+                            pg_is_duplicate_prepared_stmt(prep_res)) {
                             pg_stmt_cache_add(pg_conn, norm_hash, stmt_name, normalized->param_count);
                             PQclear(prep_res);
                             

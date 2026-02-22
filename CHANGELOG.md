@@ -5,6 +5,16 @@ All notable changes to plex-postgresql will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.40] - 2026-02-22
+
+### Fixed
+- **Duplicate prepared statement handling (SQLSTATE 42P05)** — after a Plex restart (while PG keeps running), the shim's empty cache would try to re-prepare statements that already exist on the PG backend. Now detects SQLSTATE `42P05` via `pg_is_duplicate_prepared_stmt()` (locale-independent), replaces fragile `strstr(err, "already exists")` checks. Fixed missing 42P05 handling in `db_interpose_exec.c` and `db_interpose_column.c` (METADATA_DESCRIBE path).
+- **DEALLOCATE ALL at connection init** — new connections now run `DEALLOCATE ALL` to clean up orphaned prepared statements from previous shim instances. Eliminates PG log spam.
+- **METADATA_DESCRIBE cache lookup** — the column metadata path now checks the local stmt cache before calling `PQprepare`, avoiding unnecessary round-trips and PG-side errors.
+
+### Added
+- **Prepared statement cache unit tests** — 21 new tests covering hash function, cache add/lookup/clear, SQLSTATE 42P05/26000 detection, edge cases, and cache eviction. Total: 299 tests.
+
 ## [0.9.39] - 2026-02-22
 
 ### Fixed

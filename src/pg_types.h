@@ -45,7 +45,7 @@
 // Connection pool size (max slots, actual limit via PLEX_PG_POOL_SIZE env var)
 // Increased for Kometa bulk operations which can exceed 100 concurrent requests
 #define POOL_SIZE_MAX 200
-#define POOL_SIZE_DEFAULT 150
+#define POOL_SIZE_DEFAULT 50
 
 // Prepared statement cache size per connection (must be power of 2 for hash table)
 #define STMT_CACHE_SIZE 512
