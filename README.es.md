@@ -1,9 +1,8 @@
 # plex-postgresql
 
-[![en](https://img.shields.io/badge/lang-en-red.svg)](README.md)
-[![es](https://img.shields.io/badge/lang-es-yellow.svg)](README.es.md)
-
 **Ejecuta Plex Media Server con PostgreSQL en lugar de SQLite.**
+
+[Read in English](README.md)
 
 Una librería shim pequeña que captura las llamadas SQLite de Plex y las envía a PostgreSQL. No necesitas modificar Plex.
 
