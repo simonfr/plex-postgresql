@@ -1,19 +1,21 @@
-# Release Notes - v0.9.38
+# Release Notes - v0.9.39
 
 **Release Date:** February 22, 2026
 
-Exec retry: `sqlite3_exec` now has the same connection recovery and retry logic that `sqlite3_step` already had (Issue #8).
+Stale prepared statement recovery after PostgreSQL restart.
 
 ## What changed
 
-`sqlite3_exec` previously had no pre-flight connection check and no retry wrapper. If PostgreSQL went down during an exec call, the error was silently swallowed and the caller got `SQLITE_OK` back.
+After a PostgreSQL restart, server-side prepared statements are gone but the shim's per-connection cache still referenced them. This caused queries to fail with "prepared statement does not exist" and retries to loop on the same stale cache entry until exhausted.
 
 Now:
-- Pre-flight `PQstatus` check before every exec query, with inline reconnect (PQreset, then fresh PQconnectdb if needed)
-- Retry wrapper with configurable backoff from `PLEX_PG_RETRY_DELAYS` (default: 500, 1000, 2000, 3000, 4000ms)
-- Connection errors return `SQLITE_ERROR` instead of being silently ignored
+- Detects SQLSTATE `26000` (invalid_sql_statement_name) via `PQresultErrorField`
+- Clears the local stmt cache without sending DEALLOCATE round-trips to the server
+- Lets the existing retry wrapper re-prepare and re-execute the query
+- All 6 error handlers in step.c and exec.c are covered
 
-Same pattern as the step retry wrapper added in v0.9.34.
+Previously: PG restart required a Plex restart to recover.
+Now: PG restart recovers automatically within seconds.
 
 ## Upgrading
 

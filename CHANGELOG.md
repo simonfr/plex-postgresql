@@ -5,6 +5,11 @@ All notable changes to plex-postgresql will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.39] - 2026-02-22
+
+### Fixed
+- **Stale prepared statement recovery after PG restart** — after a PostgreSQL restart, the shim's prepared statement cache could reference statements that no longer exist on the server. Now detects SQLSTATE `26000` (`invalid_sql_statement_name`), clears the local cache (no DEALLOCATE round-trips), and lets the retry wrapper re-prepare and re-execute. Covers all 6 error handlers in step and exec paths.
+
 ## [0.9.38] - 2026-02-22
 
 ### Fixed
