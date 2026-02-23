@@ -39,8 +39,8 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            rust/sql-translator/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('rust/sql-translator/Cargo.lock') }}
+            rust/plex-pg-core/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('rust/plex-pg-core/Cargo.lock') }}
 
       - name: Build arm64 dylib
         run: |

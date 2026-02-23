@@ -41,5 +41,10 @@ sqlite3_value* pg_create_column_value(pg_stmt_t *stmt, int col_idx);
 int pg_is_our_value(sqlite3_value *val);
 int pg_oid_to_sqlite_type(Oid oid);
 const char* pg_oid_to_sqlite_decltype(Oid oid);
+int pg_decltype_special_case(Oid oid, const char *col_name, const char *pg_sql, Oid table_oid);
+
+#define PG_DECLTYPE_CASE_NONE 0
+#define PG_DECLTYPE_CASE_NULL 1
+#define PG_DECLTYPE_CASE_DT_INTEGER_8 2
 
 #endif // PG_STATEMENT_H

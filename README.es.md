@@ -40,15 +40,23 @@ git clone https://github.com/cgnl/plex-postgresql.git
 cd plex-postgresql
 
 # Iniciar Plex + PostgreSQL
-docker-compose up -d
+docker compose up -d
 
 # Ver logs
-docker-compose logs -f plex
+docker compose logs -f plex
 ```
 
 Plex estará disponible en http://localhost:8080
 
 PostgreSQL se configura automáticamente y crea el esquema inicial.
+
+Si ya tienes Plex local usando 32400, ejecuta Docker con otro puerto:
+```bash
+PLEX_HOST_PORT=32410 PLEX_DLNA_PORT=32471 docker compose up -d
+```
+Luego abre http://localhost:32410/web
+
+El montaje de medios de prueba por defecto es `./fixtures/media:/media:ro`.
 
 ### Configuración
 
@@ -234,7 +242,7 @@ pg_isready -h localhost -U plex
 tail -50 /tmp/plex_redirect_pg.log
 
 # Ver logs (Docker)
-docker-compose logs -f plex
+docker compose logs -f plex
 
 # Analizar fallbacks
 ./scripts/analyze_fallbacks.sh

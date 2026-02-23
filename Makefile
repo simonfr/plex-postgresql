@@ -13,61 +13,64 @@ ifeq ($(UNAME_S),Darwin)
     PG_LIB = /opt/homebrew/opt/postgresql@15/lib
     # Added -Isrc to find new headers
     # -fvisibility=hidden: hide internal symbols, only export sqlite3 interception functions
-    CFLAGS = -Wall -Wextra -O2 -I$(PG_INCLUDE) -Iinclude -Isrc -fvisibility=hidden
-    LDFLAGS = -L$(PG_LIB) -lpq
+    CFLAGS = -Wall -Wextra -O2 -Iinclude -Isrc -I$(PG_INCLUDE) -fvisibility=hidden
+    LDFLAGS = -L$(PG_LIB) -lpq -lc++ -lc++abi
     TARGET = db_interpose_pg.dylib
     SOURCE = src/db_interpose_pg.c
     SHARED_FLAGS = -dynamiclib -undefined dynamic_lookup
+    CXX = clang++
 else
     # Linux
     CC = gcc
     PG_INCLUDE = /usr/include/postgresql
     PG_LIB = /usr/lib
-    CFLAGS = -Wall -Wextra -O2 -fPIC -I$(PG_INCLUDE) -Iinclude -Isrc
+    CFLAGS = -Wall -Wextra -O2 -fPIC -Iinclude -Isrc -I$(PG_INCLUDE)
     LDFLAGS = -lpq -lsqlite3 -ldl -lpthread
     TARGET = db_interpose_pg.so
     SOURCE = src/db_interpose_pg_linux.c
     SHARED_FLAGS = -shared
 endif
 
-# Rust sql-translator static library (sqlparser-rs backend)
-RUST_TRANSLATOR_DIR = rust/sql-translator
-RUST_TRANSLATOR_LIB = $(RUST_TRANSLATOR_DIR)/target/release/libsql_translator.a
+# Rust plex-pg-core static library (sqlparser-rs backend + PG modules)
+RUST_TRANSLATOR_DIR = rust/plex-pg-core
+RUST_TRANSLATOR_LIB = $(RUST_TRANSLATOR_DIR)/target/release/libplex_pg_core.a
 
 # SQL Translator: Rust backend + C bridge + portable string utils
-SQL_TR_OBJS = src/sql_translator_rust_bridge.o src/str_utils.o
+SQL_TR_OBJS = src/rust_bridge/sql_translator_rust_bridge.o src/support/str_utils.o
 
 # PG modules
-PG_MODULES = src/pg_config.o src/pg_logging.o src/pg_client.o src/pg_statement.o src/pg_query_cache.o src/pg_mem_telemetry.o src/shim_alloc.o
+PG_MODULES = src/pg/pg_config.o src/pg/pg_logging.o src/pg/pg_client.o src/pg/pg_statement.o src/pg/pg_query_cache.o src/pg/pg_mem_telemetry.o src/support/shim_alloc.o
 
 # DB Interpose modules - shared between Mac and Linux
-DB_INTERPOSE_SHARED = src/db_interpose_common.o src/platform_backtrace.o src/db_interpose_open.o \
-                      src/db_interpose_exec.o src/db_interpose_prepare.o src/db_interpose_bind.o \
-                      src/db_interpose_step.o src/db_interpose_column.o src/db_interpose_value.o \
-                      src/db_interpose_metadata.o
+DB_INTERPOSE_SHARED = src/runtime/db_interpose_common.o src/runtime/platform_backtrace.o src/interpose/db_interpose_open.o \
+                      src/interpose/db_interpose_exec.o src/interpose/db_interpose_prepare.o src/interpose/db_interpose_bind.o \
+                      src/interpose/db_interpose_step.o src/interpose/db_interpose_column.o src/interpose/db_interpose_value.o \
+                      src/interpose/db_interpose_metadata.o
 
 # Platform-specific core module
 ifeq ($(UNAME_S),Darwin)
-    DB_INTERPOSE_CORE = src/db_interpose_core.o
+    DB_INTERPOSE_CORE = src/runtime/db_interpose_core.o
+    EXCEPTION_WHAT_OBJ = src/support/exception_what.o
 else
-    DB_INTERPOSE_CORE = src/db_interpose_core_linux.o
+    DB_INTERPOSE_CORE = src/runtime/db_interpose_core_linux.o
+    EXCEPTION_WHAT_OBJ =
 endif
 
 DB_INTERPOSE_OBJS = $(DB_INTERPOSE_CORE) $(DB_INTERPOSE_SHARED)
 
 # All objects (macOS includes fishhook, Linux doesn't)
 ifeq ($(UNAME_S),Darwin)
-    OBJECTS = $(SQL_TR_OBJS) $(PG_MODULES) $(DB_INTERPOSE_OBJS) src/fishhook.o
+    OBJECTS = $(SQL_TR_OBJS) $(PG_MODULES) $(DB_INTERPOSE_OBJS) src/runtime/fishhook.o $(EXCEPTION_WHAT_OBJ)
 else
     OBJECTS = $(SQL_TR_OBJS) $(PG_MODULES) $(DB_INTERPOSE_OBJS)
 endif
-LINUX_OBJECTS = $(SQL_TR_OBJS) $(PG_MODULES) $(DB_INTERPOSE_SHARED) src/db_interpose_core_linux.o
+LINUX_OBJECTS = $(SQL_TR_OBJS) $(PG_MODULES) $(DB_INTERPOSE_SHARED) src/runtime/db_interpose_core_linux.o
 
 .PHONY: all clean install test macos linux run stop unit-test ci-test test-recursion test-crash test-params test-logging test-soci test-fork test-fts test-buffer test-reaper test-upsert test-parity test-uri test-stmt-free test-bind-mismatch
 
 all: $(TARGET)
 
-# Build Rust sql-translator static library
+# Build Rust plex-pg-core static library
 $(RUST_TRANSLATOR_LIB):
 	cd $(RUST_TRANSLATOR_DIR) && cargo build --release
 
@@ -85,11 +88,11 @@ macos: clean $(RUST_TRANSLATOR_LIB)
 		obj=$$(echo $$src | sed 's/\.c$$/.o/'); \
 		$(CC) -c -fPIC -o $$obj $$src $(CFLAGS); \
 	done
-	@for src in $(DB_INTERPOSE_SHARED:.o=.c) src/db_interpose_core.c; do \
+	@for src in $(DB_INTERPOSE_SHARED:.o=.c) src/runtime/db_interpose_core.c; do \
 		obj=$$(echo $$src | sed 's/\.c$$/.o/'); \
 		$(CC) -c -fPIC -o $$obj $$src $(CFLAGS); \
 	done
-	$(CC) -c -O2 -Iinclude -Isrc -o src/fishhook.o src/fishhook.c
+	$(CC) -c -O2 -Iinclude -Isrc -o src/runtime/fishhook.o src/runtime/fishhook.c
 	clang -dynamiclib -undefined dynamic_lookup -o db_interpose_pg.dylib $(OBJECTS) $(RUST_TRANSLATOR_LIB) \
 		-I/opt/homebrew/opt/postgresql@15/include -Iinclude -Isrc \
 		-L/opt/homebrew/opt/postgresql@15/lib -lpq
@@ -102,76 +105,79 @@ linux: $(LINUX_OBJECTS)
 
 # Object rules
 # SQL Translator: Rust bridge (sole implementation) + string utils
-src/sql_translator_rust_bridge.o: src/sql_translator_rust_bridge.c include/sql_translator.h
+src/rust_bridge/sql_translator_rust_bridge.o: src/rust_bridge/sql_translator_rust_bridge.c include/sql_translator.h
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
-src/str_utils.o: src/str_utils.c include/str_utils.h
+src/support/str_utils.o: src/support/str_utils.c include/str_utils.h
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
-src/pg_config.o: src/pg_config.c src/pg_config.h src/pg_types.h
+src/pg/pg_config.o: src/pg/pg_config.c src/pg_config.h src/pg_types.h
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
-src/pg_logging.o: src/pg_logging.c src/pg_logging.h src/pg_types.h
+src/pg/pg_logging.o: src/pg/pg_logging.c src/pg_logging.h src/pg_types.h
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
-src/pg_client.o: src/pg_client.c src/pg_client.h src/pg_types.h src/pg_logging.h src/pg_config.h
+src/pg/pg_client.o: src/pg/pg_client.c src/pg_client.h src/pg_types.h src/pg_logging.h src/pg_config.h
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
-src/pg_statement.o: src/pg_statement.c src/pg_statement.h src/pg_types.h src/pg_logging.h src/pg_client.h
+src/pg/pg_statement.o: src/pg/pg_statement.c src/pg_statement.h src/pg_types.h src/pg_logging.h src/pg_client.h
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
-src/pg_query_cache.o: src/pg_query_cache.c src/pg_query_cache.h src/pg_types.h src/pg_logging.h
+src/pg/pg_query_cache.o: src/pg/pg_query_cache.c src/pg_query_cache.h src/pg_types.h src/pg_logging.h
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
-src/pg_mem_telemetry.o: src/pg_mem_telemetry.c src/pg_mem_telemetry.h src/pg_logging.h
+src/pg/pg_mem_telemetry.o: src/pg/pg_mem_telemetry.c src/pg_mem_telemetry.h src/pg_logging.h
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
-src/shim_alloc.o: src/shim_alloc.c src/shim_alloc.h src/pg_logging.h
+src/support/shim_alloc.o: src/support/shim_alloc.c src/shim_alloc.h src/pg_logging.h
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
-src/fishhook.o: src/fishhook.c include/fishhook.h
+src/runtime/fishhook.o: src/runtime/fishhook.c include/fishhook.h
 	$(CC) -c -O2 -Iinclude -o $@ $<
 
+src/support/exception_what.o: src/support/exception_what.cpp src/exception_what.h
+	$(CXX) -c -fPIC -o $@ $< -Iinclude -Isrc
+
 # DB Interpose module compilation rules
-src/db_interpose_common.o: src/db_interpose_common.c src/db_interpose.h src/db_interpose_common.h
+src/runtime/db_interpose_common.o: src/runtime/db_interpose_common.c src/db_interpose.h src/db_interpose_common.h
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
-src/platform_backtrace.o: src/platform_backtrace.c src/db_interpose.h src/db_interpose_common.h
+src/runtime/platform_backtrace.o: src/runtime/platform_backtrace.c src/db_interpose.h src/db_interpose_common.h
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
-src/db_interpose_core.o: src/db_interpose_core.c src/db_interpose.h src/db_interpose_common.h
+src/runtime/db_interpose_core.o: src/runtime/db_interpose_core.c src/db_interpose.h src/db_interpose_common.h
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
-src/db_interpose_core_linux.o: src/db_interpose_core_linux.c src/db_interpose.h src/db_interpose_common.h
+src/runtime/db_interpose_core_linux.o: src/runtime/db_interpose_core_linux.c src/db_interpose.h src/db_interpose_common.h
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
-src/db_interpose_open.o: src/db_interpose_open.c src/db_interpose.h
+src/interpose/db_interpose_open.o: src/interpose/db_interpose_open.c src/db_interpose.h
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
-src/db_interpose_exec.o: src/db_interpose_exec.c src/db_interpose.h
+src/interpose/db_interpose_exec.o: src/interpose/db_interpose_exec.c src/db_interpose.h
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
-src/db_interpose_prepare.o: src/db_interpose_prepare.c src/db_interpose.h
+src/interpose/db_interpose_prepare.o: src/interpose/db_interpose_prepare.c src/db_interpose.h
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
-src/db_interpose_bind.o: src/db_interpose_bind.c src/db_interpose.h
+src/interpose/db_interpose_bind.o: src/interpose/db_interpose_bind.c src/db_interpose.h
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
-src/db_interpose_step.o: src/db_interpose_step.c src/db_interpose.h
+src/interpose/db_interpose_step.o: src/interpose/db_interpose_step.c src/db_interpose.h
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
-src/db_interpose_column.o: src/db_interpose_column.c src/db_interpose.h
+src/interpose/db_interpose_column.o: src/interpose/db_interpose_column.c src/db_interpose.h
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
-src/db_interpose_value.o: src/db_interpose_value.c src/db_interpose.h
+src/interpose/db_interpose_value.o: src/interpose/db_interpose_value.c src/db_interpose.h
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
-src/db_interpose_metadata.o: src/db_interpose_metadata.c src/db_interpose.h
+src/interpose/db_interpose_metadata.o: src/interpose/db_interpose_metadata.c src/db_interpose.h
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
 # Clean build artifacts
 clean:
-	rm -f db_interpose_pg.dylib db_interpose_pg.so $(OBJECTS) $(PG_MODULES) $(DB_INTERPOSE_OBJS) src/sql_translator_rust_bridge.o
+	rm -f db_interpose_pg.dylib db_interpose_pg.so $(OBJECTS) $(PG_MODULES) $(DB_INTERPOSE_OBJS) src/rust_bridge/sql_translator_rust_bridge.o
 
 # Install to system location
 install: $(TARGET)
@@ -272,9 +278,9 @@ test-stack-macos: $(TARGET) $(TEST_BIN_DIR)/test_stack_macos
 	@echo ""
 
 # SQL translator unit tests (links against translator objects + logging + Rust lib)
-$(TEST_BIN_DIR)/test_sql_translator: $(TEST_DIR)/test_sql_translator.c $(SQL_TR_OBJS) src/pg_logging.o src/shim_alloc.o $(RUST_TRANSLATOR_LIB)
+$(TEST_BIN_DIR)/test_sql_translator: $(TEST_DIR)/test_sql_translator.c $(SQL_TR_OBJS) src/pg/pg_logging.o src/support/shim_alloc.o $(RUST_TRANSLATOR_LIB)
 	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $< $(SQL_TR_OBJS) src/pg_logging.o src/shim_alloc.o $(RUST_TRANSLATOR_LIB) -Iinclude -Isrc -Wall -Wextra
+	$(CC) -o $@ $< $(SQL_TR_OBJS) src/pg/pg_logging.o src/support/shim_alloc.o $(RUST_TRANSLATOR_LIB) -Iinclude -Isrc -Wall -Wextra
 
 test-sql: $(TEST_BIN_DIR)/test_sql_translator
 	@echo ""
@@ -355,9 +361,9 @@ test-reaper: $(TEST_BIN_DIR)/test_pool_reaper
 	@echo ""
 
 # Micro-benchmarks (shim component performance)
-$(TEST_BIN_DIR)/test_benchmark: $(TEST_DIR)/test_benchmark.c $(SQL_TR_OBJS) src/pg_logging.o src/shim_alloc.o $(RUST_TRANSLATOR_LIB)
+$(TEST_BIN_DIR)/test_benchmark: $(TEST_DIR)/test_benchmark.c $(SQL_TR_OBJS) src/pg/pg_logging.o src/support/shim_alloc.o $(RUST_TRANSLATOR_LIB)
 	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -O3 -o $@ $< $(SQL_TR_OBJS) src/pg_logging.o src/shim_alloc.o $(RUST_TRANSLATOR_LIB) -Iinclude -Isrc -Wall -Wextra
+	$(CC) -O3 -o $@ $< $(SQL_TR_OBJS) src/pg/pg_logging.o src/support/shim_alloc.o $(RUST_TRANSLATOR_LIB) -Iinclude -Isrc -Wall -Wextra
 
 benchmark: $(TEST_BIN_DIR)/test_benchmark
 	@./$(TEST_BIN_DIR)/test_benchmark
@@ -475,9 +481,9 @@ test-buffer: $(TEST_BIN_DIR)/test_buffer_pool
 # GROUP BY rewriter unit tests — removed (C translator removed in Phase 1.5)
 
 # UPSERT (INSERT OR REPLACE) unit tests
-$(TEST_BIN_DIR)/test_upsert: $(TEST_DIR)/test_upsert.c $(SQL_TR_OBJS) src/pg_logging.o src/shim_alloc.o $(RUST_TRANSLATOR_LIB)
+$(TEST_BIN_DIR)/test_upsert: $(TEST_DIR)/test_upsert.c $(SQL_TR_OBJS) src/pg/pg_logging.o src/support/shim_alloc.o $(RUST_TRANSLATOR_LIB)
 	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $< $(SQL_TR_OBJS) src/pg_logging.o src/shim_alloc.o $(RUST_TRANSLATOR_LIB) -Iinclude -Isrc -Wall -Wextra
+	$(CC) -o $@ $< $(SQL_TR_OBJS) src/pg/pg_logging.o src/support/shim_alloc.o $(RUST_TRANSLATOR_LIB) -Iinclude -Isrc -Wall -Wextra
 
 test-upsert: $(TEST_BIN_DIR)/test_upsert
 	@echo ""
@@ -485,9 +491,9 @@ test-upsert: $(TEST_BIN_DIR)/test_upsert
 	@echo ""
 
 # SQL classification unit tests (should_redirect, should_skip_sql, is_write/read_operation)
-$(TEST_BIN_DIR)/test_pg_config: $(TEST_DIR)/test_pg_config.c src/pg_config.c src/pg_logging.o src/shim_alloc.o $(RUST_TRANSLATOR_LIB)
+$(TEST_BIN_DIR)/test_pg_config: $(TEST_DIR)/test_pg_config.c src/pg/pg_config.c src/pg/pg_logging.o src/support/shim_alloc.o $(RUST_TRANSLATOR_LIB)
 	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $(TEST_DIR)/test_pg_config.c src/pg_config.c src/pg_logging.o src/shim_alloc.o $(RUST_TRANSLATOR_LIB) -Iinclude -Isrc -I$(PG_INCLUDE) -Wall -Wextra
+	$(CC) -o $@ $(TEST_DIR)/test_pg_config.c src/pg/pg_config.c src/pg/pg_logging.o src/support/shim_alloc.o $(RUST_TRANSLATOR_LIB) -Iinclude -Isrc -I$(PG_INCLUDE) -Wall -Wextra
 
 test-config: $(TEST_BIN_DIR)/test_pg_config
 	@echo ""
@@ -515,9 +521,9 @@ test-common: $(TEST_BIN_DIR)/test_common_helpers
 	@echo ""
 
 # Platform parity unit tests (shared symbol loading, backtrace module)
-$(TEST_BIN_DIR)/test_platform_parity: $(TEST_DIR)/test_platform_parity.c src/db_interpose_common.o src/platform_backtrace.o src/pg_logging.o src/shim_alloc.o $(RUST_TRANSLATOR_LIB)
+$(TEST_BIN_DIR)/test_platform_parity: $(TEST_DIR)/test_platform_parity.c src/runtime/db_interpose_common.o src/runtime/platform_backtrace.o src/pg/pg_logging.o src/support/shim_alloc.o $(RUST_TRANSLATOR_LIB)
 	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $< src/db_interpose_common.o src/platform_backtrace.o src/pg_logging.o src/shim_alloc.o $(RUST_TRANSLATOR_LIB) -Iinclude -Isrc -Wall -Wextra -lsqlite3 -ldl
+	$(CC) -o $@ $< src/runtime/db_interpose_common.o src/runtime/platform_backtrace.o src/pg/pg_logging.o src/support/shim_alloc.o $(RUST_TRANSLATOR_LIB) -Iinclude -Isrc -Wall -Wextra -lsqlite3 -ldl
 
 test-parity: $(TEST_BIN_DIR)/test_platform_parity
 	@echo ""
@@ -535,9 +541,9 @@ test-statement: $(TEST_BIN_DIR)/test_statement_helpers
 	@echo ""
 
 # Statement free sweep regression test (ensures all param slots are freed)
-$(TEST_BIN_DIR)/test_stmt_free_param_sweep: $(TEST_DIR)/test_stmt_free_param_sweep.c src/pg_statement.o src/str_utils.o src/pg_mem_telemetry.o src/shim_alloc.o $(RUST_TRANSLATOR_LIB)
+$(TEST_BIN_DIR)/test_stmt_free_param_sweep: $(TEST_DIR)/test_stmt_free_param_sweep.c src/pg/pg_statement.o src/support/str_utils.o src/pg/pg_mem_telemetry.o src/support/shim_alloc.o $(RUST_TRANSLATOR_LIB)
 	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $< src/pg_statement.o src/str_utils.o src/pg_mem_telemetry.o src/shim_alloc.o $(RUST_TRANSLATOR_LIB) -Iinclude -Isrc -I$(PG_INCLUDE) -Wall -Wextra $(LDFLAGS) -lpthread
+	$(CC) -o $@ $< src/pg/pg_statement.o src/support/str_utils.o src/pg/pg_mem_telemetry.o src/support/shim_alloc.o $(RUST_TRANSLATOR_LIB) -Iinclude -Isrc -I$(PG_INCLUDE) -Wall -Wextra $(LDFLAGS) -lpthread
 
 test-stmt-free: $(TEST_BIN_DIR)/test_stmt_free_param_sweep
 	@echo ""
@@ -549,9 +555,9 @@ test-stmt-free: $(TEST_BIN_DIR)/test_stmt_free_param_sweep
 	@echo ""
 
 # Bind index mismatch regression (idx > param_count cleanup safety)
-$(TEST_BIN_DIR)/test_bind_index_mismatch_cleanup: $(TEST_DIR)/test_bind_index_mismatch_cleanup.c src/pg_statement.o src/str_utils.o src/pg_mem_telemetry.o src/shim_alloc.o $(RUST_TRANSLATOR_LIB)
+$(TEST_BIN_DIR)/test_bind_index_mismatch_cleanup: $(TEST_DIR)/test_bind_index_mismatch_cleanup.c src/pg/pg_statement.o src/support/str_utils.o src/pg/pg_mem_telemetry.o src/support/shim_alloc.o $(RUST_TRANSLATOR_LIB)
 	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $< src/pg_statement.o src/str_utils.o src/pg_mem_telemetry.o src/shim_alloc.o $(RUST_TRANSLATOR_LIB) -Iinclude -Isrc -I$(PG_INCLUDE) -Wall -Wextra $(LDFLAGS) -lpthread
+	$(CC) -o $@ $< src/pg/pg_statement.o src/support/str_utils.o src/pg/pg_mem_telemetry.o src/support/shim_alloc.o $(RUST_TRANSLATOR_LIB) -Iinclude -Isrc -I$(PG_INCLUDE) -Wall -Wextra $(LDFLAGS) -lpthread
 
 test-bind-mismatch: $(TEST_BIN_DIR)/test_bind_index_mismatch_cleanup
 	@echo ""
@@ -689,7 +695,7 @@ VERSION = $(shell cat VERSION 2>/dev/null || echo "dev")
 # Note: db_interpose_common.c is already included in DB_INTERPOSE_SHARED
 release-arm64: clean $(RUST_TRANSLATOR_LIB)
 	@echo "Building arm64..."
-	@for src in $(SQL_TR_OBJS:.o=.c) $(PG_MODULES:.o=.c) $(DB_INTERPOSE_SHARED:.o=.c) src/db_interpose_core.c src/fishhook.c; do \
+	@for src in $(SQL_TR_OBJS:.o=.c) $(PG_MODULES:.o=.c) $(DB_INTERPOSE_SHARED:.o=.c) src/runtime/db_interpose_core.c src/runtime/fishhook.c; do \
 		obj=$$(echo $$src | sed 's/\.c$$/.o/'); \
 		$(CC) -c -fPIC -arch arm64 -o $$obj $$src $(CFLAGS); \
 	done
@@ -698,7 +704,7 @@ release-arm64: clean $(RUST_TRANSLATOR_LIB)
 
 release-x86_64: clean $(RUST_TRANSLATOR_LIB)
 	@echo "Building x86_64..."
-	@for src in $(SQL_TR_OBJS:.o=.c) $(PG_MODULES:.o=.c) $(DB_INTERPOSE_SHARED:.o=.c) src/db_interpose_core.c src/fishhook.c; do \
+	@for src in $(SQL_TR_OBJS:.o=.c) $(PG_MODULES:.o=.c) $(DB_INTERPOSE_SHARED:.o=.c) src/runtime/db_interpose_core.c src/runtime/fishhook.c; do \
 		obj=$$(echo $$src | sed 's/\.c$$/.o/'); \
 		$(CC) -c -fPIC -arch x86_64 -o $$obj $$src $(CFLAGS); \
 	done
@@ -711,7 +717,7 @@ release-universal: $(RUST_TRANSLATOR_LIB)
 	@mkdir -p $(RELEASE_DIR)/v$(VERSION)
 	@# Build arm64
 	@$(MAKE) clean >/dev/null
-	@for src in $(SQL_TR_OBJS:.o=.c) $(PG_MODULES:.o=.c) $(DB_INTERPOSE_SHARED:.o=.c) src/db_interpose_core.c src/fishhook.c; do \
+	@for src in $(SQL_TR_OBJS:.o=.c) $(PG_MODULES:.o=.c) $(DB_INTERPOSE_SHARED:.o=.c) src/runtime/db_interpose_core.c src/runtime/fishhook.c; do \
 		obj=$$(echo $$src | sed 's/\.c$$/.o/'); \
 		$(CC) -c -fPIC -arch arm64 -o $$obj $$src $(CFLAGS) 2>/dev/null; \
 	done
@@ -719,7 +725,7 @@ release-universal: $(RUST_TRANSLATOR_LIB)
 	@echo "  ✓ arm64"
 	@# Build x86_64
 	@$(MAKE) clean >/dev/null
-	@for src in $(SQL_TR_OBJS:.o=.c) $(PG_MODULES:.o=.c) $(DB_INTERPOSE_SHARED:.o=.c) src/db_interpose_core.c src/fishhook.c; do \
+	@for src in $(SQL_TR_OBJS:.o=.c) $(PG_MODULES:.o=.c) $(DB_INTERPOSE_SHARED:.o=.c) src/runtime/db_interpose_core.c src/runtime/fishhook.c; do \
 		obj=$$(echo $$src | sed 's/\.c$$/.o/'); \
 		$(CC) -c -fPIC -arch x86_64 -o $$obj $$src $(CFLAGS) 2>/dev/null; \
 	done

@@ -72,7 +72,10 @@ void common_signal_handler(int sig);
 
 // Print exception information with shim context
 // Returns the demangled type name (caller must free if non-NULL)
-char* print_exception_info(const char *type_name, int count);
+char* print_exception_info(const char *type_name,
+                           int count,
+                           void *thrown_exception,
+                           void *tinfo);
 
 // ============================================================================
 // Common Exception Handler Logic
@@ -88,6 +91,21 @@ char* print_exception_info(const char *type_name, int count);
 int common_handle_exception(void *thrown_exception, void *tinfo, 
                            int *in_handler_flag,
                            int *should_call_original);
+
+// Lightweight accessors for exception diagnostics from C++ helpers.
+const char* pg_exception_get_last_query(void);
+const char* pg_exception_get_last_column(void);
+
+// Track recent SQL for exception diagnostics.
+void pg_exception_note_query(const char *sql);
+void pg_exception_dump_recent_queries(void);
+
+// Track execution phases for exception diagnostics.
+void pg_exception_note_phase(const char *phase,
+                             const char *sql,
+                             const void *stmt,
+                             const void *db);
+void pg_exception_dump_recent_phases(void);
 
 // ============================================================================
 // Fork Handlers (called from platform-specific code)

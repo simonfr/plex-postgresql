@@ -519,6 +519,9 @@ static int file_exists(const char *path) {
 static const char* find_source_file(void) {
     // Try common locations
     static const char *paths[] = {
+        "src/interpose/db_interpose_column.c",
+        "../src/interpose/db_interpose_column.c",
+        "../../src/interpose/db_interpose_column.c",
         "src/db_interpose_column.c",
         "../src/db_interpose_column.c",
         "../../src/db_interpose_column.c",

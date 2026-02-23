@@ -156,10 +156,11 @@ VISIBLE extern const void* (*orig_sqlite3_value_blob)(sqlite3_value*);
 VISIBLE extern int (*orig_sqlite3_create_collation)(sqlite3*, const char*, int, void*, int(*)(void*,int,const void*,int,const void*));
 VISIBLE extern int (*orig_sqlite3_create_collation_v2)(sqlite3*, const char*, int, void*, int(*)(void*,int,const void*,int,const void*), void(*)(void*));
 
-// Backward compatibility aliases (used by prepare module)
-extern int (*real_sqlite3_prepare_v2)(sqlite3*, const char*, int, sqlite3_stmt**, const char**);
-extern const char* (*real_sqlite3_errmsg)(sqlite3*);
-extern int (*real_sqlite3_errcode)(sqlite3*);
+// Canonical resolved SQLite pointers used by shim internals.
+// These are the "call-through" pointers after interposition.
+extern int (*shim_sqlite3_prepare_v2)(sqlite3*, const char*, int, sqlite3_stmt**, const char**);
+extern const char* (*shim_sqlite3_errmsg)(sqlite3*);
+extern int (*shim_sqlite3_errcode)(sqlite3*);
 
 // Worker thread state
 extern pthread_t worker_thread;

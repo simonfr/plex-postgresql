@@ -49,14 +49,14 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            rust/sql-translator/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('rust/sql-translator/Cargo.lock') }}
+            rust/plex-pg-core/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('rust/plex-pg-core/Cargo.lock') }}
 
-      - name: Build Rust sql-translator
-        run: cd rust/sql-translator && cargo build --release
+      - name: Build Rust plex-pg-core
+        run: cd rust/plex-pg-core && cargo build --release
 
       - name: Run Rust tests
-        run: cd rust/sql-translator && cargo test
+        run: cd rust/plex-pg-core && cargo test
 
       - name: Run C unit tests
         run: make ci-test
