@@ -3,8 +3,8 @@
 #include <string.h>
 #include <strings.h>
 
-int step_cached_read_maybe_advance(pg_stmt_t *cached, char *expanded_sql, int *sqlite_rc_out) {
-    if (sqlite_rc_out) *sqlite_rc_out = SQLITE_DONE;
+int step_cached_read_maybe_advance(pg_stmt_t *cached, char *expanded_sql, step_result_t *step_rc_out) {
+    if (step_rc_out) *step_rc_out = STEP_RESULT_DONE;
     if (!cached || !cached->result) return 0;
 
     cached->current_row++;
@@ -13,12 +13,12 @@ int step_cached_read_maybe_advance(pg_stmt_t *cached, char *expanded_sql, int *s
         PQclear(cached->result);
         cached->result = NULL;
         if (expanded_sql) sqlite3_free(expanded_sql);
-        if (sqlite_rc_out) *sqlite_rc_out = SQLITE_DONE;
+        if (step_rc_out) *step_rc_out = STEP_RESULT_DONE;
         return 1;
     }
 
     if (expanded_sql) sqlite3_free(expanded_sql);
-    if (sqlite_rc_out) *sqlite_rc_out = SQLITE_ROW;
+    if (step_rc_out) *step_rc_out = STEP_RESULT_ROW;
     return 1;
 }
 
@@ -40,13 +40,13 @@ pg_stmt_t *step_cached_read_get_or_create_stmt(pg_stmt_t *cached,
     return new_stmt;
 }
 
-int step_cached_read_execute_translated(pg_stmt_t *stmt,
-                                        pg_connection_t *conn,
-                                        const char *orig_sql,
-                                        const char *translated_sql,
-                                        int *pg_conn_error_out) {
+step_result_t step_cached_read_execute_translated(pg_stmt_t *stmt,
+                                                  pg_connection_t *conn,
+                                                  const char *orig_sql,
+                                                  const char *translated_sql,
+                                                  int *pg_conn_error_out) {
     if (pg_conn_error_out) *pg_conn_error_out = 0;
-    if (!stmt || !conn || !conn->conn || !translated_sql) return STEP_CACHED_READ_UNHANDLED;
+    if (!stmt || !conn || !conn->conn || !translated_sql) return STEP_RESULT_FALLBACK;
 
     pg_pool_touch_connection(conn);
     pthread_mutex_lock(&conn->mutex);
@@ -55,7 +55,7 @@ int step_cached_read_execute_translated(pg_stmt_t *stmt,
         LOG_ERROR("CACHED READ: conn became NULL after lock (TOCTOU race)");
         pthread_mutex_unlock(&conn->mutex);
         if (pg_conn_error_out) *pg_conn_error_out = 1;
-        return SQLITE_ERROR;
+        return STEP_RESULT_ERROR;
     }
 
     if (!atomic_load(&conn->streaming_active)) {
@@ -129,7 +129,7 @@ int step_cached_read_execute_translated(pg_stmt_t *stmt,
         if (resolve_column_tables(stmt, conn) < 0) {
             LOG_ERROR("Failed to resolve column tables, cleaning up");
         }
-        return (stmt->num_rows > 0) ? SQLITE_ROW : SQLITE_DONE;
+        return (stmt->num_rows > 0) ? STEP_RESULT_ROW : STEP_RESULT_DONE;
     }
 
     const char *err = (conn && conn->conn) ? PQerrorMessage(conn->conn) : "NULL connection";
@@ -139,10 +139,10 @@ int step_cached_read_execute_translated(pg_stmt_t *stmt,
         PQclear(stmt->result);
         stmt->result = NULL;
         if (pg_conn_error_out) *pg_conn_error_out = 1;
-        return SQLITE_ERROR;
+        return STEP_RESULT_ERROR;
     }
     PQclear(stmt->result);
     stmt->result = NULL;
     pg_pool_check_connection_health(conn);
-    return STEP_CACHED_READ_UNHANDLED;
+    return STEP_RESULT_FALLBACK;
 }

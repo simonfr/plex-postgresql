@@ -312,12 +312,12 @@ static int my_sqlite3_step_impl(sqlite3_stmt *pStmt) {
             if (sql && is_read_operation(sql) && !should_skip_sql(sql)) {
                 // For cached statements, use per-thread pool connection when available.
                 pg_connection_t *cached_read_conn = step_pick_thread_connection(pg_conn);
-                int cached_branch_rc = STEP_CACHED_READ_UNHANDLED;
+                step_result_t cached_branch_rc = STEP_RESULT_FALLBACK;
                 pg_stmt_t *cached = pg_find_cached_stmt(pStmt);
                 int sqlite_result = orig_sqlite3_step ? orig_sqlite3_step(pStmt) : SQLITE_ERROR;
 
                 if (sqlite_result == SQLITE_ROW || sqlite_result == SQLITE_DONE) {
-                    int cached_rc = SQLITE_DONE;
+                    step_result_t cached_rc = STEP_RESULT_DONE;
                     if (step_cached_read_maybe_advance(cached, expanded_sql, &cached_rc)) {
                         return cached_rc;
                     }
@@ -331,7 +331,7 @@ static int my_sqlite3_step_impl(sqlite3_stmt *pStmt) {
                             int conn_error = 0;
                             cached_branch_rc = step_cached_read_execute_translated(
                                 new_stmt, cached_read_conn, sql, trans.sql, &conn_error);
-                            if (conn_error && cached_branch_rc == SQLITE_ERROR) {
+                            if (conn_error && cached_branch_rc == STEP_RESULT_ERROR) {
                                 step_pg_conn_error = 1;
                             }
                         }
@@ -339,9 +339,11 @@ static int my_sqlite3_step_impl(sqlite3_stmt *pStmt) {
                     sql_translation_free(&trans);
                 }
 
-                if (cached_branch_rc == SQLITE_ROW || cached_branch_rc == SQLITE_DONE || cached_branch_rc == SQLITE_ERROR) {
+                if (cached_branch_rc == STEP_RESULT_ROW ||
+                    cached_branch_rc == STEP_RESULT_DONE ||
+                    cached_branch_rc == STEP_RESULT_ERROR) {
                     if (expanded_sql) sqlite3_free(expanded_sql);
-                    if (cached_branch_rc == SQLITE_ERROR) return SQLITE_ERROR;
+                    if (cached_branch_rc == STEP_RESULT_ERROR) return SQLITE_ERROR;
                     return cached_branch_rc;
                 }
 
@@ -458,9 +460,9 @@ static int my_sqlite3_step_impl(sqlite3_stmt *pStmt) {
             // === FIRST step() — send query and decide streaming vs eager ===
             if (!pg_stmt->result) {
                 int conn_error = 0;
-                int first_rc = step_read_first_execute(
+                step_result_t first_rc = step_read_first_execute(
                     pg_stmt, &exec_conn, paramValues, &conn_error);
-                if (first_rc == SQLITE_ERROR && conn_error) step_pg_conn_error = 1;
+                if (first_rc == STEP_RESULT_ERROR && conn_error) step_pg_conn_error = 1;
                 return first_rc;
             }
         } else if (pg_stmt->is_pg == 1) {  // WRITE
@@ -513,87 +515,9 @@ static int my_sqlite3_step_impl(sqlite3_stmt *pStmt) {
                 LOG_DEBUG("  SQL: %.300s", pg_stmt->pg_sql ? pg_stmt->pg_sql : "NULL");
             }
 
-            // VALIDATION: Skip statistics_media INSERTs with empty count AND duration
-            // FIX v0.9.2: Fetch sequence value before skipping to make last_insert_rowid() work
-            if (pg_stmt->pg_sql && strcasestr(pg_stmt->pg_sql, "statistics_media")) {
-                // Check if count (param 6) and duration (param 7) are both 0 or NULL
-                const char *count_val = (pg_stmt->param_count > 6) ? paramValues[6] : NULL;
-                const char *duration_val = (pg_stmt->param_count > 7) ? paramValues[7] : NULL;
-                int count_empty = !count_val || strcmp(count_val, "0") == 0;
-                int duration_empty = !duration_val || strcmp(duration_val, "0") == 0;
-                
-                if (count_empty && duration_empty) {
-                    LOG_DEBUG("SKIP statistics_media INSERT: count=%s duration=%s (empty)",
-                            count_val ? count_val : "NULL", duration_val ? duration_val : "NULL");
-                    
-                    // CRITICAL FIX: Advance the sequence so last_insert_rowid() works
-                    // This prevents Plex from throwing std::exception on timeline requests
-                    // CRITICAL FIX v0.9.4: Check NULL then lock BEFORE PQstatus (TOCTOU fix)
-                    if (exec_conn && exec_conn->conn) {
-                        pthread_mutex_lock(&exec_conn->mutex);
-                        // TOCTOU FIX v0.9.4.2: Re-check conn after acquiring lock
-                        if (!exec_conn->conn) {
-                            LOG_ERROR("SKIP SEQ: conn became NULL after lock (TOCTOU race)");
-                            pthread_mutex_unlock(&exec_conn->mutex);
-                        } else if (PQstatus(exec_conn->conn) == CONNECTION_OK) {
-                            PGresult *seq_res = PQexec(exec_conn->conn,
-                                "SELECT nextval('plex.statistics_media_id_seq')");
-                            if (PQresultStatus(seq_res) == PGRES_TUPLES_OK && PQntuples(seq_res) > 0) {
-                                const char *seq_val = PQgetvalue(seq_res, 0, 0);
-                                LOG_DEBUG("SKIP: Advanced sequence to %s", seq_val);
-                            }
-                            PQclear(seq_res);
-                        }
-                        pthread_mutex_unlock(&exec_conn->mutex);
-                    }
-                    
-                    pg_stmt->write_executed = 1;
-                    pthread_mutex_unlock(&pg_stmt->mutex);
-                    return SQLITE_DONE;
-                }
-            }
-
-            // VALIDATION: Skip metadata_items INSERTs with NULL library_section_id AND metadata_type
-            // These are junk rows created by misinterpreted bulk operations (40K+ found in production)
-            if (pg_stmt->pg_sql && strcasestr(pg_stmt->pg_sql, "INSERT INTO") &&
-                strcasestr(pg_stmt->pg_sql, "metadata_items") &&
-                !strcasestr(pg_stmt->pg_sql, "metadata_item_settings") &&
-                !strcasestr(pg_stmt->pg_sql, "metadata_item_views") &&
-                !strcasestr(pg_stmt->pg_sql, "metadata_item_accounts") &&
-                !strcasestr(pg_stmt->pg_sql, "metadata_item_clusters")) {
-                int lib_idx = rust_find_insert_column_index(pg_stmt->pg_sql, "library_section_id");
-                int type_idx = rust_find_insert_column_index(pg_stmt->pg_sql, "metadata_type");
-
-                if (lib_idx >= 0 && type_idx >= 0 &&
-                    lib_idx < pg_stmt->param_count && type_idx < pg_stmt->param_count) {
-                    const char *lib_val = paramValues[lib_idx];
-                    const char *type_val = paramValues[type_idx];
-                    if (!lib_val && !type_val) {
-                        LOG_ERROR("GUARD: Blocked junk INSERT into metadata_items "
-                                  "(library_section_id=NULL, metadata_type=NULL) "
-                                  "param_count=%d lib_idx=%d type_idx=%d",
-                                  pg_stmt->param_count, lib_idx, type_idx);
-
-                        // Advance sequence so last_insert_rowid() still works
-                        if (exec_conn && exec_conn->conn) {
-                            pthread_mutex_lock(&exec_conn->mutex);
-                            if (exec_conn->conn && PQstatus(exec_conn->conn) == CONNECTION_OK) {
-                                PGresult *seq_res = PQexec(exec_conn->conn,
-                                    "SELECT nextval('plex.metadata_items_id_seq')");
-                                if (PQresultStatus(seq_res) == PGRES_TUPLES_OK && PQntuples(seq_res) > 0) {
-                                    LOG_DEBUG("GUARD: Advanced metadata_items sequence to %s",
-                                              PQgetvalue(seq_res, 0, 0));
-                                }
-                                PQclear(seq_res);
-                            }
-                            pthread_mutex_unlock(&exec_conn->mutex);
-                        }
-
-                        pg_stmt->write_executed = 1;
-                        pthread_mutex_unlock(&pg_stmt->mutex);
-                        return SQLITE_DONE;
-                    }
-                }
+            if (step_write_should_skip_special_insert(pg_stmt, exec_conn, paramValues)) {
+                pthread_mutex_unlock(&pg_stmt->mutex);
+                return SQLITE_DONE;
             }
 
             // CRITICAL FIX v0.9.4: Check NULL but DON'T call PQstatus yet (TOCTOU fix)

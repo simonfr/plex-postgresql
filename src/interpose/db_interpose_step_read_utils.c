@@ -23,8 +23,8 @@ static void step_read_clear_row_caches(pg_stmt_t *stmt) {
     stmt->decoded_blob_row = -1;
 }
 
-int step_read_advance_cached_result(pg_stmt_t *stmt) {
-    if (!stmt || !stmt->cached_result) return SQLITE_ERROR;
+step_result_t step_read_advance_cached_result(pg_stmt_t *stmt) {
+    if (!stmt || !stmt->cached_result) return STEP_RESULT_ERROR;
 
     stmt->current_row++;
     if (stmt->current_row >= stmt->num_rows) {
@@ -32,15 +32,15 @@ int step_read_advance_cached_result(pg_stmt_t *stmt) {
         stmt->cached_result = NULL;
         stmt->read_done = 1;
         pthread_mutex_unlock(&stmt->mutex);
-        return SQLITE_DONE;
+        return STEP_RESULT_DONE;
     }
     pthread_mutex_unlock(&stmt->mutex);
-    return SQLITE_ROW;
+    return STEP_RESULT_ROW;
 }
 
-int step_read_streaming_next(sqlite3_stmt *pStmt, pg_stmt_t *stmt) {
+step_result_t step_read_streaming_next(sqlite3_stmt *pStmt, pg_stmt_t *stmt) {
     if (!stmt || !stmt->streaming_mode || !stmt->streaming_conn || !stmt->streaming_conn->conn) {
-        return SQLITE_ERROR;
+        return STEP_RESULT_ERROR;
     }
 
     if (stmt->result) {
@@ -59,7 +59,7 @@ int step_read_streaming_next(sqlite3_stmt *pStmt, pg_stmt_t *stmt) {
         stmt->streaming_conn = NULL;
         stmt->read_done = 1;
         pthread_mutex_unlock(&stmt->mutex);
-        return SQLITE_DONE;
+        return STEP_RESULT_DONE;
     }
 
     ExecStatusType row_status = PQresultStatus(row_res);
@@ -69,7 +69,7 @@ int step_read_streaming_next(sqlite3_stmt *pStmt, pg_stmt_t *stmt) {
         stmt->num_rows = 1;
         stmt->num_cols = PQnfields(row_res);
         pthread_mutex_unlock(&stmt->mutex);
-        return SQLITE_ROW;
+        return STEP_RESULT_ROW;
     }
     if (row_status == PGRES_TUPLES_OK) {
         PQclear(row_res);
@@ -80,7 +80,7 @@ int step_read_streaming_next(sqlite3_stmt *pStmt, pg_stmt_t *stmt) {
         stmt->streaming_conn = NULL;
         stmt->read_done = 1;
         pthread_mutex_unlock(&stmt->mutex);
-        return SQLITE_DONE;
+        return STEP_RESULT_DONE;
     }
 
     const char *err = PQerrorMessage(stmt->streaming_conn->conn);
@@ -94,11 +94,11 @@ int step_read_streaming_next(sqlite3_stmt *pStmt, pg_stmt_t *stmt) {
     stmt->streaming_conn = NULL;
     stmt->read_done = 1;
     pthread_mutex_unlock(&stmt->mutex);
-    return SQLITE_DONE;
+    return STEP_RESULT_DONE;
 }
 
-int step_read_eager_next(pg_stmt_t *stmt) {
-    if (!stmt || !stmt->result) return SQLITE_ERROR;
+step_result_t step_read_eager_next(pg_stmt_t *stmt) {
+    if (!stmt || !stmt->result) return STEP_RESULT_ERROR;
 
     stmt->current_row++;
     if (stmt->current_row >= stmt->num_rows) {
@@ -107,18 +107,18 @@ int step_read_eager_next(pg_stmt_t *stmt) {
         stmt->result_conn = NULL;
         stmt->read_done = 1;
         pthread_mutex_unlock(&stmt->mutex);
-        return SQLITE_DONE;
+        return STEP_RESULT_DONE;
     }
     pthread_mutex_unlock(&stmt->mutex);
-    return SQLITE_ROW;
+    return STEP_RESULT_ROW;
 }
 
-int step_read_first_execute(pg_stmt_t *pg_stmt,
-                            pg_connection_t **exec_conn_io,
-                            const char *paramValues[MAX_PARAMS],
-                            int *pg_conn_error_out) {
+step_result_t step_read_first_execute(pg_stmt_t *pg_stmt,
+                                      pg_connection_t **exec_conn_io,
+                                      const char *paramValues[MAX_PARAMS],
+                                      int *pg_conn_error_out) {
     if (pg_conn_error_out) *pg_conn_error_out = 0;
-    if (!pg_stmt || !exec_conn_io) return SQLITE_ERROR;
+    if (!pg_stmt || !exec_conn_io) return STEP_RESULT_ERROR;
 
     pg_connection_t *exec_conn = *exec_conn_io;
     pthread_t current = pthread_self();
@@ -140,7 +140,7 @@ int step_read_first_execute(pg_stmt_t *pg_stmt,
             LOG_ERROR("STEP SELECT: NULL connection after retry — giving up");
             pthread_mutex_unlock(&pg_stmt->mutex);
             if (pg_conn_error_out) *pg_conn_error_out = 1;
-            return SQLITE_ERROR;
+            return STEP_RESULT_ERROR;
         }
         LOG_ERROR("STEP SELECT: reconnect retry succeeded (exec_conn=%p)", (void *)exec_conn);
     }
@@ -153,7 +153,7 @@ int step_read_first_execute(pg_stmt_t *pg_stmt,
         pthread_mutex_unlock(&exec_conn->mutex);
         pthread_mutex_unlock(&pg_stmt->mutex);
         if (pg_conn_error_out) *pg_conn_error_out = 1;
-        return SQLITE_ERROR;
+        return STEP_RESULT_ERROR;
     }
 
     if (atomic_load(&exec_conn->streaming_active)) {
@@ -172,13 +172,13 @@ int step_read_first_execute(pg_stmt_t *pg_stmt,
                 pthread_mutex_unlock(&exec_conn->mutex);
                 pthread_mutex_unlock(&pg_stmt->mutex);
                 if (pg_conn_error_out) *pg_conn_error_out = 1;
-                return SQLITE_ERROR;
+                return STEP_RESULT_ERROR;
             }
         } else {
             LOG_ERROR("STEP SELECT: no non-streaming connection available");
             pthread_mutex_unlock(&pg_stmt->mutex);
             if (pg_conn_error_out) *pg_conn_error_out = 1;
-            return SQLITE_ERROR;
+            return STEP_RESULT_ERROR;
         }
     }
 
@@ -220,7 +220,7 @@ int step_read_first_execute(pg_stmt_t *pg_stmt,
                 pthread_mutex_unlock(&exec_conn->mutex);
                 pthread_mutex_unlock(&pg_stmt->mutex);
                 if (pg_conn_error_out) *pg_conn_error_out = 1;
-                return SQLITE_ERROR;
+                return STEP_RESULT_ERROR;
             }
         } else {
             LOG_ERROR("STEP READ: PQreset succeeded, connection recovered");
@@ -323,7 +323,7 @@ int step_read_first_execute(pg_stmt_t *pg_stmt,
         pg_pool_check_connection_health(exec_conn);
         pthread_mutex_unlock(&pg_stmt->mutex);
         if (pg_conn_error_out) *pg_conn_error_out = 1;
-        return SQLITE_ERROR;
+        return STEP_RESULT_ERROR;
     }
 
     if (!PQsetSingleRowMode(exec_conn->conn)) {
@@ -343,7 +343,7 @@ int step_read_first_execute(pg_stmt_t *pg_stmt,
             if (pg_stmt->num_rows > 0) {
                 *exec_conn_io = exec_conn;
                 pthread_mutex_unlock(&pg_stmt->mutex);
-                return SQLITE_ROW;
+                return STEP_RESULT_ROW;
             }
         } else if (pg_stmt->result) {
             const char *err2 = PQerrorMessage(exec_conn->conn);
@@ -355,7 +355,7 @@ int step_read_first_execute(pg_stmt_t *pg_stmt,
         pg_stmt->read_done = 1;
         *exec_conn_io = exec_conn;
         pthread_mutex_unlock(&pg_stmt->mutex);
-        return SQLITE_DONE;
+        return STEP_RESULT_DONE;
     }
 
     pg_stmt->streaming_mode = 1;
@@ -373,7 +373,7 @@ int step_read_first_execute(pg_stmt_t *pg_stmt,
         pg_stmt->read_done = 1;
         *exec_conn_io = exec_conn;
         pthread_mutex_unlock(&pg_stmt->mutex);
-        return SQLITE_DONE;
+        return STEP_RESULT_DONE;
     }
 
     ExecStatusType first_status = PQresultStatus(first_res);
@@ -385,7 +385,7 @@ int step_read_first_execute(pg_stmt_t *pg_stmt,
         resolve_column_tables(pg_stmt, exec_conn);
         *exec_conn_io = exec_conn;
         pthread_mutex_unlock(&pg_stmt->mutex);
-        return SQLITE_ROW;
+        return STEP_RESULT_ROW;
     }
     if (first_status == PGRES_TUPLES_OK) {
         LOG_DEBUG("STREAM: zero rows returned for sql=%.200s",
@@ -401,7 +401,7 @@ int step_read_first_execute(pg_stmt_t *pg_stmt,
         pg_stmt->read_done = 1;
         *exec_conn_io = exec_conn;
         pthread_mutex_unlock(&pg_stmt->mutex);
-        return SQLITE_DONE;
+        return STEP_RESULT_DONE;
     }
 
     const char *err = PQerrorMessage(exec_conn->conn);
@@ -420,5 +420,5 @@ int step_read_first_execute(pg_stmt_t *pg_stmt,
     *exec_conn_io = exec_conn;
     pthread_mutex_unlock(&pg_stmt->mutex);
     if (pg_conn_error_out) *pg_conn_error_out = 1;
-    return SQLITE_ERROR;
+    return STEP_RESULT_ERROR;
 }
