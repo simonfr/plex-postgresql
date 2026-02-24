@@ -18,5 +18,9 @@ step_result_t step_write_execute_and_finalize(pg_stmt_t *pg_stmt,
                                               pg_connection_t *exec_conn,
                                               const char *paramValues[MAX_PARAMS],
                                               int *pg_conn_error_out);
+void step_write_log_debug_context(pg_stmt_t *pg_stmt,
+                                  pg_connection_t *exec_conn,
+                                  const char *paramValues[MAX_PARAMS]);
+void step_log_step_exit_trace(pg_stmt_t *pg_stmt);
 
 #endif

@@ -458,34 +458,7 @@ static int my_sqlite3_step_impl(sqlite3_stmt *pStmt) {
                 return SQLITE_DONE;
             }
 
-            // Log INSERT on play_queue_generators for debugging
-            if (pg_stmt->pg_sql && strstr(pg_stmt->pg_sql, "play_queue_generators")) {
-                LOG_DEBUG("INSERT play_queue_generators on thread %p conn %p",
-                        (void*)pthread_self(), (void*)exec_conn);
-            }
-
-            // Debug: log INSERT params for troubleshooting
-            if (pg_stmt->sql && strcasestr(pg_stmt->sql, "INSERT INTO metadata_items")) {
-                LOG_DEBUG("STEP metadata_items INSERT: param_count=%d", pg_stmt->param_count);
-                // CRITICAL FIX: Only access paramValues within bounds
-                LOG_DEBUG("  PARAMS: [0]=%s [1]=%s [2]=%s [8]=%s [9]=%s",
-                         (pg_stmt->param_count > 0 && paramValues[0]) ? paramValues[0] : "NULL",
-                         (pg_stmt->param_count > 1 && paramValues[1]) ? paramValues[1] : "NULL",
-                         (pg_stmt->param_count > 2 && paramValues[2]) ? paramValues[2] : "NULL",
-                         (pg_stmt->param_count > 8 && paramValues[8]) ? paramValues[8] : "NULL",  // title
-                         (pg_stmt->param_count > 9 && paramValues[9]) ? paramValues[9] : "NULL"); // title_sort
-            }
-            // Debug: log play_queue_generators INSERT params
-            if (pg_stmt->sql && strcasestr(pg_stmt->sql, "play_queue_generators")) {
-                LOG_DEBUG("STEP play_queue_generators INSERT: param_count=%d", pg_stmt->param_count);
-                // CRITICAL FIX: Only access paramValues within bounds
-                LOG_DEBUG("  PARAMS: [0]=%s [1]=%s [2]=%s [3]=%s",
-                         (pg_stmt->param_count > 0 && paramValues[0]) ? paramValues[0] : "NULL",  // playlist_id
-                         (pg_stmt->param_count > 1 && paramValues[1]) ? paramValues[1] : "NULL",  // metadata_item_id
-                         (pg_stmt->param_count > 2 && paramValues[2]) ? paramValues[2] : "NULL",  // uri
-                         (pg_stmt->param_count > 3 && paramValues[3]) ? paramValues[3] : "NULL"); // limit
-                LOG_DEBUG("  SQL: %.300s", pg_stmt->pg_sql ? pg_stmt->pg_sql : "NULL");
-            }
+            step_write_log_debug_context(pg_stmt, exec_conn, paramValues);
 
             if (step_write_should_skip_special_insert(pg_stmt, exec_conn, paramValues)) {
                 pthread_mutex_unlock(&pg_stmt->mutex);
@@ -522,16 +495,7 @@ static int my_sqlite3_step_impl(sqlite3_stmt *pStmt) {
         // The RETURNING result is kept for debugging but not exposed as SQLITE_ROW
         if (pg_stmt->is_pg == 1) return SQLITE_DONE;
     
-    // DEBUG TRACE: Log every step completion for PlayQueue/COUNT queries
-    if (pg_stmt && pg_stmt->pg_sql) {
-        int is_count = (strstr(pg_stmt->pg_sql, "COUNT(") != NULL || strstr(pg_stmt->pg_sql, "SUM(") != NULL || strstr(pg_stmt->pg_sql, "MAX(") != NULL);
-        int is_playqueue = (strstr(pg_stmt->pg_sql, "play_queue") != NULL);
-        
-        if (is_count || is_playqueue) {
-            LOG_DEBUG("DEBUG_TRACE: STEP_EXIT - rows=%d cols=%d sql=%.100s",
-                      pg_stmt->num_rows, pg_stmt->num_cols, pg_stmt->pg_sql);
-        }
-    }
+    step_log_step_exit_trace(pg_stmt);
     }
 
     // Fallback to SQLite for non-PostgreSQL statements
