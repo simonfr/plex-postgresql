@@ -140,3 +140,93 @@ int step_write_should_skip_special_insert(pg_stmt_t *pg_stmt,
 
     return 0;
 }
+
+step_result_t step_write_execute_and_finalize(pg_stmt_t *pg_stmt,
+                                              pg_connection_t *exec_conn,
+                                              const char *paramValues[MAX_PARAMS],
+                                              int *pg_conn_error_out) {
+    if (pg_conn_error_out) *pg_conn_error_out = 0;
+    if (!pg_stmt || !exec_conn || !exec_conn->conn) {
+        if (pg_stmt) pg_stmt->write_executed = 1;
+        if (pg_conn_error_out) *pg_conn_error_out = 1;
+        return STEP_RESULT_ERROR;
+    }
+
+    PGresult *res = NULL;
+
+    if (pg_stmt->use_prepared && pg_stmt->stmt_name[0]) {
+        const char *cached_name = NULL;
+        int is_cached = pg_stmt_cache_lookup(exec_conn, pg_stmt->sql_hash, &cached_name);
+
+        if (!is_cached) {
+            PGresult *prep_res = PQprepare(exec_conn->conn, pg_stmt->stmt_name,
+                                           pg_stmt->pg_sql, pg_stmt->param_count, NULL);
+            if (PQresultStatus(prep_res) == PGRES_COMMAND_OK) {
+                pg_stmt_cache_add(exec_conn, pg_stmt->sql_hash, pg_stmt->stmt_name, pg_stmt->param_count);
+                cached_name = pg_stmt->stmt_name;
+                is_cached = 1;
+            } else if (pg_is_duplicate_prepared_stmt(prep_res)) {
+                pg_stmt_cache_add(exec_conn, pg_stmt->sql_hash, pg_stmt->stmt_name, pg_stmt->param_count);
+                cached_name = pg_stmt->stmt_name;
+                is_cached = 1;
+            } else {
+                LOG_DEBUG("PQprepare (write) failed for %s: %s", pg_stmt->stmt_name,
+                          PQerrorMessage(exec_conn->conn));
+            }
+            PQclear(prep_res);
+        }
+
+        if (is_cached && cached_name) {
+            res = PQexecPrepared(exec_conn->conn, cached_name,
+                                 pg_stmt->param_count, paramValues, NULL, NULL, 0);
+        } else {
+            res = PQexecParams(exec_conn->conn, pg_stmt->pg_sql,
+                               pg_stmt->param_count, NULL, paramValues, NULL, NULL, 0);
+        }
+    } else {
+        res = PQexecParams(exec_conn->conn, pg_stmt->pg_sql,
+                           pg_stmt->param_count, NULL, paramValues, NULL, NULL, 0);
+    }
+
+    pthread_mutex_unlock(&exec_conn->mutex);
+
+    ExecStatusType status = PQresultStatus(res);
+    if (status == PGRES_COMMAND_OK || status == PGRES_TUPLES_OK) {
+        exec_conn->last_changes = atoi(PQcmdTuples(res) ?: "1");
+
+        if (status == PGRES_TUPLES_OK && PQntuples(res) > 0) {
+            const char *id_str = PQgetvalue(res, 0, 0);
+            if (id_str && *id_str) {
+                sqlite3_int64 rowid = (sqlite3_int64)atoll(id_str);
+                if (rowid > 0) {
+                    exec_conn->last_insert_rowid = rowid;
+                    pg_set_global_last_insert_rowid(rowid);
+                }
+
+                if (pg_stmt->pg_sql && strstr(pg_stmt->pg_sql, "play_queue_generators")) {
+                    LOG_DEBUG("STEP play_queue_generators: RETURNING id = %s on thread %p conn %p",
+                              id_str, (void *)pthread_self(), (void *)exec_conn);
+                }
+                sqlite3_int64 meta_id = extract_metadata_id_from_generator_sql(pg_stmt->sql);
+                if (meta_id > 0) pg_set_global_metadata_id(meta_id);
+            }
+        }
+    } else {
+        const char *err = (exec_conn && exec_conn->conn) ? PQerrorMessage(exec_conn->conn) : "NULL connection";
+        LOG_ERROR("STEP PG write error: %s", err);
+        LOG_ERROR("  Original SQL: %.300s", pg_stmt->sql ? pg_stmt->sql : "(null)");
+        LOG_ERROR("  Translated SQL: %.300s", pg_stmt->pg_sql ? pg_stmt->pg_sql : "(null)");
+        if (pg_is_stale_prepared_stmt(res)) {
+            pg_stmt_cache_clear_local(exec_conn);
+            if (res) PQclear(res);
+            if (pg_conn_error_out) *pg_conn_error_out = 1;
+            pg_stmt->write_executed = 1;
+            return STEP_RESULT_ERROR;
+        }
+        pg_pool_check_connection_health(exec_conn);
+    }
+
+    pg_stmt->write_executed = 1;
+    if (res) PQclear(res);
+    return STEP_RESULT_DONE;
+}

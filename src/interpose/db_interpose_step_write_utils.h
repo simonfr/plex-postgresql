@@ -2,6 +2,7 @@
 #define DB_INTERPOSE_STEP_WRITE_UTILS_H
 
 #include "db_interpose.h"
+#include "db_interpose_step_result.h"
 
 pg_connection_t *step_pick_thread_connection(pg_connection_t *base_conn);
 int step_cached_write_should_noop(pg_connection_t *base_conn, const char *sql, pg_connection_t **out_exec_conn);
@@ -10,5 +11,9 @@ char *step_cached_write_build_exec_sql(const char *orig_sql, const char *transla
 int step_write_should_skip_special_insert(pg_stmt_t *pg_stmt,
                                           pg_connection_t *exec_conn,
                                           const char *paramValues[MAX_PARAMS]);
+step_result_t step_write_execute_and_finalize(pg_stmt_t *pg_stmt,
+                                              pg_connection_t *exec_conn,
+                                              const char *paramValues[MAX_PARAMS],
+                                              int *pg_conn_error_out);
 
 #endif

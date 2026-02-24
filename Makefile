@@ -169,13 +169,13 @@ src/interpose/db_interpose_step.o: src/interpose/db_interpose_step.c src/db_inte
 src/interpose/db_interpose_txn_utils.o: src/interpose/db_interpose_txn_utils.c src/interpose/db_interpose_txn_utils.h src/db_interpose.h
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
-src/interpose/db_interpose_step_write_utils.o: src/interpose/db_interpose_step_write_utils.c src/interpose/db_interpose_step_write_utils.h src/interpose/db_interpose_txn_utils.h src/db_interpose.h
+src/interpose/db_interpose_step_write_utils.o: src/interpose/db_interpose_step_write_utils.c src/interpose/db_interpose_step_write_utils.h src/interpose/db_interpose_step_result.h src/interpose/db_interpose_txn_utils.h src/db_interpose.h
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
-src/interpose/db_interpose_step_cached_read_utils.o: src/interpose/db_interpose_step_cached_read_utils.c src/interpose/db_interpose_step_cached_read_utils.h src/db_interpose.h
+src/interpose/db_interpose_step_cached_read_utils.o: src/interpose/db_interpose_step_cached_read_utils.c src/interpose/db_interpose_step_cached_read_utils.h src/interpose/db_interpose_step_result.h src/db_interpose.h
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
-src/interpose/db_interpose_step_read_utils.o: src/interpose/db_interpose_step_read_utils.c src/interpose/db_interpose_step_read_utils.h src/db_interpose.h
+src/interpose/db_interpose_step_read_utils.o: src/interpose/db_interpose_step_read_utils.c src/interpose/db_interpose_step_read_utils.h src/interpose/db_interpose_step_result.h src/db_interpose.h
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
 src/interpose/db_interpose_column.o: src/interpose/db_interpose_column.c src/db_interpose.h
