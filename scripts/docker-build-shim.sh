@@ -52,7 +52,7 @@ gcc -shared -fPIC -O2 -fno-stack-protector \
     src/runtime/db_interpose_common.c src/runtime/platform_backtrace.c \
     src/interpose/db_interpose_open.c src/interpose/db_interpose_exec.c \
     src/interpose/db_interpose_prepare.c src/interpose/db_interpose_bind.c \
-    src/interpose/db_interpose_step.c src/interpose/db_interpose_txn_utils.c src/interpose/db_interpose_step_write_utils.c src/interpose/db_interpose_column.c \
+    src/interpose/db_interpose_step.c src/interpose/db_interpose_txn_utils.c src/interpose/db_interpose_step_write_utils.c src/interpose/db_interpose_step_cached_read_utils.c src/interpose/db_interpose_column.c \
     src/interpose/db_interpose_value.c src/interpose/db_interpose_metadata.c \
     src/support/exception_what.cpp \
     src/rust_bridge/sql_translator_rust_bridge.c src/support/str_utils.c \

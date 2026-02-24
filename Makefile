@@ -44,7 +44,7 @@ PG_MODULES = src/pg/pg_config.o src/pg/pg_logging.o src/pg/pg_client.o src/pg/pg
 # DB Interpose modules - shared between Mac and Linux
 DB_INTERPOSE_SHARED = src/runtime/db_interpose_common.o src/runtime/platform_backtrace.o src/interpose/db_interpose_open.o \
                       src/interpose/db_interpose_exec.o src/interpose/db_interpose_prepare.o src/interpose/db_interpose_bind.o \
-                      src/interpose/db_interpose_step.o src/interpose/db_interpose_txn_utils.o src/interpose/db_interpose_step_write_utils.o src/interpose/db_interpose_column.o src/interpose/db_interpose_value.o \
+                      src/interpose/db_interpose_step.o src/interpose/db_interpose_txn_utils.o src/interpose/db_interpose_step_write_utils.o src/interpose/db_interpose_step_cached_read_utils.o src/interpose/db_interpose_column.o src/interpose/db_interpose_value.o \
                       src/interpose/db_interpose_metadata.o
 
 # Platform-specific core module
@@ -163,13 +163,16 @@ src/interpose/db_interpose_prepare.o: src/interpose/db_interpose_prepare.c src/d
 src/interpose/db_interpose_bind.o: src/interpose/db_interpose_bind.c src/db_interpose.h
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
-src/interpose/db_interpose_step.o: src/interpose/db_interpose_step.c src/db_interpose.h
+src/interpose/db_interpose_step.o: src/interpose/db_interpose_step.c src/db_interpose.h src/interpose/db_interpose_step_write_utils.h src/interpose/db_interpose_step_cached_read_utils.h
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
 src/interpose/db_interpose_txn_utils.o: src/interpose/db_interpose_txn_utils.c src/interpose/db_interpose_txn_utils.h src/db_interpose.h
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
 src/interpose/db_interpose_step_write_utils.o: src/interpose/db_interpose_step_write_utils.c src/interpose/db_interpose_step_write_utils.h src/interpose/db_interpose_txn_utils.h src/db_interpose.h
+	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
+
+src/interpose/db_interpose_step_cached_read_utils.o: src/interpose/db_interpose_step_cached_read_utils.c src/interpose/db_interpose_step_cached_read_utils.h src/db_interpose.h
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
 src/interpose/db_interpose_column.o: src/interpose/db_interpose_column.c src/db_interpose.h

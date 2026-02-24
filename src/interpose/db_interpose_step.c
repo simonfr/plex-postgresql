@@ -8,6 +8,7 @@
 #include "db_interpose.h"
 #include "db_interpose_common.h"  // For platform_print_backtrace
 #include "db_interpose_rust.h"
+#include "db_interpose_step_cached_read_utils.h"
 #include "db_interpose_step_write_utils.h"
 #include "pg_query_cache.h"
 #include "shim_alloc.h"
@@ -308,35 +309,16 @@ static int my_sqlite3_step_impl(sqlite3_stmt *pStmt) {
 
             // Handle cached READ
             if (sql && is_read_operation(sql) && !should_skip_sql(sql)) {
-                // For cached statements, also use thread-local connection
-                pg_connection_t *cached_read_conn = pg_conn;
-                if (is_library_db_path(pg_conn->db_path)) {
-                    pg_connection_t *thread_conn = pg_get_thread_connection(pg_conn->db_path);
-                    if (thread_conn && thread_conn->is_pg_active && thread_conn->conn) {
-                        cached_read_conn = thread_conn;
-                    }
-                }
+                // For cached statements, use per-thread pool connection when available.
+                pg_connection_t *cached_read_conn = step_pick_thread_connection(pg_conn);
 
                 pg_stmt_t *cached = pg_find_cached_stmt(pStmt);
                 int sqlite_result = orig_sqlite3_step ? orig_sqlite3_step(pStmt) : SQLITE_ERROR;
 
                 if (sqlite_result == SQLITE_ROW || sqlite_result == SQLITE_DONE) {
-                    // For cached statements:
-                    // - First call (no result): execute PostgreSQL query
-                    // - Subsequent calls: advance through results
-                    if (cached && cached->result) {
-                        // Already have results, advance to next row
-                        cached->current_row++;
-                        if (cached->current_row >= cached->num_rows) {
-                            // CRITICAL FIX: Free PGresult immediately when done
-                            // Prevents memory accumulation when Plex doesn't call reset()
-                            PQclear(cached->result);
-                            cached->result = NULL;
-                            if (expanded_sql) sqlite3_free(expanded_sql);
-                            return SQLITE_DONE;
-                        }
-                        if (expanded_sql) sqlite3_free(expanded_sql);
-                        return SQLITE_ROW;
+                    int cached_rc = SQLITE_DONE;
+                    if (step_cached_read_maybe_advance(cached, expanded_sql, &cached_rc)) {
+                        return cached_rc;
                     }
 
                     // No result yet - execute PostgreSQL query
@@ -344,16 +326,8 @@ static int my_sqlite3_step_impl(sqlite3_stmt *pStmt) {
                     if (trans.success && trans.sql) {
                         // Verbose query logging disabled for performance
 
-                        pg_stmt_t *new_stmt = cached;
-                        if (!new_stmt) {
-                            new_stmt = pg_stmt_create(cached_read_conn, sql, pStmt);
-                            if (new_stmt) {
-                                new_stmt->pg_sql = strdup(trans.sql);
-                                new_stmt->is_pg = 2;
-                                new_stmt->is_cached = 1;
-                                pg_register_cached_stmt(pStmt, new_stmt);
-                            }
-                        }
+                        pg_stmt_t *new_stmt =
+                            step_cached_read_get_or_create_stmt(cached, cached_read_conn, sql, pStmt, trans.sql);
                         if (new_stmt) {
                             // CRITICAL: Touch connection to prevent pool from releasing it during query
                             pg_pool_touch_connection(cached_read_conn);
