@@ -418,6 +418,21 @@ fn transform_expr(expr: &mut Expr) {
             else_result,
             ..
         } => {
+            // Idempotence guard: if this already is our JSON validity guard pattern,
+            // do not rewrite the result branch again on retranslations.
+            let is_json_guard = operand.is_none()
+                && conditions.len() == 1
+                && is_json_valid_call(&conditions[0].condition)
+                && matches!(
+                    else_result.as_deref(),
+                    Some(Expr::Value(ValueWithSpan {
+                        value: Value::Null,
+                        ..
+                    }))
+                );
+            if is_json_guard {
+                return;
+            }
             if let Some(op) = operand {
                 transform_expr(op);
             }
@@ -660,6 +675,23 @@ fn transform_expr(expr: &mut Expr) {
     }
 }
 
+fn is_json_valid_call(expr: &Expr) -> bool {
+    match expr {
+        Expr::Function(f) => {
+            let name = f
+                .name
+                .0
+                .first()
+                .and_then(|p| match p {
+                    ObjectNamePart::Identifier(i) => Some(i.value.to_lowercase()),
+                    _ => None,
+                });
+            name.as_deref() == Some("json_valid")
+        }
+        _ => false,
+    }
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 fn func_name_str(func: &Function) -> String {
@@ -899,7 +931,7 @@ fn make_jsonb_cast(expr: Expr) -> Expr {
         kind: CastKind::DoubleColon,
         expr: Box::new(expr),
         data_type: DataType::Custom(
-            ObjectName(vec![ObjectNamePart::Identifier(Ident::new("jsonb"))]),
+            ObjectName(vec![ObjectNamePart::Identifier(Ident::new("JSONB"))]),
             vec![],
         ),
         array: false,

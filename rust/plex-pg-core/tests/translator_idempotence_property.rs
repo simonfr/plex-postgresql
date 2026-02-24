@@ -34,21 +34,13 @@ fn idempotence_known_corpus() {
         "SELECT * FROM metadata_items WHERE title LIKE '%test%' ORDER BY title",
         "SELECT DISTINCT id FROM metadata_items ORDER BY title",
         "SELECT a, count(*) FROM t GROUP BY a",
+        "SELECT * FROM t WHERE extra_data ->> '$.pv:version' < $3",
         "UPDATE t SET a = ?, b = :name WHERE id = ?",
         "INSERT OR IGNORE INTO schema_migrations (version) VALUES ('20230101')",
     ];
     for sql in cases {
         assert_idempotent(sql);
     }
-}
-
-#[test]
-fn json_guarded_expression_remains_valid_across_retranslation() {
-    let input = "SELECT * FROM t WHERE extra_data ->> '$.pv:version' < $3";
-    let once = tr(input);
-    let twice = tr(&once);
-    assert_pg(&once);
-    assert_pg(&twice);
 }
 
 fn ident() -> impl Strategy<Value = String> {
