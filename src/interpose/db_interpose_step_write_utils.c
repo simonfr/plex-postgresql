@@ -354,6 +354,108 @@ step_result_t step_write_execute_and_finalize(pg_stmt_t *pg_stmt,
     return STEP_RESULT_DONE;
 }
 
+step_result_t step_cached_write_execute_and_finalize(pg_stmt_t **cached_io,
+                                                     sqlite3_stmt *pStmt,
+                                                     pg_connection_t *changes_conn,
+                                                     pg_connection_t *exec_conn,
+                                                     const char *orig_sql,
+                                                     const char *exec_sql,
+                                                     int *pg_conn_error_out) {
+    if (pg_conn_error_out) *pg_conn_error_out = 0;
+    if (!exec_conn || !exec_conn->conn || !orig_sql || !exec_sql) {
+        if (pg_conn_error_out) *pg_conn_error_out = 1;
+        return STEP_RESULT_ERROR;
+    }
+
+    if (strstr(orig_sql, "play_queue_generators")) {
+        LOG_DEBUG("CACHED INSERT play_queue_generators on thread %p conn %p",
+                  (void *)pthread_self(), (void *)exec_conn);
+    }
+
+    pg_pool_touch_connection(exec_conn);
+    pthread_mutex_lock(&exec_conn->mutex);
+
+    if (!exec_conn->conn) {
+        LOG_ERROR("CACHED EXEC: conn became NULL after lock (TOCTOU race)");
+        pthread_mutex_unlock(&exec_conn->mutex);
+        if (pg_conn_error_out) *pg_conn_error_out = 1;
+        return STEP_RESULT_ERROR;
+    }
+
+    step_conn_cancel_and_drain(exec_conn, "CACHED EXEC");
+
+    uint64_t sql_hash = pg_hash_sql(exec_sql);
+    char stmt_name[32];
+    snprintf(stmt_name, sizeof(stmt_name), "ce_%llx", (unsigned long long)sql_hash);
+
+    const char *cached_stmt_name = NULL;
+    PGresult *res = NULL;
+    if (pg_stmt_cache_lookup(exec_conn, sql_hash, &cached_stmt_name)) {
+        res = PQexecPrepared(exec_conn->conn, cached_stmt_name, 0, NULL, NULL, NULL, 0);
+    } else {
+        PGresult *prep_res = PQprepare(exec_conn->conn, stmt_name, exec_sql, 0, NULL);
+        if (PQresultStatus(prep_res) == PGRES_COMMAND_OK) {
+            pg_stmt_cache_add(exec_conn, sql_hash, stmt_name, 0);
+            PQclear(prep_res);
+            res = PQexecPrepared(exec_conn->conn, stmt_name, 0, NULL, NULL, NULL, 0);
+        } else if (pg_is_duplicate_prepared_stmt(prep_res)) {
+            pg_stmt_cache_add(exec_conn, sql_hash, stmt_name, 0);
+            PQclear(prep_res);
+            res = PQexecPrepared(exec_conn->conn, stmt_name, 0, NULL, NULL, NULL, 0);
+        } else {
+            LOG_DEBUG("CACHED EXEC prepare failed, using PQexec: %s",
+                      PQerrorMessage(exec_conn->conn));
+            PQclear(prep_res);
+            res = PQexec(exec_conn->conn, exec_sql);
+        }
+    }
+    pthread_mutex_unlock(&exec_conn->mutex);
+
+    ExecStatusType status = PQresultStatus(res);
+    if (status == PGRES_COMMAND_OK || status == PGRES_TUPLES_OK) {
+        if (changes_conn) changes_conn->last_changes = atoi(PQcmdTuples(res) ?: "1");
+
+        if (strncasecmp(orig_sql, "INSERT", 6) == 0 &&
+            status == PGRES_TUPLES_OK && PQntuples(res) > 0) {
+            const char *id_str = PQgetvalue(res, 0, 0);
+            if (id_str && *id_str) {
+                sqlite3_int64 meta_id = extract_metadata_id_from_generator_sql(orig_sql);
+                if (meta_id > 0) pg_set_global_metadata_id(meta_id);
+            }
+        }
+    } else {
+        const char *err = (changes_conn && changes_conn->conn)
+                            ? PQerrorMessage(changes_conn->conn)
+                            : "NULL connection";
+        log_sql_fallback(orig_sql, exec_sql, err, "CACHED WRITE");
+        if (pg_is_stale_prepared_stmt(res)) {
+            pg_stmt_cache_clear_local(exec_conn);
+            PQclear(res);
+            if (pg_conn_error_out) *pg_conn_error_out = 1;
+            return STEP_RESULT_ERROR;
+        }
+        pg_pool_check_connection_health(exec_conn);
+    }
+
+    if (res) PQclear(res);
+
+    pg_stmt_t *cached = cached_io ? *cached_io : NULL;
+    if (!cached) {
+        cached = pg_stmt_create(exec_conn, orig_sql, pStmt);
+        if (cached) {
+            cached->is_pg = 1;
+            cached->is_cached = 1;
+            cached->write_executed = 1;
+            pg_register_cached_stmt(pStmt, cached);
+        }
+        if (cached_io) *cached_io = cached;
+    } else {
+        cached->write_executed = 1;
+    }
+
+    return STEP_RESULT_DONE;
+}
+
 void step_write_log_debug_context(pg_stmt_t *pg_stmt,
                                   pg_connection_t *exec_conn,
                                   const char *paramValues[MAX_PARAMS]) {

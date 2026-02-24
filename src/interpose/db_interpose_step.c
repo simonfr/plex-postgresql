@@ -8,7 +8,6 @@
 #include "db_interpose.h"
 #include "db_interpose_common.h"  // For platform_print_backtrace
 #include "db_interpose_rust.h"
-#include "db_interpose_conn_utils.h"
 #include "db_interpose_step_cached_read_utils.h"
 #include "db_interpose_step_read_utils.h"
 #include "db_interpose_step_write_utils.h"
@@ -175,104 +174,17 @@ static int my_sqlite3_step_impl(sqlite3_stmt *pStmt) {
                 if (trans.success && trans.sql) {
                     const char *exec_sql = trans.sql;
                     char *insert_sql = step_cached_write_build_exec_sql(sql, trans.sql, &exec_sql);
-
-                    // Log cached INSERT on play_queue_generators
-                    if (strstr(sql, "play_queue_generators")) {
-                        LOG_DEBUG("CACHED INSERT play_queue_generators on thread %p conn %p",
-                                (void*)pthread_self(), (void*)cached_exec_conn);
-                    }
-
-                    // CRITICAL: Touch connection to prevent pool from releasing it during query
-                    pg_pool_touch_connection(cached_exec_conn);
-
-                    // CRITICAL: Lock connection mutex to prevent concurrent libpq access
-                    pthread_mutex_lock(&cached_exec_conn->mutex);
-
-                    // TOCTOU FIX v0.9.4.2: Re-check conn after acquiring lock
-                    if (!cached_exec_conn->conn) {
-                        LOG_ERROR("CACHED EXEC: conn became NULL after lock (TOCTOU race)");
-                        pthread_mutex_unlock(&cached_exec_conn->mutex);
-                        if (insert_sql) free(insert_sql);
+                    int cached_write_conn_error = 0;
+                    step_result_t cached_write_rc = step_cached_write_execute_and_finalize(
+                        &cached, pStmt, pg_conn, cached_exec_conn, sql, exec_sql, &cached_write_conn_error);
+                    if (insert_sql) free(insert_sql);
+                    if (cached_write_rc == STEP_RESULT_ERROR) {
                         sql_translation_free(&trans);
                         if (expanded_sql) sqlite3_free(expanded_sql);
-                        do { step_pg_conn_error = 1; return SQLITE_ERROR; } while(0);
-                    }
-
-                    // Guard cancel+drain — no-op while connection is in streaming mode.
-                    step_conn_cancel_and_drain(cached_exec_conn, "CACHED EXEC");
-
-                    // Use prepared statement for better performance (skip parse/plan)
-                    uint64_t sql_hash = pg_hash_sql(exec_sql);
-                    char stmt_name[32];
-                    snprintf(stmt_name, sizeof(stmt_name), "ce_%llx", (unsigned long long)sql_hash);
-                    
-                    const char *cached_stmt_name = NULL;
-                    PGresult *res;
-                    if (pg_stmt_cache_lookup(cached_exec_conn, sql_hash, &cached_stmt_name)) {
-                        // Cached - execute prepared
-                        res = PQexecPrepared(cached_exec_conn->conn, cached_stmt_name, 0, NULL, NULL, NULL, 0);
-                    } else {
-                        // Not cached - prepare and execute
-                        PGresult *prep_res = PQprepare(cached_exec_conn->conn, stmt_name, exec_sql, 0, NULL);
-                        if (PQresultStatus(prep_res) == PGRES_COMMAND_OK) {
-                            pg_stmt_cache_add(cached_exec_conn, sql_hash, stmt_name, 0);
-                            PQclear(prep_res);
-                            res = PQexecPrepared(cached_exec_conn->conn, stmt_name, 0, NULL, NULL, NULL, 0);
-                        } else if (pg_is_duplicate_prepared_stmt(prep_res)) {
-                            pg_stmt_cache_add(cached_exec_conn, sql_hash, stmt_name, 0);
-                            PQclear(prep_res);
-                            res = PQexecPrepared(cached_exec_conn->conn, stmt_name, 0, NULL, NULL, NULL, 0);
-                        } else {
-                            LOG_DEBUG("CACHED EXEC prepare failed, using PQexec: %s",
-                                      PQerrorMessage(cached_exec_conn->conn));
-                            PQclear(prep_res);
-                            res = PQexec(cached_exec_conn->conn, exec_sql);
-                        }
-                    }
-                    pthread_mutex_unlock(&cached_exec_conn->mutex);
-                    ExecStatusType status = PQresultStatus(res);
-
-                    if (status == PGRES_COMMAND_OK || status == PGRES_TUPLES_OK) {
-                        pg_conn->last_changes = atoi(PQcmdTuples(res) ?: "1");
-
-                        if (strncasecmp(sql, "INSERT", 6) == 0 && status == PGRES_TUPLES_OK && PQntuples(res) > 0) {
-                            const char *id_str = PQgetvalue(res, 0, 0);
-                            if (id_str && *id_str) {
-                                sqlite3_int64 meta_id = extract_metadata_id_from_generator_sql(sql);
-                                if (meta_id > 0) pg_set_global_metadata_id(meta_id);
-                            }
-                        }
-                    } else {
-                        const char *err = (pg_conn && pg_conn->conn) ? PQerrorMessage(pg_conn->conn) : "NULL connection";
-                        log_sql_fallback(sql, exec_sql, err, "CACHED WRITE");
-                        // v0.9.38: Stale prepared statement recovery (SQLSTATE 26000)
-                        if (pg_is_stale_prepared_stmt(res)) {
-                            pg_stmt_cache_clear_local(cached_exec_conn);
-                            if (insert_sql) free(insert_sql);
-                            PQclear(res);
-                            /* Note: mutex already unlocked at line 310 — do NOT unlock again */
-                            sql_translation_free(&trans);
-                            if (expanded_sql) sqlite3_free(expanded_sql);
+                        if (cached_write_conn_error) {
                             do { step_pg_conn_error = 1; return SQLITE_ERROR; } while(0);
                         }
-                        // CRITICAL: Check if connection is corrupted and needs reset
-                        pg_pool_check_connection_health(cached_exec_conn);
-                    }
-
-                    if (insert_sql) free(insert_sql);
-                    PQclear(res);
-
-                    // CRITICAL FIX: Create cached stmt entry and mark as executed
-                    if (!cached) {
-                        cached = pg_stmt_create(cached_exec_conn, sql, pStmt);
-                        if (cached) {
-                            cached->is_pg = 1;  // WRITE
-                            cached->is_cached = 1;
-                            cached->write_executed = 1;  // Mark as executed
-                            pg_register_cached_stmt(pStmt, cached);
-                        }
-                    } else {
-                        cached->write_executed = 1;  // Mark as executed
+                        return SQLITE_ERROR;
                     }
                 }
                 sql_translation_free(&trans);

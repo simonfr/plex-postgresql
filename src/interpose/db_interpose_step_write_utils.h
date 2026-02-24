@@ -18,6 +18,13 @@ step_result_t step_write_execute_and_finalize(pg_stmt_t *pg_stmt,
                                               pg_connection_t *exec_conn,
                                               const char *paramValues[MAX_PARAMS],
                                               int *pg_conn_error_out);
+step_result_t step_cached_write_execute_and_finalize(pg_stmt_t **cached_io,
+                                                     sqlite3_stmt *pStmt,
+                                                     pg_connection_t *changes_conn,
+                                                     pg_connection_t *exec_conn,
+                                                     const char *orig_sql,
+                                                     const char *exec_sql,
+                                                     int *pg_conn_error_out);
 void step_write_log_debug_context(pg_stmt_t *pg_stmt,
                                   pg_connection_t *exec_conn,
                                   const char *paramValues[MAX_PARAMS]);
