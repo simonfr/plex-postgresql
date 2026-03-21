@@ -1,0 +1,31 @@
+# EXISTS / NOT EXISTS subqueries
+
+statement ok
+CREATE TABLE se_a (id INTEGER, name TEXT);
+
+statement ok
+CREATE TABLE se_b (id INTEGER, a_id INTEGER, v INTEGER);
+
+statement ok
+INSERT INTO se_a (id, name) VALUES (1, 'A'), (2, 'B'), (3, 'C');
+
+statement ok
+INSERT INTO se_b (id, a_id, v) VALUES (10, 1, 3), (11, 1, 8), (12, 2, 4);
+
+query T rowsort
+SELECT a.name
+FROM se_a a
+WHERE EXISTS (
+  SELECT 1 FROM se_b b WHERE b.a_id = a.id AND b.v >= 8
+);
+----
+A
+
+query I rowsort
+SELECT COUNT(*)
+FROM se_a a
+WHERE NOT EXISTS (
+  SELECT 1 FROM se_b b WHERE b.a_id = a.id
+);
+----
+1

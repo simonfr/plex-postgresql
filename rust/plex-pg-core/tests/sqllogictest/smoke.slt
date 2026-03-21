@@ -1,0 +1,25 @@
+# Minimal smoke suite for SQLite vs translated PostgreSQL compatibility.
+
+statement ok
+CREATE TABLE t (id INTEGER, name TEXT, extra TEXT);
+
+statement ok
+INSERT INTO t (id, name, extra) VALUES (1, 'alpha', '{"a":1}'), (2, 'beta', '{"a":2}');
+
+query I rowsort
+SELECT id FROM t;
+----
+1
+2
+
+query T rowsort
+SELECT name FROM t;
+----
+alpha
+beta
+
+query T rowsort
+SELECT json_extract(extra, '$.a') FROM t;
+----
+1
+2

@@ -9,11 +9,32 @@ if [ "${1:-}" = "--with-noop" ]; then
     WITH_NOOP=1
 fi
 
+SANITIZE="${PLEX_PG_SANITIZE:-}"
+SANITIZE_FLAGS=""
+SANITIZE_LDFLAGS=""
+if [ -n "${SANITIZE}" ] && [ "${SANITIZE}" != "0" ]; then
+    echo "=== Sanitizers enabled: ${SANITIZE} ==="
+    SANITIZE_FLAGS="-O1 -g -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize=${SANITIZE}"
+    SANITIZE_LDFLAGS="-fsanitize=${SANITIZE}"
+fi
+
 echo "=== Building PostgreSQL/libpq (musl) ==="
 cd /build
-curl -L https://ftp.postgresql.org/pub/source/v15.10/postgresql-15.10.tar.gz | tar xz
+PG_VERSION="15.10"
+PG_TARBALL="postgresql-${PG_VERSION}.tar.gz"
+PG_URL="https://ftp.postgresql.org/pub/source/v${PG_VERSION}/${PG_TARBALL}"
+PG_CACHE_DIR="/build/.cache"
+PG_CACHE_PATH="${PG_CACHE_DIR}/${PG_TARBALL}"
+mkdir -p "${PG_CACHE_DIR}"
+if [ ! -s "${PG_CACHE_PATH}" ]; then
+    echo "Downloading ${PG_TARBALL}..."
+    curl -fL --retry 3 --retry-delay 2 "${PG_URL}" -o "${PG_CACHE_PATH}"
+else
+    echo "Using cached ${PG_TARBALL}"
+fi
+tar xzf "${PG_CACHE_PATH}"
 
-cd /build/postgresql-15.10
+cd "/build/postgresql-${PG_VERSION}"
 ARCH="$(uname -m)"
 if [ "$ARCH" = "x86_64" ]; then
     PG_CFLAGS='-O0 -mno-sse4.2'
@@ -33,7 +54,8 @@ cd ../../bin/pg_config && make && make install
 
 echo "=== Building Rust core ==="
 cd /build/rust/plex-pg-core
-cargo build --release
+: "${CARGO_TARGET_DIR:=/build/target}"
+cargo +stable build --release
 
 echo "=== Building shim .so ==="
 cd /build
@@ -45,25 +67,21 @@ else
     ARCH_FLAGS=""
 fi
 
-gcc -shared -fPIC -O2 -fno-stack-protector \
-    -std=c11 -D_GNU_SOURCE $ARCH_FLAGS \
+LIBPLEX_PG_CORE_A="${CARGO_TARGET_DIR:-/build/target}/release/libplex_pg_core.a"
+if [ ! -f "${LIBPLEX_PG_CORE_A}" ]; then
+    echo "ERROR: missing static lib ${LIBPLEX_PG_CORE_A}"
+    exit 1
+fi
+
+gcc -shared -fPIC -fno-stack-protector \
+    -std=c11 -D_GNU_SOURCE $ARCH_FLAGS $SANITIZE_FLAGS \
     -o db_interpose_pg.so \
-    src/runtime/db_interpose_core_linux.c \
-    src/runtime/db_interpose_common.c src/runtime/platform_backtrace.c \
-    src/interpose/db_interpose_open.c src/interpose/db_interpose_exec.c \
-    src/interpose/db_interpose_prepare.c src/interpose/db_interpose_bind.c \
-    src/interpose/db_interpose_step.c src/interpose/db_interpose_stmt_lifecycle.c src/interpose/db_interpose_txn_utils.c src/interpose/db_interpose_conn_utils.c src/interpose/db_interpose_step_write_utils.c src/interpose/db_interpose_step_cached_read_utils.c src/interpose/db_interpose_step_read_utils.c src/interpose/db_interpose_column.c \
-    src/interpose/db_interpose_value.c src/interpose/db_interpose_metadata.c \
-    src/support/exception_what.cpp \
-    src/rust_bridge/sql_translator_rust_bridge.c src/support/str_utils.c \
-    src/pg/pg_config.c src/pg/pg_logging.c \
-    src/pg/pg_client.c src/pg/pg_statement.c src/pg/pg_query_cache.c \
-    src/pg/pg_mem_telemetry.c src/support/shim_alloc.c \
-    rust/plex-pg-core/target/release/libplex_pg_core.a \
+    -Wl,--whole-archive "${LIBPLEX_PG_CORE_A}" -Wl,--no-whole-archive \
     -Iinclude -Isrc -I/usr/local/pgsql/include -I/usr/include \
     -L/usr/local/pgsql/lib -lpq \
     -lstdc++ \
     -ldl -lpthread \
+    $SANITIZE_LDFLAGS \
     -Wl,-rpath,/usr/local/lib/plex-postgresql \
     -Wl,-rpath,/usr/lib/plexmediaserver/lib
 
@@ -76,6 +94,16 @@ cp db_interpose_pg.so /libs/
 cp /usr/local/pgsql/lib/libpq.so.5* /libs/
 cp /usr/lib/libgcc_s.so.1 /libs/
 cp /usr/lib/libstdc++.so.6* /libs/
+if [ -n "${SANITIZE_FLAGS}" ]; then
+    for lib in asan ubsan; do
+        lib_path="$(gcc -print-file-name=lib${lib}.so || true)"
+        if [ -n "$lib_path" ] && [ "$lib_path" != "lib${lib}.so" ] && [ -f "$lib_path" ]; then
+            cp -L "${lib_path}"* /libs/
+        else
+            echo "WARNING: lib${lib}.so not found for sanitizer runtime"
+        fi
+    done
+fi
 
 if [ "$WITH_NOOP" = "1" ]; then
     echo "=== Building static noop binary for CrashUploader replacement ==="

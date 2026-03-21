@@ -1,0 +1,32 @@
+# Transaction mode statements
+
+statement ok
+CREATE TABLE tm (id INTEGER, v TEXT);
+
+statement ok
+BEGIN EXCLUSIVE;
+
+statement ok
+INSERT INTO tm (id, v) VALUES (1, 'x');
+
+statement ok
+ROLLBACK;
+
+query I rowsort
+SELECT COUNT(*) FROM tm;
+----
+0
+
+statement ok
+BEGIN IMMEDIATE;
+
+statement ok
+INSERT INTO tm (id, v) VALUES (2, 'y');
+
+statement ok
+COMMIT;
+
+query I rowsort
+SELECT COUNT(*) FROM tm;
+----
+1

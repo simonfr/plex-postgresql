@@ -1,0 +1,21 @@
+# CREATE INDEX variants
+
+statement ok
+CREATE TABLE civ (id INTEGER, name TEXT, grp INTEGER);
+
+statement ok
+CREATE INDEX idx_civ_name ON civ(name);
+
+statement ok
+CREATE UNIQUE INDEX idx_civ_grp_id ON civ(grp, id);
+
+statement ok
+CREATE INDEX IF NOT EXISTS idx_civ_name ON civ(name);
+
+statement ok
+INSERT INTO civ (id, name, grp) VALUES (1, 'a', 1), (2, 'b', 1), (3, 'c', 2);
+
+query I rowsort
+SELECT COUNT(*) FROM civ WHERE grp = 1;
+----
+2

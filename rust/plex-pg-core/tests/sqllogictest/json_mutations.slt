@@ -1,0 +1,27 @@
+# JSON mutation functions
+
+statement ok
+CREATE TABLE jm (id INTEGER, extra TEXT);
+
+statement ok
+INSERT INTO jm (id, extra) VALUES
+  (1, '{"a":1,"b":{"x":10}}'),
+  (2, '{"a":2,"b":{"x":20}}');
+
+query T rowsort
+SELECT json_extract(json_set(extra, '$.c', 99), '$.c') FROM jm ORDER BY id;
+----
+99
+99
+
+query T rowsort
+SELECT json_extract(json_set(extra, '$.d', 7), '$.d') FROM jm ORDER BY id;
+----
+7
+7
+
+query T rowsort
+SELECT json_extract(json_patch(extra, '{"b":{"y":99}}'), '$.b.y') FROM jm ORDER BY id;
+----
+99
+99

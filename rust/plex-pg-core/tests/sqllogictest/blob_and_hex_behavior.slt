@@ -1,0 +1,22 @@
+# Blob/hex-adjacent behavior using portable text representations.
+
+statement ok
+CREATE TABLE bh (id INTEGER, hex_text TEXT);
+
+statement ok
+INSERT INTO bh (id, hex_text) VALUES
+  (1, '4142'),
+  (2, '00ff'),
+  (3, 'cafebabe');
+
+query I rowsort
+SELECT LENGTH(hex_text) FROM bh WHERE id = 1;
+----
+4
+
+query T rowsort
+SELECT hex_text FROM bh ORDER BY id;
+----
+4142
+00ff
+cafebabe

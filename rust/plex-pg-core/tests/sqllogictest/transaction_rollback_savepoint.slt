@@ -1,0 +1,27 @@
+# Transaction + savepoint semantics
+
+statement ok
+CREATE TABLE trs (id INTEGER, v TEXT);
+
+statement ok
+BEGIN;
+
+statement ok
+INSERT INTO trs (id, v) VALUES (1, 'a');
+
+statement ok
+SAVEPOINT s1;
+
+statement ok
+INSERT INTO trs (id, v) VALUES (2, 'b');
+
+statement ok
+ROLLBACK TO s1;
+
+statement ok
+COMMIT;
+
+query I rowsort
+SELECT COUNT(*) FROM trs;
+----
+1

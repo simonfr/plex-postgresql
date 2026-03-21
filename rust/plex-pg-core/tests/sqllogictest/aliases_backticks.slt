@@ -1,0 +1,30 @@
+# Aliases and backticks
+
+statement ok
+CREATE TABLE m (id INTEGER, title TEXT, kind INTEGER, extra TEXT);
+
+statement ok
+INSERT INTO m (id, title, kind, extra) VALUES
+  (1, 'Alpha', 1, '{"status":"active"}'),
+  (2, 'Beta', 2, '{"status":"paused"}'),
+  (3, 'Gamma', 1, '{"status":"active"}');
+
+query T rowsort
+SELECT `title` AS itemTitle FROM `m`;
+----
+Alpha
+Beta
+Gamma
+
+query I rowsort
+SELECT `id` FROM `m` AS mi WHERE mi.`kind` = 1 ORDER BY mi.`id`;
+----
+1
+3
+
+query T rowsort
+SELECT mi.title
+FROM `m` AS mi
+WHERE mi.id IN (SELECT id FROM `m` WHERE `kind` = 2);
+----
+Beta

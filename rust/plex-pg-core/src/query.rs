@@ -956,6 +956,141 @@ fn make_json_valid_call(expr: Expr) -> Expr {
     })
 }
 
+fn make_function_call(name: &str, args: Vec<Expr>) -> Expr {
+    Expr::Function(Function {
+        name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new(name))]),
+        uses_odbc_syntax: false,
+        parameters: FunctionArguments::None,
+        args: FunctionArguments::List(FunctionArgumentList {
+            duplicate_treatment: None,
+            args: args
+                .into_iter()
+                .map(|e| FunctionArg::Unnamed(FunctionArgExpr::Expr(e)))
+                .collect(),
+            clauses: vec![],
+        }),
+        filter: None,
+        null_treatment: None,
+        over: None,
+        within_group: vec![],
+    })
+}
+
+fn parse_json_path_segments(path: &str) -> Option<Vec<String>> {
+    if !path.starts_with('$') {
+        return None;
+    }
+    let bytes = path.as_bytes();
+    let mut i = 1usize;
+    let mut out = Vec::new();
+    while i < bytes.len() {
+        match bytes[i] {
+            b'.' => {
+                i += 1;
+                let start = i;
+                while i < bytes.len()
+                    && (bytes[i].is_ascii_alphanumeric()
+                        || bytes[i] == b'_'
+                        || bytes[i] == b':'
+                        || bytes[i] == b'-')
+                {
+                    i += 1;
+                }
+                if i == start {
+                    return None;
+                }
+                out.push(path[start..i].to_string());
+            }
+            b'[' => {
+                i += 1;
+                while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                    i += 1;
+                }
+                if i >= bytes.len() {
+                    return None;
+                }
+                if bytes[i] == b'\'' || bytes[i] == b'"' {
+                    let quote = bytes[i];
+                    i += 1;
+                    let start = i;
+                    while i < bytes.len() && bytes[i] != quote {
+                        i += 1;
+                    }
+                    if i >= bytes.len() {
+                        return None;
+                    }
+                    out.push(path[start..i].to_string());
+                    i += 1;
+                    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                        i += 1;
+                    }
+                    if i >= bytes.len() || bytes[i] != b']' {
+                        return None;
+                    }
+                    i += 1;
+                    continue;
+                }
+                let token_start = i;
+                if bytes[i] == b'-' {
+                    i += 1;
+                }
+                let digit_start = i;
+                while i < bytes.len() && bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
+                if i == digit_start {
+                    return None;
+                }
+                out.push(path[token_start..i].to_string());
+                while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                    i += 1;
+                }
+                if i >= bytes.len() || bytes[i] != b']' {
+                    return None;
+                }
+                i += 1;
+            }
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+fn extract_json_path_segments_from_rhs(expr: &Expr) -> Option<Vec<String>> {
+    if let Expr::Value(ValueWithSpan {
+        value: Value::SingleQuotedString(s),
+        ..
+    }) = expr
+    {
+        return parse_json_path_segments(s);
+    }
+    None
+}
+
+fn is_json_extract_text_op(op: &BinaryOperator) -> bool {
+    match op {
+        BinaryOperator::LongArrow | BinaryOperator::HashLongArrow => true,
+        BinaryOperator::PGCustomBinaryOperator(ops) if ops.len() == 1 => ops[0] == "->>",
+        _ => false,
+    }
+}
+
+fn rewrite_json_path_binary_op(left_jsonb: Expr, op: &BinaryOperator, segs: &[String]) -> Expr {
+    let mut args = vec![left_jsonb];
+    args.extend(segs.iter().cloned().map(|s| {
+        Expr::Value(ValueWithSpan {
+            value: Value::SingleQuotedString(s),
+            span: Span::empty(),
+        })
+    }));
+    let fn_name = if is_json_extract_text_op(op) {
+        "jsonb_extract_path_text"
+    } else {
+        "jsonb_extract_path"
+    };
+    make_function_call(fn_name, args)
+}
+
 fn rewrite_json_binary_op(mut left: Expr, op: BinaryOperator, mut right: Expr) -> Expr {
     transform_expr(&mut left);
     transform_expr(&mut right);
@@ -970,10 +1105,14 @@ fn rewrite_json_binary_op(mut left: Expr, op: BinaryOperator, mut right: Expr) -
 
     let left_as_text = make_text_cast(left.clone());
     let guarded_left = make_jsonb_cast(left_as_text.clone());
-    let json_op_expr = Expr::BinaryOp {
-        left: Box::new(guarded_left),
-        op,
-        right: Box::new(right),
+    let json_op_expr = if let Some(segs) = extract_json_path_segments_from_rhs(&right) {
+        rewrite_json_path_binary_op(guarded_left, &op, &segs)
+    } else {
+        Expr::BinaryOp {
+            left: Box::new(guarded_left),
+            op,
+            right: Box::new(right),
+        }
     };
 
     Expr::Case {
@@ -1427,8 +1566,10 @@ mod tests {
             .unwrap();
         let sql = r.sql.to_lowercase();
         assert!(
-            sql.contains("json_valid") && sql.contains("::jsonb") && sql.contains("->>"),
-            "Expected guarded json_valid + ::jsonb rewrite, got: {}",
+            sql.contains("json_valid")
+                && sql.contains("::jsonb")
+                && (sql.contains("jsonb_extract_path_text") || sql.contains("->>")),
+            "Expected guarded json rewrite, got: {}",
             r.sql
         );
     }
@@ -1440,6 +1581,17 @@ mod tests {
         assert!(
             sql.contains("json_valid") && sql.contains("title") && sql.contains("::jsonb"),
             "Expected generic guarded rewrite for JSON operator, got: {}",
+            r.sql
+        );
+    }
+
+    #[test]
+    fn query_json_op_sqlite_path_literal_rewrites_to_extract_path_text() {
+        let r = translate("SELECT extra_data ->> '$.status' FROM t").unwrap();
+        let sql = r.sql.to_lowercase();
+        assert!(
+            sql.contains("jsonb_extract_path_text") && sql.contains("'status'"),
+            "Expected $.status operator path rewrite, got: {}",
             r.sql
         );
     }

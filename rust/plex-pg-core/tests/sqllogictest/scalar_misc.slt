@@ -1,0 +1,24 @@
+# Scalar function rewrites
+
+statement ok
+CREATE TABLE sm (v TEXT, n INTEGER);
+
+statement ok
+INSERT INTO sm (v, n) VALUES ('alpha', 10), ('beta', 20);
+
+query T rowsort
+SELECT IFNULL(v, 'n/a') FROM sm ORDER BY n;
+----
+alpha
+beta
+
+query T rowsort
+SELECT SUBSTR(v, 1, 1) FROM sm ORDER BY n;
+----
+a
+b
+
+query I rowsort
+SELECT unicode('A');
+----
+65

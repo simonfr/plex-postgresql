@@ -1,0 +1,18 @@
+# Transaction control
+
+statement ok
+CREATE TABLE tx (id INTEGER, v TEXT);
+
+statement ok
+BEGIN IMMEDIATE;
+
+statement ok
+INSERT INTO tx (id, v) VALUES (1, 'a');
+
+statement ok
+COMMIT;
+
+query IT rowsort
+SELECT id, v FROM tx;
+----
+1 a

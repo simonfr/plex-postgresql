@@ -35,40 +35,21 @@ endif
 RUST_TRANSLATOR_DIR = rust/plex-pg-core
 RUST_TRANSLATOR_LIB = $(RUST_TRANSLATOR_DIR)/target/release/libplex_pg_core.a
 
-# SQL Translator: Rust backend + C bridge + portable string utils
-SQL_TR_OBJS = src/rust_bridge/sql_translator_rust_bridge.o src/support/str_utils.o
+# SQL Translator + utility shims now live entirely in Rust (no C objects).
+SQL_TR_OBJS =
 
-# PG modules
-PG_MODULES = src/pg/pg_config.o src/pg/pg_logging.o src/pg/pg_client.o src/pg/pg_statement.o src/pg/pg_query_cache.o src/pg/pg_mem_telemetry.o src/support/shim_alloc.o
+# PG modules are implemented in Rust (no C objects).
+PG_MODULES =
 
-# DB Interpose modules - shared between Mac and Linux
-DB_INTERPOSE_SHARED = src/runtime/db_interpose_common.o src/runtime/platform_backtrace.o src/interpose/db_interpose_open.o \
-                      src/interpose/db_interpose_exec.o src/interpose/db_interpose_prepare.o src/interpose/db_interpose_bind.o \
-                      src/interpose/db_interpose_step.o src/interpose/db_interpose_stmt_lifecycle.o src/interpose/db_interpose_txn_utils.o src/interpose/db_interpose_conn_utils.o src/interpose/db_interpose_step_write_utils.o src/interpose/db_interpose_step_cached_read_utils.o src/interpose/db_interpose_step_read_utils.o src/interpose/db_interpose_column.o src/interpose/db_interpose_value.o \
-                      src/interpose/db_interpose_metadata.o
-INTERPOSE_ONLY_OBJS = src/interpose/db_interpose_open.o src/interpose/db_interpose_exec.o src/interpose/db_interpose_prepare.o src/interpose/db_interpose_bind.o \
-                      src/interpose/db_interpose_step.o src/interpose/db_interpose_stmt_lifecycle.o src/interpose/db_interpose_txn_utils.o src/interpose/db_interpose_conn_utils.o \
-                      src/interpose/db_interpose_step_write_utils.o src/interpose/db_interpose_step_cached_read_utils.o src/interpose/db_interpose_step_read_utils.o \
-                      src/interpose/db_interpose_column.o src/interpose/db_interpose_value.o src/interpose/db_interpose_metadata.o
+# All interpose/runtime code now lives in Rust (no C objects).
+OBJECTS =
+LINUX_OBJECTS =
 
-# Platform-specific core module
 ifeq ($(UNAME_S),Darwin)
-    DB_INTERPOSE_CORE = src/runtime/db_interpose_core.o
-    EXCEPTION_WHAT_OBJ = src/support/exception_what.o
+    WHOLE_ARCHIVE = -Wl,-all_load $(RUST_TRANSLATOR_LIB)
 else
-    DB_INTERPOSE_CORE = src/runtime/db_interpose_core_linux.o
-    EXCEPTION_WHAT_OBJ =
+    WHOLE_ARCHIVE = -Wl,--whole-archive $(RUST_TRANSLATOR_LIB) -Wl,--no-whole-archive
 endif
-
-DB_INTERPOSE_OBJS = $(DB_INTERPOSE_CORE) $(DB_INTERPOSE_SHARED)
-
-# All objects (macOS includes fishhook, Linux doesn't)
-ifeq ($(UNAME_S),Darwin)
-    OBJECTS = $(SQL_TR_OBJS) $(PG_MODULES) $(DB_INTERPOSE_OBJS) src/runtime/fishhook.o $(EXCEPTION_WHAT_OBJ)
-else
-    OBJECTS = $(SQL_TR_OBJS) $(PG_MODULES) $(DB_INTERPOSE_OBJS)
-endif
-LINUX_OBJECTS = $(SQL_TR_OBJS) $(PG_MODULES) $(DB_INTERPOSE_SHARED) src/runtime/db_interpose_core_linux.o
 
 .PHONY: all clean install test macos linux run stop unit-test ci-test interpose-build-check test-recursion test-crash test-params test-logging test-soci test-fork test-fts test-buffer test-reaper test-upsert test-parity test-uri test-stmt-free test-bind-mismatch
 
@@ -83,127 +64,26 @@ $(RUST_TRANSLATOR_LIB):
 	cd $(RUST_TRANSLATOR_DIR) && cargo build --release
 
 # Build the shim library (auto-detect platform) - uses modular approach
-$(TARGET): $(OBJECTS) $(RUST_TRANSLATOR_LIB)
-	$(CC) $(SHARED_FLAGS) -o $@ $(OBJECTS) $(RUST_TRANSLATOR_LIB) $(CFLAGS) $(LDFLAGS)
+$(TARGET): $(RUST_TRANSLATOR_LIB)
+	$(CC) $(SHARED_FLAGS) -o $@ $(OBJECTS) $(WHOLE_ARCHIVE) $(CFLAGS) $(LDFLAGS)
 
 # Explicit macOS build - always clean first to avoid corrupt object files
 macos: clean $(RUST_TRANSLATOR_LIB)
-	@for src in $(SQL_TR_OBJS:.o=.c); do \
-		obj=$$(echo $$src | sed 's/\.c$$/.o/'); \
-		$(CC) -c -fPIC -o $$obj $$src $(CFLAGS); \
-	done
-	@for src in $(PG_MODULES:.o=.c); do \
-		obj=$$(echo $$src | sed 's/\.c$$/.o/'); \
-		$(CC) -c -fPIC -o $$obj $$src $(CFLAGS); \
-	done
-	@for src in $(DB_INTERPOSE_SHARED:.o=.c) src/runtime/db_interpose_core.c; do \
-		obj=$$(echo $$src | sed 's/\.c$$/.o/'); \
-		$(CC) -c -fPIC -o $$obj $$src $(CFLAGS); \
-	done
-	$(CC) -c -O2 -Iinclude -Isrc -o src/runtime/fishhook.o src/runtime/fishhook.c
-	clang -dynamiclib -undefined dynamic_lookup -o db_interpose_pg.dylib $(OBJECTS) $(RUST_TRANSLATOR_LIB) \
+	clang -dynamiclib -undefined dynamic_lookup -o db_interpose_pg.dylib $(OBJECTS) $(WHOLE_ARCHIVE) \
 		-I/opt/homebrew/opt/postgresql@15/include -Iinclude -Isrc \
-		-L/opt/homebrew/opt/postgresql@15/lib -lpq
+		-L/opt/homebrew/opt/postgresql@15/lib -lpq -lc++ -lc++abi
 
 # Explicit Linux build (modular - same structure as Mac)
-linux: $(LINUX_OBJECTS)
-	gcc -shared -fPIC -o db_interpose_pg.so $(LINUX_OBJECTS) \
+linux: $(RUST_TRANSLATOR_LIB)
+	gcc -shared -fPIC -o db_interpose_pg.so $(LINUX_OBJECTS) $(WHOLE_ARCHIVE) \
 		-I/usr/include/postgresql -Iinclude -Isrc \
 		-lpq -lsqlite3 -ldl -lpthread
 
-# Object rules
-# SQL Translator: Rust bridge (sole implementation) + string utils
-src/rust_bridge/sql_translator_rust_bridge.o: src/rust_bridge/sql_translator_rust_bridge.c include/sql_translator.h
-	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
-
-src/support/str_utils.o: src/support/str_utils.c include/str_utils.h
-	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
-
-src/pg/pg_config.o: src/pg/pg_config.c src/pg_config.h src/pg_types.h
-	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
-
-src/pg/pg_logging.o: src/pg/pg_logging.c src/pg_logging.h src/pg_types.h
-	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
-
-src/pg/pg_client.o: src/pg/pg_client.c src/pg_client.h src/pg_types.h src/pg_logging.h src/pg_config.h
-	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
-
-src/pg/pg_statement.o: src/pg/pg_statement.c src/pg_statement.h src/pg_types.h src/pg_logging.h src/pg_client.h
-	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
-
-src/pg/pg_query_cache.o: src/pg/pg_query_cache.c src/pg_query_cache.h src/pg_types.h src/pg_logging.h
-	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
-
-src/pg/pg_mem_telemetry.o: src/pg/pg_mem_telemetry.c src/pg_mem_telemetry.h src/pg_logging.h
-	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
-
-src/support/shim_alloc.o: src/support/shim_alloc.c src/shim_alloc.h src/pg_logging.h
-	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
-
-src/runtime/fishhook.o: src/runtime/fishhook.c include/fishhook.h
-	$(CC) -c -O2 -Iinclude -o $@ $<
-
-src/support/exception_what.o: src/support/exception_what.cpp src/exception_what.h
-	$(CXX) -c -fPIC -o $@ $< -Iinclude -Isrc
-
-# DB Interpose module compilation rules
-src/runtime/db_interpose_common.o: src/runtime/db_interpose_common.c src/db_interpose.h src/db_interpose_common.h
-	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
-
-src/runtime/platform_backtrace.o: src/runtime/platform_backtrace.c src/db_interpose.h src/db_interpose_common.h
-	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
-
-src/runtime/db_interpose_core.o: src/runtime/db_interpose_core.c src/db_interpose.h src/db_interpose_common.h
-	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
-
-src/runtime/db_interpose_core_linux.o: src/runtime/db_interpose_core_linux.c src/db_interpose.h src/db_interpose_common.h
-	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
-
-src/interpose/db_interpose_open.o: src/interpose/db_interpose_open.c src/db_interpose.h
-	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
-
-src/interpose/db_interpose_exec.o: src/interpose/db_interpose_exec.c src/db_interpose.h
-	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
-
-src/interpose/db_interpose_prepare.o: src/interpose/db_interpose_prepare.c src/db_interpose.h
-	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
-
-src/interpose/db_interpose_bind.o: src/interpose/db_interpose_bind.c src/db_interpose.h
-	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
-
-src/interpose/db_interpose_step.o: src/interpose/db_interpose_step.c src/db_interpose.h src/interpose/db_interpose_conn_utils.h src/interpose/db_interpose_step_write_utils.h src/interpose/db_interpose_step_cached_read_utils.h src/interpose/db_interpose_step_read_utils.h
-	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
-
-src/interpose/db_interpose_stmt_lifecycle.o: src/interpose/db_interpose_stmt_lifecycle.c src/db_interpose.h
-	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
-
-src/interpose/db_interpose_txn_utils.o: src/interpose/db_interpose_txn_utils.c src/interpose/db_interpose_txn_utils.h src/db_interpose.h
-	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
-
-src/interpose/db_interpose_conn_utils.o: src/interpose/db_interpose_conn_utils.c src/interpose/db_interpose_conn_utils.h src/db_interpose.h
-	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
-
-src/interpose/db_interpose_step_write_utils.o: src/interpose/db_interpose_step_write_utils.c src/interpose/db_interpose_step_write_utils.h src/interpose/db_interpose_step_result.h src/interpose/db_interpose_conn_utils.h src/interpose/db_interpose_txn_utils.h src/db_interpose.h
-	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
-
-src/interpose/db_interpose_step_cached_read_utils.o: src/interpose/db_interpose_step_cached_read_utils.c src/interpose/db_interpose_step_cached_read_utils.h src/interpose/db_interpose_step_result.h src/interpose/db_interpose_conn_utils.h src/db_interpose.h
-	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
-
-src/interpose/db_interpose_step_read_utils.o: src/interpose/db_interpose_step_read_utils.c src/interpose/db_interpose_step_read_utils.h src/interpose/db_interpose_step_result.h src/interpose/db_interpose_conn_utils.h src/db_interpose.h
-	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
-
-src/interpose/db_interpose_column.o: src/interpose/db_interpose_column.c src/db_interpose.h
-	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
-
-src/interpose/db_interpose_value.o: src/interpose/db_interpose_value.c src/db_interpose.h
-	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
-
-src/interpose/db_interpose_metadata.o: src/interpose/db_interpose_metadata.c src/db_interpose.h
-	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
+# Object rules (none)
 
 # Clean build artifacts
 clean:
-	rm -f db_interpose_pg.dylib db_interpose_pg.so $(OBJECTS) $(PG_MODULES) $(DB_INTERPOSE_OBJS) src/rust_bridge/sql_translator_rust_bridge.o
+	rm -f db_interpose_pg.dylib db_interpose_pg.so $(OBJECTS)
 
 # Install to system location
 install: $(TARGET)
@@ -270,442 +150,176 @@ stop:
 # Unit Tests
 # ============================================================================
 
-TEST_DIR = tests/src
-TEST_BIN_DIR = tests/bin
-
-# Test for recursion prevention and stack protection
-$(TEST_BIN_DIR)/test_recursion: $(TEST_DIR)/test_recursion.c
-	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $< -lpthread -Wall -Wextra
-
-test-recursion: $(TEST_BIN_DIR)/test_recursion
+test-recursion:
 	@echo ""
-	@./$(TEST_BIN_DIR)/test_recursion
+	@cargo test --manifest-path rust/plex-pg-core/Cargo.toml --lib db_interpose_prepare_helpers::tests::
 	@echo ""
 
-# Test for crash scenarios from production history
-$(TEST_BIN_DIR)/test_crash_scenarios: $(TEST_DIR)/test_crash_scenarios.c
-	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $< -lpthread -Wall -Wextra
-
-test-crash: $(TEST_BIN_DIR)/test_crash_scenarios
+test-crash:
 	@echo ""
-	@./$(TEST_BIN_DIR)/test_crash_scenarios
+	@cargo test --manifest-path rust/plex-pg-core/Cargo.toml --test crash_scenarios
 	@echo ""
 
-# macOS stack protection integration test (requires shim to be built)
-$(TEST_BIN_DIR)/test_stack_macos: $(TEST_DIR)/test_stack_macos.c
-	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $< -lpthread -Wall -Wextra
-
-test-stack-macos: $(TARGET) $(TEST_BIN_DIR)/test_stack_macos
+test-stack-macos:
 	@echo ""
-	@./$(TEST_BIN_DIR)/test_stack_macos ./$(TARGET)
+	@cargo test --manifest-path rust/plex-pg-core/Cargo.toml --test stack_macos -- --ignored
 	@echo ""
 
-# SQL translator unit tests (links against translator objects + logging + Rust lib)
-$(TEST_BIN_DIR)/test_sql_translator: $(TEST_DIR)/test_sql_translator.c $(SQL_TR_OBJS) src/pg/pg_logging.o src/support/shim_alloc.o $(RUST_TRANSLATOR_LIB)
-	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $< $(SQL_TR_OBJS) src/pg/pg_logging.o src/support/shim_alloc.o $(RUST_TRANSLATOR_LIB) -Iinclude -Isrc -Wall -Wextra
-
-test-sql: $(TEST_BIN_DIR)/test_sql_translator
+test-sql:
 	@echo ""
-	@./$(TEST_BIN_DIR)/test_sql_translator
+	@cargo test --manifest-path rust/plex-pg-core/Cargo.toml --test ported_batch1 --test ported_batch2 --test ported_batch3 --test ported_batch4
 	@echo ""
 
-# Phase 1.3: Compare test removed (C translator removed in Phase 1.5)
-
-# Type normalization unit tests (standalone - tests decltype normalization)
-$(TEST_BIN_DIR)/test_type_normalization: $(TEST_DIR)/test_type_normalization.c
-	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $< -Wall -Wextra
-
-test-types: $(TEST_BIN_DIR)/test_type_normalization
+test-types:
 	@echo ""
-	@./$(TEST_BIN_DIR)/test_type_normalization
+	@cargo test --manifest-path rust/plex-pg-core/Cargo.toml --lib type_normalization_
 	@echo ""
 
-# SOCI type compatibility tests (std::bad_cast prevention)
-$(TEST_BIN_DIR)/test_decltype_soci_compat: $(TEST_DIR)/test_decltype_soci_compat.c
-	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $< -Wall -Wextra
-
-test-soci: $(TEST_BIN_DIR)/test_decltype_soci_compat
+test-soci:
 	@echo ""
-	@./$(TEST_BIN_DIR)/test_decltype_soci_compat
+	@cargo test --manifest-path rust/plex-pg-core/Cargo.toml --lib expected_sqlite_type_for_decltype
 	@echo ""
 
-# Query cache unit tests (standalone - tests cache logic without libpq)
-$(TEST_BIN_DIR)/test_query_cache: $(TEST_DIR)/test_query_cache.c
-	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $< -Wall -Wextra
-
-test-cache: $(TEST_BIN_DIR)/test_query_cache
+test-cache:
 	@echo ""
-	@./$(TEST_BIN_DIR)/test_query_cache
+	@cargo test --manifest-path rust/plex-pg-core/Cargo.toml --lib pg_query_cache::tests::
 	@echo ""
 
-# TLS cache unit tests (thread-local storage caching)
-$(TEST_BIN_DIR)/test_tls_cache: $(TEST_DIR)/test_tls_cache.c
-	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $< -lpthread -Wall -Wextra
-
-test-tls: $(TEST_BIN_DIR)/test_tls_cache
+test-tls:
 	@echo ""
-	@./$(TEST_BIN_DIR)/test_tls_cache
+	@cargo test --manifest-path rust/plex-pg-core/Cargo.toml --lib tls_pool_cache_
 	@echo ""
 
-# Prepared statement cache unit tests (hash, lookup, add, clear, SQLSTATE)
-$(TEST_BIN_DIR)/test_stmt_cache: $(TEST_DIR)/test_stmt_cache.c
-	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $< -Wall -Wextra
-
-test-stmt-cache: $(TEST_BIN_DIR)/test_stmt_cache
+test-stmt-cache:
 	@echo ""
-	@./$(TEST_BIN_DIR)/test_stmt_cache
+	@cargo test --manifest-path rust/plex-pg-core/Cargo.toml --lib stmt_cache_
 	@echo ""
 
-# Fork safety unit tests (pthread_atfork handlers)
-# NOTE: These tests run WITHOUT the shim loaded - they test fork logic in isolation
-$(TEST_BIN_DIR)/test_fork_safety: $(TEST_DIR)/test_fork_safety.c
-	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $< -lpthread -Wall -Wextra
-
-test-fork: $(TEST_BIN_DIR)/test_fork_safety
+test-fork:
 	@echo ""
-	@./$(TEST_BIN_DIR)/test_fork_safety
+	@cargo test --manifest-path rust/plex-pg-core/Cargo.toml --lib pool_reset_for_child_clears_all_slots
 	@echo ""
 
-# Pool reaper unit tests (connection pool idle cleanup)
-$(TEST_BIN_DIR)/test_pool_reaper: $(TEST_DIR)/test_pool_reaper.c
-	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $< -lpthread -Wall -Wextra
-
-test-reaper: $(TEST_BIN_DIR)/test_pool_reaper
+test-reaper:
 	@echo ""
-	@./$(TEST_BIN_DIR)/test_pool_reaper
+	@cargo test --manifest-path rust/plex-pg-core/Cargo.toml --lib reaper_
 	@echo ""
 
-# Micro-benchmarks (shim component performance)
-$(TEST_BIN_DIR)/test_benchmark: $(TEST_DIR)/test_benchmark.c $(SQL_TR_OBJS) src/pg/pg_logging.o src/support/shim_alloc.o $(RUST_TRANSLATOR_LIB)
-	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -O3 -o $@ $< $(SQL_TR_OBJS) src/pg/pg_logging.o src/support/shim_alloc.o $(RUST_TRANSLATOR_LIB) -Iinclude -Isrc -Wall -Wextra
+benchmark:
+	@cargo bench --manifest-path rust/plex-pg-core/Cargo.toml
 
-benchmark: $(TEST_BIN_DIR)/test_benchmark
-	@./$(TEST_BIN_DIR)/test_benchmark
-
-# SQLite API function tests (tests with shim loaded)
-$(TEST_BIN_DIR)/test_sqlite_api: $(TEST_DIR)/test_sqlite_api.c
-	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $< -lsqlite3 -Wall -Wextra
-
-# sqlite3_expanded_sql and boolean value conversion tests
-$(TEST_BIN_DIR)/test_expanded_sql: $(TEST_DIR)/test_expanded_sql.c
-	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $< -lsqlite3 -Wall -Wextra
-
-test-expanded: $(TARGET) $(TEST_BIN_DIR)/test_expanded_sql
+test-api:
 	@echo ""
-ifeq ($(UNAME_S),Darwin)
-	@DYLD_INSERT_LIBRARIES=./$(TARGET) \
-		PLEX_PG_HOST=/tmp \
-		PLEX_PG_DATABASE=plex \
-		PLEX_PG_USER=plex \
-		./$(TEST_BIN_DIR)/test_expanded_sql
-else
-	@LD_PRELOAD=./$(TARGET) \
-		PLEX_PG_HOST=localhost \
-		PLEX_PG_DATABASE=plex \
-		PLEX_PG_USER=plex \
-		./$(TEST_BIN_DIR)/test_expanded_sql
-endif
+	@cargo test --manifest-path rust/plex-pg-core/Cargo.toml --test sqlite_api
 	@echo ""
 
-test-api: $(TARGET) $(TEST_BIN_DIR)/test_sqlite_api
+test-expanded:
 	@echo ""
-ifeq ($(UNAME_S),Darwin)
-	@DYLD_INSERT_LIBRARIES=./$(TARGET) \
-		PLEX_PG_HOST=/tmp \
-		PLEX_PG_DATABASE=plex \
-		PLEX_PG_USER=plex \
-		./$(TEST_BIN_DIR)/test_sqlite_api
-else
-	@LD_PRELOAD=./$(TARGET) \
-		PLEX_PG_HOST=localhost \
-		PLEX_PG_DATABASE=plex \
-		PLEX_PG_USER=plex \
-		./$(TEST_BIN_DIR)/test_sqlite_api
-endif
+	@cargo test --manifest-path rust/plex-pg-core/Cargo.toml --test sqlite_expanded_sql
 	@echo ""
 
-# Bind parameter index tests (named parameter mapping)
-$(TEST_BIN_DIR)/test_bind_parameter_index: $(TEST_DIR)/test_bind_parameter_index.c
-	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $< -lsqlite3 -Wall -Wextra
-
-test-params: $(TARGET) $(TEST_BIN_DIR)/test_bind_parameter_index
+test-params:
 	@echo ""
-ifeq ($(UNAME_S),Darwin)
-	@DYLD_INSERT_LIBRARIES=./$(TARGET) \
-		PLEX_PG_HOST=/tmp \
-		PLEX_PG_DATABASE=plex \
-		PLEX_PG_USER=plex \
-		./$(TEST_BIN_DIR)/test_bind_parameter_index
-else
-	@LD_PRELOAD=./$(TARGET) \
-		PLEX_PG_HOST=localhost \
-		PLEX_PG_DATABASE=plex \
-		PLEX_PG_USER=plex \
-		./$(TEST_BIN_DIR)/test_bind_parameter_index
-endif
+	@cargo test --manifest-path rust/plex-pg-core/Cargo.toml --test sqlite_bind_parameter_index
 	@echo ""
 
-# Logging deadlock prevention tests
-$(TEST_BIN_DIR)/test_logging_deadlock: $(TEST_DIR)/test_logging_deadlock.c
-	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $< -lpthread -Wall -Wextra
-
-test-logging: $(TEST_BIN_DIR)/test_logging_deadlock
+test-logging:
 	@echo ""
-ifeq ($(UNAME_S),Darwin)
-	@perl -e 'alarm 10; exec @ARGV' ./$(TEST_BIN_DIR)/test_logging_deadlock || echo "DEADLOCK DETECTED"
-else
-	@timeout 10 ./$(TEST_BIN_DIR)/test_logging_deadlock || echo "DEADLOCK DETECTED"
-endif
+	@cargo test --manifest-path rust/plex-pg-core/Cargo.toml --test logging_deadlock
 	@echo ""
 
-# Exception handler unit tests (C++ exception interception logic)
-$(TEST_BIN_DIR)/test_exception_handler: $(TEST_DIR)/test_exception_handler.c
-	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $< -lpthread -ldl -Wall -Wextra
-
-test-exception: $(TEST_BIN_DIR)/test_exception_handler
+test-exception:
 	@echo ""
-	@./$(TEST_BIN_DIR)/test_exception_handler
+	@cargo test --manifest-path rust/plex-pg-core/Cargo.toml --test exception_handler --lib exception_
 	@echo ""
 
-# FTS escaped quote handling tests
-$(TEST_BIN_DIR)/test_fts_quotes: $(TEST_DIR)/test_fts_quotes.c
-	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $< -Wall -Wextra
-
-test-fts: $(TEST_BIN_DIR)/test_fts_quotes
+test-fts:
 	@echo ""
-	@./$(TEST_BIN_DIR)/test_fts_quotes
+	@cargo test --manifest-path rust/plex-pg-core/Cargo.toml --lib fts_quotes_
 	@echo ""
 
-# Buffer pool unit tests (column_text buffer expansion)
-$(TEST_BIN_DIR)/test_buffer_pool: $(TEST_DIR)/test_buffer_pool.c
-	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $< -lpthread -Wall -Wextra
-
-test-buffer: $(TEST_BIN_DIR)/test_buffer_pool
+test-buffer:
 	@echo ""
-	@./$(TEST_BIN_DIR)/test_buffer_pool
+	@cargo test --manifest-path rust/plex-pg-core/Cargo.toml --lib column_text_buffer_
 	@echo ""
 
-# GROUP BY rewriter unit tests — removed (C translator removed in Phase 1.5)
-
-# UPSERT (INSERT OR REPLACE) unit tests
-$(TEST_BIN_DIR)/test_upsert: $(TEST_DIR)/test_upsert.c $(SQL_TR_OBJS) src/pg/pg_logging.o src/support/shim_alloc.o $(RUST_TRANSLATOR_LIB)
-	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $< $(SQL_TR_OBJS) src/pg/pg_logging.o src/support/shim_alloc.o $(RUST_TRANSLATOR_LIB) -Iinclude -Isrc -Wall -Wextra
-
-test-upsert: $(TEST_BIN_DIR)/test_upsert
+test-upsert:
 	@echo ""
-	@./$(TEST_BIN_DIR)/test_upsert
+	@cargo test --manifest-path rust/plex-pg-core/Cargo.toml --test ported_batch2
 	@echo ""
 
-# SQL classification unit tests (should_redirect, should_skip_sql, is_write/read_operation)
-$(TEST_BIN_DIR)/test_pg_config: $(TEST_DIR)/test_pg_config.c src/pg/pg_config.c src/pg/pg_logging.o src/support/shim_alloc.o $(RUST_TRANSLATOR_LIB)
-	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $(TEST_DIR)/test_pg_config.c src/pg/pg_config.c src/pg/pg_logging.o src/support/shim_alloc.o $(RUST_TRANSLATOR_LIB) -Iinclude -Isrc -I$(PG_INCLUDE) -Wall -Wextra
-
-test-config: $(TEST_BIN_DIR)/test_pg_config
+test-config:
 	@echo ""
-	@./$(TEST_BIN_DIR)/test_pg_config
+	@cargo test --manifest-path rust/plex-pg-core/Cargo.toml --lib pg_config::tests::
 	@echo ""
 
-# Bind helper unit tests (contains_binary_bytes, bytes_to_pg_hex)
-$(TEST_BIN_DIR)/test_bind_helpers: $(TEST_DIR)/test_bind_helpers.c
-	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $< -Wall -Wextra
-
-test-bind: $(TEST_BIN_DIR)/test_bind_helpers
+test-bind:
 	@echo ""
-	@./$(TEST_BIN_DIR)/test_bind_helpers
+	@cargo test --manifest-path rust/plex-pg-core/Cargo.toml --lib bind_helpers_
 	@echo ""
 
-# Common helper unit tests (is_library_db_path, simple_str_replace)
-$(TEST_BIN_DIR)/test_common_helpers: $(TEST_DIR)/test_common_helpers.c
-	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $< -Wall -Wextra
-
-test-common: $(TEST_BIN_DIR)/test_common_helpers
+test-common:
 	@echo ""
-	@./$(TEST_BIN_DIR)/test_common_helpers
+	@cargo test --manifest-path rust/plex-pg-core/Cargo.toml --lib common_helpers_
 	@echo ""
 
-# Platform parity unit tests (shared symbol loading, backtrace module)
-$(TEST_BIN_DIR)/test_platform_parity: $(TEST_DIR)/test_platform_parity.c src/runtime/db_interpose_common.o src/runtime/platform_backtrace.o src/pg/pg_logging.o src/support/shim_alloc.o $(RUST_TRANSLATOR_LIB)
-	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $< src/runtime/db_interpose_common.o src/runtime/platform_backtrace.o src/pg/pg_logging.o src/support/shim_alloc.o $(RUST_TRANSLATOR_LIB) -Iinclude -Isrc -Wall -Wextra -lsqlite3 -ldl
-
-test-parity: $(TEST_BIN_DIR)/test_platform_parity
+test-parity:
 	@echo ""
-	@./$(TEST_BIN_DIR)/test_platform_parity
+	@cargo test --manifest-path rust/plex-pg-core/Cargo.toml --lib common_load_sqlite_symbols_sets_pointers
 	@echo ""
 
-# Statement helper unit tests (metadata_settings upsert, metadata ID extraction)
-$(TEST_BIN_DIR)/test_statement_helpers: $(TEST_DIR)/test_statement_helpers.c
-	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $< -Wall -Wextra
-
-test-statement: $(TEST_BIN_DIR)/test_statement_helpers
+test-statement:
 	@echo ""
-	@./$(TEST_BIN_DIR)/test_statement_helpers
+	@cargo test --manifest-path rust/plex-pg-core/Cargo.toml --lib pg_statement::tests::
 	@echo ""
 
-# Statement free sweep regression test (ensures all param slots are freed)
-$(TEST_BIN_DIR)/test_stmt_free_param_sweep: $(TEST_DIR)/test_stmt_free_param_sweep.c src/pg/pg_statement.o src/support/str_utils.o src/pg/pg_mem_telemetry.o src/support/shim_alloc.o $(RUST_TRANSLATOR_LIB)
-	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $< src/pg/pg_statement.o src/support/str_utils.o src/pg/pg_mem_telemetry.o src/support/shim_alloc.o $(RUST_TRANSLATOR_LIB) -Iinclude -Isrc -I$(PG_INCLUDE) -Wall -Wextra $(LDFLAGS) -lpthread
-
-test-stmt-free: $(TEST_BIN_DIR)/test_stmt_free_param_sweep
+test-stmt-free:
 	@echo ""
-	@if command -v leaks >/dev/null 2>&1; then \
-		MallocStackLogging=1 leaks -q --atExit -- ./$(TEST_BIN_DIR)/test_stmt_free_param_sweep; \
-	else \
-		./$(TEST_BIN_DIR)/test_stmt_free_param_sweep; \
-	fi
+	@cargo test --manifest-path rust/plex-pg-core/Cargo.toml --lib stmt_free_sweeps_extra_param_values_without_crash
 	@echo ""
 
-# Bind index mismatch regression (idx > param_count cleanup safety)
-$(TEST_BIN_DIR)/test_bind_index_mismatch_cleanup: $(TEST_DIR)/test_bind_index_mismatch_cleanup.c src/pg/pg_statement.o src/support/str_utils.o src/pg/pg_mem_telemetry.o src/support/shim_alloc.o $(RUST_TRANSLATOR_LIB)
-	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $< src/pg/pg_statement.o src/support/str_utils.o src/pg/pg_mem_telemetry.o src/support/shim_alloc.o $(RUST_TRANSLATOR_LIB) -Iinclude -Isrc -I$(PG_INCLUDE) -Wall -Wextra $(LDFLAGS) -lpthread
-
-test-bind-mismatch: $(TEST_BIN_DIR)/test_bind_index_mismatch_cleanup
+test-bind-mismatch:
 	@echo ""
-	@if command -v leaks >/dev/null 2>&1; then \
-		MallocStackLogging=1 leaks -q --atExit -- ./$(TEST_BIN_DIR)/test_bind_index_mismatch_cleanup; \
-	else \
-		./$(TEST_BIN_DIR)/test_bind_index_mismatch_cleanup; \
-	fi
+	@cargo test --manifest-path rust/plex-pg-core/Cargo.toml --lib stmt_unref_cleans_bind_index_mismatch_slots
 	@echo ""
 
-# URI rewrite tests (server:// -> library://)
-$(TEST_BIN_DIR)/test_uri_rewrite: $(TEST_DIR)/test_uri_rewrite.c
-	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $< -Wall -Wextra
-
-test-uri: $(TEST_BIN_DIR)/test_uri_rewrite
+test-uri:
 	@echo ""
-	@./$(TEST_BIN_DIR)/test_uri_rewrite
+	@cargo test --manifest-path rust/plex-pg-core/Cargo.toml --lib rewrite_server_uri_
 	@echo ""
 
-# Stress / load test — uses direct libpq connections (no SQLite interpose needed)
-STRESS_THREADS  ?= 20
-STRESS_DURATION ?= 30
-
-$(TEST_BIN_DIR)/test_stress_load: $(TEST_DIR)/test_stress_load.c
-	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $< \
-		-I$(PG_INCLUDE) \
-		-L$(PG_LIB) \
-		-lpq -lpthread -lm \
-		-Wall -Wextra -O2
-
-test-stress: $(TEST_BIN_DIR)/test_stress_load
+test-stress:
 	@echo ""
-ifeq ($(UNAME_S),Darwin)
-	@PLEX_PG_HOST=/tmp \
-		PLEX_PG_DATABASE=plex \
-		PLEX_PG_USER=plex \
-		PLEX_PG_SCHEMA=plex \
-		./$(TEST_BIN_DIR)/test_stress_load $(STRESS_THREADS) $(STRESS_DURATION)
-else
-	@PLEX_PG_HOST=localhost \
-		PLEX_PG_DATABASE=plex \
-		PLEX_PG_USER=plex \
-		PLEX_PG_SCHEMA=plex \
-		./$(TEST_BIN_DIR)/test_stress_load $(STRESS_THREADS) $(STRESS_DURATION)
-endif
+	@cargo test --manifest-path rust/plex-pg-core/Cargo.toml --test stress_load -- --ignored
 	@echo ""
 
-# Pool exhaustion simulation (Issue #9)
-STRESS_POOL_SIZE ?= 50
-STRESS_POOL_THREADS ?= 80
-
-$(TEST_BIN_DIR)/test_pool_exhaustion: $(TEST_DIR)/test_pool_exhaustion.c
-	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $< \
-		-I$(PG_INCLUDE) \
-		-L$(PG_LIB) \
-		-lpq -lpthread -lm \
-		-Wall -Wextra -O2
-
-test-pool-exhaustion: $(TEST_BIN_DIR)/test_pool_exhaustion
+test-pool-exhaustion:
 	@echo ""
-ifeq ($(UNAME_S),Darwin)
-	@PLEX_PG_HOST=/tmp \
-		PLEX_PG_DATABASE=plex_stress \
-		PLEX_PG_USER=plex \
-		PLEX_PG_SCHEMA=plex \
-		./$(TEST_BIN_DIR)/test_pool_exhaustion $(STRESS_POOL_SIZE) $(STRESS_POOL_THREADS) $(STRESS_DURATION)
-else
-	@PLEX_PG_HOST=localhost \
-		PLEX_PG_DATABASE=plex_stress \
-		PLEX_PG_USER=plex \
-		PLEX_PG_SCHEMA=plex \
-		./$(TEST_BIN_DIR)/test_pool_exhaustion $(STRESS_POOL_SIZE) $(STRESS_POOL_THREADS) $(STRESS_DURATION)
-endif
+	@cargo test --manifest-path rust/plex-pg-core/Cargo.toml --test pool_exhaustion
 	@echo ""
 
-# Run all unit tests
-unit-test: test-recursion test-crash test-sql test-upsert test-types test-soci test-cache test-tls test-stmt-cache test-fork test-reaper test-buffer test-api test-expanded test-params test-logging test-exception test-fts test-config test-bind test-common test-statement test-stmt-free test-bind-mismatch test-parity test-uri
+test-streaming:
+	@echo ""
+	@cargo test --manifest-path rust/plex-pg-core/Cargo.toml --test streaming_mode
+	@echo ""
+
+test-isolation:
+	@echo ""
+	@cargo test --manifest-path rust/plex-pg-core/Cargo.toml --test connection_isolation
+	@echo ""
+
+test-shadow:
+	@echo ""
+	@cargo test --manifest-path rust/plex-pg-core/Cargo.toml --test shadow_fallback
+	@echo ""
+
+test-shadow-elim:
+	@echo ""
+	@cargo test --manifest-path rust/plex-pg-core/Cargo.toml --test shadow_fallback shadow_elimination_
+	@echo ""
+
+unit-test: test-recursion test-crash test-sql test-upsert test-types test-soci test-cache test-tls test-stmt-cache test-fork test-reaper test-buffer test-api test-expanded test-params test-logging test-exception test-fts test-config test-bind test-common test-statement test-stmt-free test-bind-mismatch test-parity test-uri test-streaming test-isolation test-shadow test-shadow-elim
 	@echo "All unit tests complete."
-
-# Single-row streaming mode tests (v0.9.28)
-$(TEST_BIN_DIR)/test_streaming_mode: $(TEST_DIR)/test_streaming_mode.c
-	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $< -lpthread -Wall -Wextra
-
-test-streaming: $(TEST_BIN_DIR)/test_streaming_mode
-	@echo ""
-	@./$(TEST_BIN_DIR)/test_streaming_mode
-	@echo ""
-
-# Connection isolation tests (v0.9.29) — streaming_active flag, pool isolation
-$(TEST_BIN_DIR)/test_connection_isolation: $(TEST_DIR)/test_connection_isolation.c
-	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $< -lpthread -Wall -Wextra
-
-test-isolation: $(TEST_BIN_DIR)/test_connection_isolation
-	@echo ""
-	@./$(TEST_BIN_DIR)/test_connection_isolation
-	@echo ""
-
-# Shadow SQLite dummy fallback tests (v0.9.29) — parameter counting, dummy generation
-$(TEST_BIN_DIR)/test_shadow_fallback: $(TEST_DIR)/test_shadow_fallback.c
-	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $< -Wall -Wextra
-
-test-shadow: $(TEST_BIN_DIR)/test_shadow_fallback
-	@echo ""
-	@./$(TEST_BIN_DIR)/test_shadow_fallback
-	@echo ""
-
-# CI-safe subset: excludes tests needing LD_PRELOAD + shim (test-api, test-expanded, test-params)
-# Shadow SQLite elimination tests (in-memory shadow, dummy stmts, bind absorption, type mapping)
-$(TEST_BIN_DIR)/test_shadow_elimination: $(TEST_DIR)/test_shadow_elimination.c
-	@mkdir -p $(TEST_BIN_DIR)
-	$(CC) -o $@ $< -Wall -Wextra -lsqlite3
-
-test-shadow-elim: $(TEST_BIN_DIR)/test_shadow_elimination
-	@echo ""
-	@./$(TEST_BIN_DIR)/test_shadow_elimination
-	@echo ""
 
 ci-test: test-recursion test-crash test-sql test-upsert test-types test-soci test-cache test-tls test-stmt-cache test-fork test-reaper test-buffer test-logging test-exception test-fts test-config test-bind test-common test-statement test-stmt-free test-bind-mismatch test-parity test-uri test-streaming test-isolation test-shadow test-shadow-elim
 	@echo "All CI unit tests complete."
@@ -718,23 +332,15 @@ RELEASE_DIR = release
 VERSION = $(shell cat VERSION 2>/dev/null || echo "dev")
 
 # Architecture-specific builds (macOS only)
-# Note: db_interpose_common.c is already included in DB_INTERPOSE_SHARED
+# Note: common module is implemented in Rust and linked via $(RUST_TRANSLATOR_LIB)
 release-arm64: clean $(RUST_TRANSLATOR_LIB)
 	@echo "Building arm64..."
-	@for src in $(SQL_TR_OBJS:.o=.c) $(PG_MODULES:.o=.c) $(DB_INTERPOSE_SHARED:.o=.c) src/runtime/db_interpose_core.c src/runtime/fishhook.c; do \
-		obj=$$(echo $$src | sed 's/\.c$$/.o/'); \
-		$(CC) -c -fPIC -arch arm64 -o $$obj $$src $(CFLAGS); \
-	done
-	$(CC) -dynamiclib -undefined dynamic_lookup -arch arm64 -o db_interpose_pg-arm64.dylib $(OBJECTS) $(RUST_TRANSLATOR_LIB) $(CFLAGS) $(LDFLAGS)
+	$(CC) -dynamiclib -undefined dynamic_lookup -arch arm64 -o db_interpose_pg-arm64.dylib $(OBJECTS) $(WHOLE_ARCHIVE) $(CFLAGS) $(LDFLAGS)
 	@echo "Built db_interpose_pg-arm64.dylib"
 
 release-x86_64: clean $(RUST_TRANSLATOR_LIB)
 	@echo "Building x86_64..."
-	@for src in $(SQL_TR_OBJS:.o=.c) $(PG_MODULES:.o=.c) $(DB_INTERPOSE_SHARED:.o=.c) src/runtime/db_interpose_core.c src/runtime/fishhook.c; do \
-		obj=$$(echo $$src | sed 's/\.c$$/.o/'); \
-		$(CC) -c -fPIC -arch x86_64 -o $$obj $$src $(CFLAGS); \
-	done
-	$(CC) -dynamiclib -undefined dynamic_lookup -arch x86_64 -o db_interpose_pg-x86_64.dylib $(OBJECTS) $(RUST_TRANSLATOR_LIB) $(CFLAGS) $(LDFLAGS)
+	$(CC) -dynamiclib -undefined dynamic_lookup -arch x86_64 -o db_interpose_pg-x86_64.dylib $(OBJECTS) $(WHOLE_ARCHIVE) $(CFLAGS) $(LDFLAGS)
 	@echo "Built db_interpose_pg-x86_64.dylib"
 
 # Universal binary (both architectures)
@@ -743,19 +349,11 @@ release-universal: $(RUST_TRANSLATOR_LIB)
 	@mkdir -p $(RELEASE_DIR)/v$(VERSION)
 	@# Build arm64
 	@$(MAKE) clean >/dev/null
-	@for src in $(SQL_TR_OBJS:.o=.c) $(PG_MODULES:.o=.c) $(DB_INTERPOSE_SHARED:.o=.c) src/runtime/db_interpose_core.c src/runtime/fishhook.c; do \
-		obj=$$(echo $$src | sed 's/\.c$$/.o/'); \
-		$(CC) -c -fPIC -arch arm64 -o $$obj $$src $(CFLAGS) 2>/dev/null; \
-	done
-	@$(CC) -dynamiclib -undefined dynamic_lookup -arch arm64 -o $(RELEASE_DIR)/v$(VERSION)/db_interpose_pg-arm64.dylib $(OBJECTS) $(RUST_TRANSLATOR_LIB) $(CFLAGS) $(LDFLAGS)
+	@$(CC) -dynamiclib -undefined dynamic_lookup -arch arm64 -o $(RELEASE_DIR)/v$(VERSION)/db_interpose_pg-arm64.dylib $(OBJECTS) $(WHOLE_ARCHIVE) $(CFLAGS) $(LDFLAGS)
 	@echo "  ✓ arm64"
 	@# Build x86_64
 	@$(MAKE) clean >/dev/null
-	@for src in $(SQL_TR_OBJS:.o=.c) $(PG_MODULES:.o=.c) $(DB_INTERPOSE_SHARED:.o=.c) src/runtime/db_interpose_core.c src/runtime/fishhook.c; do \
-		obj=$$(echo $$src | sed 's/\.c$$/.o/'); \
-		$(CC) -c -fPIC -arch x86_64 -o $$obj $$src $(CFLAGS) 2>/dev/null; \
-	done
-	@$(CC) -dynamiclib -undefined dynamic_lookup -arch x86_64 -o $(RELEASE_DIR)/v$(VERSION)/db_interpose_pg-x86_64.dylib $(OBJECTS) $(RUST_TRANSLATOR_LIB) $(CFLAGS) $(LDFLAGS)
+	@$(CC) -dynamiclib -undefined dynamic_lookup -arch x86_64 -o $(RELEASE_DIR)/v$(VERSION)/db_interpose_pg-x86_64.dylib $(OBJECTS) $(WHOLE_ARCHIVE) $(CFLAGS) $(LDFLAGS)
 	@echo "  ✓ x86_64"
 	@# Create universal binary
 	@lipo -create \

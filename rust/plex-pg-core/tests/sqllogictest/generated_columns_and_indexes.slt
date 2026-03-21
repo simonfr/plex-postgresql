@@ -1,0 +1,21 @@
+# Generated columns + indexes (portable subset)
+
+statement ok
+CREATE TABLE gci (
+  id INTEGER,
+  a INTEGER,
+  b INTEGER,
+  s INTEGER GENERATED ALWAYS AS (a + b) STORED
+);
+
+statement ok
+CREATE INDEX idx_gci_s ON gci(s);
+
+statement ok
+INSERT INTO gci (id, a, b) VALUES (1, 2, 3), (2, 10, 7);
+
+query II rowsort
+SELECT id, s FROM gci ORDER BY id;
+----
+1 5
+2 17

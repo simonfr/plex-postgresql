@@ -1,0 +1,47 @@
+# Window functions with frame clauses
+
+statement ok
+CREATE TABLE wf (id INTEGER, grp INTEGER, score INTEGER);
+
+statement ok
+INSERT INTO wf (id, grp, score) VALUES
+  (1, 1, 10),
+  (2, 1, 20),
+  (3, 1, 5),
+  (4, 2, 7),
+  (5, 2, 9);
+
+query III rowsort
+SELECT
+  id,
+  grp,
+  SUM(score) OVER (
+    PARTITION BY grp
+    ORDER BY id
+    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+  )
+FROM wf
+ORDER BY id;
+----
+1 1 10
+2 1 30
+3 1 35
+4 2 7
+5 2 16
+
+query III rowsort
+SELECT
+  id,
+  grp,
+  ROW_NUMBER() OVER (
+    PARTITION BY grp
+    ORDER BY id
+  )
+FROM wf
+ORDER BY id;
+----
+1 1 1
+2 1 2
+3 1 3
+4 2 1
+5 2 2

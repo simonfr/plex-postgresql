@@ -144,6 +144,21 @@ PLEX_HOST_PORT=32410 PLEX_DLNA_PORT=32471 docker compose up -d
 Then use `http://localhost:32410/web`.
 
 For local test media, the default Docker mount is `./fixtures/media:/media:ro`.
+For real libraries, set `PLEX_MEDIA_PATH` in `.env`:
+
+```bash
+# Example (macOS)
+PLEX_MEDIA_PATH=/Volumes/media
+
+# Example (Linux)
+PLEX_MEDIA_PATH=/srv/media
+```
+
+Then restart:
+```bash
+docker compose up -d
+docker compose logs -f plex | grep -E "Media mount|WARNING: Media mount"
+```
 
 Docker mode does **not** write `db_interpose_pg.dylib` into your local `Plex Media Server.app`.  
 Do **not** run `scripts/install_wrappers.sh` for this workflow.
@@ -203,7 +218,10 @@ environment:
   - PLEX_PG_PASSWORD=plex
   - PLEX_PG_SCHEMA=plex
   - PLEX_PG_POOL_SIZE=50
+  - PLEX_PG_POOL_MAX=100
+  - PLEX_PG_OPENSSL_ARMCAP=0  # optional ARM fallback for container/VM SIGILL crashes
   - PLEX_PG_LOG_LEVEL=DEBUG  # 0=ERROR, 1=INFO, 2=DEBUG
+  - PLEX_PG_SKIP_CLEAR_BINDINGS_FINALIZED=1  # default ON; set 0 to disable (debug only)
   - PLEX_PG_VALIDATE_OUTPUT=off  # off|sample|all (default: off)
   - PLEX_PG_VALIDATE_OUTPUT_SAMPLE_PCT=5  # only used when mode=sample
 ```
@@ -304,10 +322,13 @@ Use this command to migrate an existing Plex library to PostgreSQL:
 | `PLEX_PG_USER` | plex | Database user |
 | `PLEX_PG_PASSWORD` | (empty) | Database password |
 | `PLEX_PG_SCHEMA` | plex | Schema name |
-| `PLEX_PG_POOL_SIZE` | 50 | Initial connection pool size (auto-grows up to 200) |
+| `PLEX_PG_POOL_SIZE` | 50 | Initial connection pool size |
+| `PLEX_PG_POOL_MAX` | (inherits `PLEX_PG_POOL_SIZE`) | Runtime pool cap; auto-aligned to PostgreSQL `max_connections` at startup |
 | `PLEX_PG_IDLE_TIMEOUT` | 300 | Seconds before idle connections are reaped |
+| `PLEX_PG_OPENSSL_ARMCAP` | 0 (Docker ARM only) | Override `OPENSSL_armcap` for Plex process to avoid ARM `SIGILL` on unsupported crypto instructions |
 | `PLEX_PG_LOG_LEVEL` | 1 | 0=ERROR, 1=INFO, 2=DEBUG |
 | `PLEX_PG_RETRY_DELAYS` | 500,1000,2000,3000,4000 | PG reconnect backoff in ms (comma-separated, max 10 values) |
+| `PLEX_PG_SKIP_CLEAR_BINDINGS_FINALIZED` | 1 | Skip `sqlite3_clear_bindings` for recently finalized statements to avoid UAF crashes (set 0 to disable) |
 
 ### Unix Socket vs TCP
 
@@ -345,6 +366,35 @@ make ci-test         # CI-safe subset (no LD_PRELOAD)
 cargo test           # Rust tests (525 tests) — in rust/plex-pg-core/
 make benchmark       # Shim micro-benchmarks
 ```
+
+### Exception Parity (macOS)
+
+Build the shim first, then run the harness against the built dylib:
+
+```bash
+make
+cargo build --release --bin exception_parity_test --manifest-path rust/plex-pg-core/Cargo.toml
+PLEX_PG_DISABLE_SHIM_INIT=1 ./rust/plex-pg-core/target/release/exception_parity_test
+```
+
+Optional terminate-path check (currently skipped; requires a real C++ exception object):
+
+```bash
+PLEX_PG_DISABLE_SHIM_INIT=1 ./rust/plex-pg-core/target/release/exception_parity_test --terminate
+```
+
+### Build Notes
+
+If `libpq` is not in the default search path, set:
+
+```bash
+export PLEX_PG_LIBPQ_DIR=/path/to/libpq
+```
+
+### Exception ABI Assumptions (macOS)
+
+Exception `what()` extraction assumes the Itanium C++ ABI layout for `std::exception` and the
+vtable slot used by `what()` (slot 2) as implemented by libc++ on macOS.
 
 ## Memory Tracking
 

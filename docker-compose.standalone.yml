@@ -45,16 +45,21 @@ services:
       - PLEX_PG_PASSWORD=plex
       - PLEX_PG_SCHEMA=plex
       - PLEX_PG_POOL_SIZE=50
+      - PLEX_PG_POOL_MAX=100
       # - PLEX_PG_IDLE_TIMEOUT=300
       # Translator output validation: off|sample|all (default off)
       - PLEX_PG_VALIDATE_OUTPUT=${PLEX_PG_VALIDATE_OUTPUT:-off}
       - PLEX_PG_VALIDATE_OUTPUT_SAMPLE_PCT=${PLEX_PG_VALIDATE_OUTPUT_SAMPLE_PCT:-5}
+      # Optional ARM override for OpenSSL CPU feature probing in some VMs/containers
+      # - PLEX_PG_OPENSSL_ARMCAP=0
       - PLEX_PG_LOG_LEVEL=ERROR
       - PLEX_PG_LOG_FILE=/config/plex_redirect_pg.log
     volumes:
       - plex_config:/config
       - postgres_socket:/var/run/postgresql
-      - ./fixtures/media:/media:ro
+      # Media mount (default: local fixtures). Override in .env:
+      # PLEX_MEDIA_PATH=/absolute/path/to/your/real/media
+      - "${PLEX_MEDIA_PATH:-./fixtures/media}:/media:ro"
       # Source Plex database for migration (optional, mount read-only)
       # - "${HOME}/Library/Application Support/Plex Media Server/Plug-in Support/Databases:/source-db:ro"
       # Alternative custom media mount:

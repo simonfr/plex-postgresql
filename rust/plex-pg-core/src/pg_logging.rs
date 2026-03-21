@@ -559,6 +559,38 @@ pub extern "C" fn rust_logging_cleanup() {
     state.file = None;
 }
 
+// ─── C ABI wrappers (pg_logging.c replacement) ───────────────────────────────
+
+#[no_mangle]
+pub extern "C" fn pg_logging_init() {
+    rust_logging_init();
+}
+
+#[no_mangle]
+pub extern "C" fn pg_logging_cleanup() {
+    rust_logging_cleanup();
+}
+
+#[no_mangle]
+pub extern "C" fn pg_logging_reset_after_fork() {
+    rust_logging_reset_after_fork();
+}
+
+#[no_mangle]
+pub extern "C" fn log_sql_fallback(
+    original_sql: *const c_char,
+    translated_sql: *const c_char,
+    error_msg: *const c_char,
+    context: *const c_char,
+) {
+    rust_logging_fallback(original_sql, translated_sql, error_msg, context);
+}
+
+#[no_mangle]
+pub extern "C" fn is_known_translation_limitation(error_msg: *const c_char) -> i32 {
+    rust_logging_is_known_limitation(error_msg)
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

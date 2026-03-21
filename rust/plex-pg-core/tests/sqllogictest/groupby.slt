@@ -1,0 +1,24 @@
+# GROUP BY / HAVING
+
+statement ok
+CREATE TABLE g (id INTEGER, kind INTEGER, title TEXT);
+
+statement ok
+INSERT INTO g (id, kind, title) VALUES
+  (1, 1, 'A'),
+  (2, 1, 'B'),
+  (3, 2, 'C'),
+  (4, 2, 'D'),
+  (5, 2, 'E');
+
+query IT rowsort
+SELECT kind, COUNT(*) FROM g GROUP BY kind ORDER BY kind;
+----
+1 2
+2 3
+
+query IT rowsort
+SELECT kind, MIN(title) FROM g GROUP BY kind HAVING COUNT(*) >= 2 ORDER BY kind;
+----
+1 A
+2 C

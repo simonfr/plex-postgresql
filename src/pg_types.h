@@ -17,7 +17,7 @@
 // ============================================================================
 
 #define MAX_CONNECTIONS 512
-#define MAX_PARAMS 256
+#define MAX_PARAMS 1024
 #define MAX_STATEMENTS 1024
 #define MAX_CACHED_STMTS_PER_THREAD 64
 #define PG_VALUE_MAGIC 0x50475641  // "PGVA" - identifies our fake sqlite3_value
@@ -38,13 +38,13 @@
 #define ENV_PG_LOG_MAX_SIZE "PLEX_PG_LOG_MAX_SIZE"
 #define ENV_PG_EXCEPTION_LOG "PLEX_PG_EXCEPTION_LOG"
 #define ENV_PG_RETRY_DELAYS  "PLEX_PG_RETRY_DELAYS"
+#define ENV_PG_POOL_MAX      "PLEX_PG_POOL_MAX"
 
 // PostgreSQL-only mode flag
 #define PG_READ_ENABLED 1
 
-// Connection pool size (max slots, actual limit via PLEX_PG_POOL_SIZE env var)
-// Increased for Kometa bulk operations which can exceed 100 concurrent requests
-#define POOL_SIZE_MAX 200
+// Connection pool defaults (runtime max is controlled via PLEX_PG_POOL_MAX and
+// clamped to PostgreSQL max_connections during initialization when available).
 #define POOL_SIZE_DEFAULT 50
 
 // Prepared statement cache size per connection (must be power of 2 for hash table)
@@ -114,7 +114,7 @@ typedef struct pg_connection {
     int last_error_code;             // Track last SQLite-style error code
 
     // v0.9.29: Streaming mode lock — when 1, this connection is exclusively owned
-    // by a streaming query (PQsetSingleRowMode). Other queries on the same thread
+    // by a single-row streaming query. Other queries on the same thread
     // must use a different connection from the pool.
     // v0.9.33: Changed from volatile int to _Atomic int for proper memory ordering
     // on ARM (Apple Silicon). volatile only prevents compiler reordering, not CPU
@@ -181,14 +181,14 @@ typedef struct pg_stmt {
     pthread_t executing_thread;      // Thread currently executing this statement (for debug)
     pg_connection_t *result_conn;    // Connection that the current result belongs to
 
-    // Column names from PQdescribePrepared (when no result/cached_result yet)
+    // Column names from prepared-statement describe (when no result/cached_result yet)
     // Used by dummy prepare path: column metadata is available before step()
     char **col_names;                // Array of column name strings (NULL if not set)
     int num_col_names;               // Number of entries in col_names
 
     // Single-row streaming mode (v0.9.28)
-    // Instead of fetching entire PGresult eagerly, use PQsetSingleRowMode
-    // to fetch one row at a time — matching SQLite's step() memory model.
+    // Instead of fetching entire PGresult eagerly, fetch one row at a time
+    // to match SQLite's step() memory model.
     int streaming_mode;              // 1 = single-row streaming active on this stmt
     pg_connection_t *streaming_conn; // Connection claimed for streaming (must drain before reuse)
 
@@ -212,7 +212,7 @@ typedef struct pg_stmt {
     int cached_row;                  // Row for which values are cached (-1 = none)
 
     // Resolved table names for each column (for decltype lookup of bare columns)
-    // Populated at query execution time using PQftable/PQftablecol
+    // Populated at query execution time via table OID lookups
     char *col_table_names[MAX_PARAMS]; // Source table name for each column (NULL if unknown)
     int col_tables_resolved;           // 1 if table names have been resolved
 } pg_stmt_t;

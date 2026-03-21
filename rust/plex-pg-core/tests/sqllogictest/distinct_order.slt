@@ -1,0 +1,31 @@
+# DISTINCT + ORDER BY scenarios
+
+statement ok
+CREATE TABLE d (id INTEGER, grp INTEGER, name TEXT);
+
+statement ok
+INSERT INTO d (id, grp, name) VALUES
+  (1, 1, 'alpha'),
+  (2, 1, 'alpha'),
+  (3, 1, 'beta'),
+  (4, 2, 'beta'),
+  (5, 2, 'gamma');
+
+query I rowsort
+SELECT DISTINCT grp FROM d ORDER BY grp;
+----
+1
+2
+
+query T rowsort
+SELECT DISTINCT name FROM d ORDER BY name;
+----
+alpha
+beta
+gamma
+
+query IT rowsort
+SELECT grp, COUNT(*) FROM d GROUP BY grp ORDER BY grp;
+----
+1 3
+2 2

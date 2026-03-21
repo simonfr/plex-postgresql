@@ -1,18 +1,26 @@
 /// Module: pg_client
 ///
-/// Pure, portable logic extracted from `pg_client.c`.
-/// The libpq-dependent parts (connection lifecycle, pool management,
-/// pthread logic) remain in C.  This module exposes only the tiny
-/// pieces that contain no platform or library dependencies.
+/// Pool manager, registry, and prepared-statement cache logic extracted
+/// from `pg_client.c`. libpq calls are routed through Rust wrappers so
+/// the C side can stay as a thin shim.
 ///
 /// FFI surface (called from `src/pg_client.c`):
 ///   rust_hash_sql(sql)              → u64   FNV-1a hash for prepared-stmt cache keys
 ///   rust_is_stale_sqlstate(s)       → i32   1 if SQLSTATE == "26000"
 ///   rust_is_duplicate_sqlstate(s)   → i32   1 if SQLSTATE == "42P05"
-use std::ffi::CStr;
-use std::os::raw::c_char;
+use std::ffi::{CStr, CString};
+use std::os::raw::{c_char, c_int, c_void};
 
 use crate::db_interpose_helpers::cstr_to_str_or_empty;
+use crate::ffi_types::{sqlite3, PgConnection, STMT_NAME_LEN};
+use crate::libpq_helpers::{
+    rust_pg_align_idle_timeout_with_server, rust_pg_probe_max_connections, rust_pq_clear,
+    rust_pq_connectdb, rust_pq_error_message, rust_pq_exec, rust_pq_finish, rust_pq_reset,
+    rust_pq_result_error_message, rust_pq_result_status, rust_pq_socket, rust_pq_status,
+    rust_pq_transaction_status, PGconn, PGresult,
+};
+
+const PG_DIAG_SQLSTATE: c_int = b'C' as c_int;
 
 // ─── Internal pure helpers ────────────────────────────────────────────────────
 
@@ -101,7 +109,6 @@ pub(crate) const SLOT_READY: u8 = 2;
 pub(crate) const SLOT_RECONNECTING: u8 = 3;
 pub(crate) const SLOT_ERROR: u8 = 4;
 
-pub(crate) const POOL_SIZE_MAX: usize = 200;
 pub(crate) const POOL_SIZE_DEFAULT: usize = 50;
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const STMT_CACHE_SIZE: usize = 512;
@@ -109,11 +116,10 @@ pub(crate) const STMT_CACHE_SIZE: usize = 512;
 // ─── Pool Slot ───────────────────────────────────────────────────────────────
 
 use std::collections::HashMap;
-use std::ffi::c_void;
 use std::sync::atomic::{
     AtomicI64, AtomicPtr, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering,
 };
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, Once, OnceLock};
 
 /// A single slot in the connection pool.
 /// All fields are atomic for lock-free CAS-based state transitions.
@@ -232,7 +238,7 @@ thread_local! {
 
 /// Store a pool slot reference in TLS for the fast path.
 pub(crate) fn tls_pool_cache_set(db_handle: usize, slot_index: u32, generation: u32) {
-    TLS_POOL_CACHE.with(|c| {
+    let _ = TLS_POOL_CACHE.try_with(|c| {
         c.set(TlsPoolCache {
             db_handle,
             slot_index,
@@ -244,7 +250,8 @@ pub(crate) fn tls_pool_cache_set(db_handle: usize, slot_index: u32, generation: 
 /// Look up the TLS-cached pool slot for the given db handle.
 /// Returns Some((slot_index, generation)) if cached, None if miss.
 pub(crate) fn tls_pool_cache_get(db_handle: usize) -> Option<(u32, u32)> {
-    TLS_POOL_CACHE.with(|c| {
+    TLS_POOL_CACHE
+        .try_with(|c| {
         let cache = c.get();
         if cache.db_handle == db_handle && !cache.is_empty() {
             Some((cache.slot_index, cache.generation))
@@ -252,11 +259,13 @@ pub(crate) fn tls_pool_cache_get(db_handle: usize) -> Option<(u32, u32)> {
             None
         }
     })
+        .ok()
+        .flatten()
 }
 
 /// Invalidate the TLS pool cache.
 pub(crate) fn tls_pool_cache_clear() {
-    TLS_POOL_CACHE.with(|c| c.set(TlsPoolCache::EMPTY));
+    let _ = TLS_POOL_CACHE.try_with(|c| c.set(TlsPoolCache::EMPTY));
 }
 
 // ─── Connection Registry ─────────────────────────────────────────────────────
@@ -297,6 +306,13 @@ impl ConnectionRegistry {
 
     pub fn clear(&self) {
         self.map.lock().unwrap().clear();
+    }
+
+    pub fn drain_all(&self) -> Vec<usize> {
+        let mut map = self.map.lock().unwrap();
+        let conns: Vec<usize> = map.values().copied().collect();
+        map.clear();
+        conns
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -350,7 +366,7 @@ impl DbToPool {
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct StmtCacheEntry {
     pub sql_hash: u64,
-    pub stmt_name: String,
+    pub stmt_name: [c_char; STMT_NAME_LEN],
     pub param_count: i32,
     pub last_used: i64,
 }
@@ -371,6 +387,25 @@ impl StmtCache {
         }
     }
 
+    /// Lookup by sql_hash (mutable) to update last_used.
+    pub fn lookup_mut(&mut self, sql_hash: u64) -> Option<&mut StmtCacheEntry> {
+        if sql_hash == 0 {
+            return None;
+        }
+        let start = (sql_hash as usize) & (STMT_CACHE_SIZE - 1);
+        let entries_ptr = self.entries.as_mut_ptr();
+        for i in 0..STMT_CACHE_SIZE {
+            let idx = (start + i) & (STMT_CACHE_SIZE - 1);
+            let slot = unsafe { &mut *entries_ptr.add(idx) };
+            match slot {
+                Some(entry) if entry.sql_hash == sql_hash => return Some(entry),
+                None => return None, // empty slot = end of probe chain
+                _ => continue,
+            }
+        }
+        None
+    }
+
     /// Lookup by sql_hash. Returns Some(&entry) on hit, None on miss.
     pub fn lookup(&self, sql_hash: u64) -> Option<&StmtCacheEntry> {
         if sql_hash == 0 {
@@ -388,71 +423,70 @@ impl StmtCache {
         None
     }
 
-    /// Add or update entry. Returns the evicted entry's stmt_name if eviction occurred.
+    /// Add or update entry. Returns (index, evicted_name) if eviction occurred.
     pub fn add(
         &mut self,
         sql_hash: u64,
-        stmt_name: &str,
+        stmt_name: [c_char; STMT_NAME_LEN],
         param_count: i32,
         now: i64,
-    ) -> Option<String> {
+    ) -> (i32, Option<[c_char; STMT_NAME_LEN]>) {
         if sql_hash == 0 {
-            return None;
+            return (-1, None);
         }
         let start = (sql_hash as usize) & (STMT_CACHE_SIZE - 1);
+
+        let mut oldest_idx: Option<usize> = None;
+        let mut oldest_time = i64::MAX;
 
         // First pass: find existing or empty slot
         for i in 0..STMT_CACHE_SIZE {
             let idx = (start + i) & (STMT_CACHE_SIZE - 1);
-            match &self.entries[idx] {
-                Some(entry) if entry.sql_hash == sql_hash => {
-                    // Update existing
-                    self.entries[idx] = Some(StmtCacheEntry {
-                        sql_hash,
-                        stmt_name: stmt_name.to_string(),
-                        param_count,
-                        last_used: now,
-                    });
-                    return None;
+            match self.entries[idx].as_mut() {
+                Some(entry) => {
+                    if entry.last_used < oldest_time {
+                        oldest_time = entry.last_used;
+                        oldest_idx = Some(idx);
+                    }
+                    if entry.sql_hash == sql_hash {
+                        // Update existing
+                        entry.stmt_name = stmt_name;
+                        entry.param_count = param_count;
+                        entry.last_used = now;
+                        return (idx as i32, None);
+                    }
                 }
                 None => {
                     // Empty slot, insert here
                     self.entries[idx] = Some(StmtCacheEntry {
                         sql_hash,
-                        stmt_name: stmt_name.to_string(),
+                        stmt_name,
                         param_count,
                         last_used: now,
                     });
                     self.count += 1;
-                    return None;
+                    return (idx as i32, None);
                 }
-                _ => continue,
             }
         }
 
         // Table is full, evict LRU entry
-        let mut lru_idx = 0;
-        let mut lru_time = i64::MAX;
-        for (idx, entry) in self.entries.iter().enumerate() {
-            if let Some(e) = entry {
-                if e.last_used < lru_time {
-                    lru_time = e.last_used;
-                    lru_idx = idx;
-                }
-            }
+        if let Some(lru_idx) = oldest_idx {
+            let evicted = self.entries[lru_idx].take().map(|e| e.stmt_name);
+            self.entries[lru_idx] = Some(StmtCacheEntry {
+                sql_hash,
+                stmt_name,
+                param_count,
+                last_used: now,
+            });
+            return (lru_idx as i32, evicted);
         }
-        let evicted_name = self.entries[lru_idx].as_ref().map(|e| e.stmt_name.clone());
-        self.entries[lru_idx] = Some(StmtCacheEntry {
-            sql_hash,
-            stmt_name: stmt_name.to_string(),
-            param_count,
-            last_used: now,
-        });
-        evicted_name
+
+        (-1, None)
     }
 
     /// Clear all entries. Returns names of all evicted statements (for DEALLOCATE).
-    pub fn clear(&mut self) -> Vec<String> {
+    pub fn clear(&mut self) -> Vec<[c_char; STMT_NAME_LEN]> {
         let mut evicted = Vec::new();
         for entry in &mut self.entries {
             if let Some(e) = entry.take() {
@@ -474,6 +508,7 @@ impl StmtCache {
 pub(crate) struct PoolManager {
     pub slots: Vec<PoolSlot>,
     pub configured_size: AtomicUsize,
+    pub configured_max_size: AtomicUsize,
     pub idle_timeout_secs: AtomicU32,
     pub library_db_path: Mutex<Option<String>>,
     pub last_reap_time: AtomicI64,
@@ -485,16 +520,19 @@ pub(crate) struct PoolManager {
 }
 
 impl PoolManager {
-    pub fn new(pool_size: usize) -> Self {
-        // Always allocate POOL_SIZE_MAX slots so auto-grow can expand
+    pub fn new(pool_size: usize, pool_max: usize) -> Self {
+        // Allocate slots up to runtime max so auto-grow can expand
         // without reallocation. Only `configured_size` limits active use.
-        let mut slots = Vec::with_capacity(POOL_SIZE_MAX);
-        for _ in 0..POOL_SIZE_MAX {
+        let effective_max = pool_max.max(1);
+        let mut slots = Vec::with_capacity(effective_max);
+        for _ in 0..effective_max {
             slots.push(PoolSlot::new());
         }
+        let effective_size = pool_size.clamp(1, effective_max);
         Self {
             slots,
-            configured_size: AtomicUsize::new(pool_size),
+            configured_size: AtomicUsize::new(effective_size),
+            configured_max_size: AtomicUsize::new(effective_max),
             idle_timeout_secs: AtomicU32::new(300),
             library_db_path: Mutex::new(None),
             last_reap_time: AtomicI64::new(0),
@@ -508,7 +546,14 @@ impl PoolManager {
 
     /// Get configured pool size.
     pub fn pool_size(&self) -> usize {
-        self.configured_size.load(Ordering::Relaxed)
+        self.configured_size
+            .load(Ordering::Relaxed)
+            .min(self.pool_max())
+    }
+
+    /// Get configured maximum pool size (runtime cap).
+    pub fn pool_max(&self) -> usize {
+        self.configured_max_size.load(Ordering::Relaxed)
     }
 
     /// Check if a connection pointer is in any pool slot.
@@ -516,9 +561,7 @@ impl PoolManager {
         let size = self.pool_size();
         for i in 0..size {
             let slot = &self.slots[i];
-            if slot.state.load(Ordering::Acquire) == SLOT_READY
-                && slot.conn.load(Ordering::Acquire) == conn_ptr as *mut c_void
-            {
+            if slot.conn.load(Ordering::Acquire) == conn_ptr as *mut c_void {
                 return true;
             }
         }
@@ -611,7 +654,7 @@ static POOL: OnceLock<PoolManager> = OnceLock::new();
 
 /// Get or initialize the global pool manager.
 pub(crate) fn pool() -> &'static PoolManager {
-    POOL.get_or_init(|| PoolManager::new(POOL_SIZE_DEFAULT))
+    POOL.get_or_init(|| PoolManager::new(POOL_SIZE_DEFAULT, POOL_SIZE_DEFAULT))
 }
 
 // ─── Per-connection StmtCache registry (keyed by conn ptr) ───────────────────
@@ -620,114 +663,742 @@ pub(crate) fn pool() -> &'static PoolManager {
 /// Each pool connection has its own prepared statement cache.
 static STMT_CACHES: OnceLock<Mutex<HashMap<usize, StmtCache>>> = OnceLock::new();
 
-// ─── C Callback Types ────────────────────────────────────────────────────────
-//
-// These function pointers are set once at init time by C calling
-// rust_pool_set_callbacks(). They allow Rust to invoke libpq-dependent
-// operations that must remain in C.
-
-/// C callback function pointer types for pool operations.
-/// All callbacks receive/return opaque pointers (void*) to pg_connection_t.
-#[allow(non_camel_case_types)]
-type CbCreateConn = unsafe extern "C" fn(db_path: *const c_char) -> *mut c_void;
-#[allow(non_camel_case_types)]
-type CbDestroyConn = unsafe extern "C" fn(conn: *mut c_void);
-#[allow(non_camel_case_types)]
-type CbCheckConnOk = unsafe extern "C" fn(conn: *mut c_void) -> i32;
-#[allow(non_camel_case_types)]
-type CbResetConn = unsafe extern "C" fn(conn: *mut c_void) -> i32;
-#[allow(non_camel_case_types)]
-type CbReconnectSlot = unsafe extern "C" fn(conn: *mut c_void) -> i32;
-#[allow(non_camel_case_types)]
-type CbGetTxnStatus = unsafe extern "C" fn(conn: *mut c_void) -> i32;
-#[allow(non_camel_case_types)]
-type CbExecSimple = unsafe extern "C" fn(conn: *mut c_void, sql: *const c_char) -> i32;
-#[allow(non_camel_case_types)]
-type CbIsStreamingActive = unsafe extern "C" fn(conn: *mut c_void) -> i32;
-#[allow(non_camel_case_types)]
-type CbIsPgActive = unsafe extern "C" fn(conn: *mut c_void) -> i32;
-#[allow(non_camel_case_types)]
-type CbSetPgActive = unsafe extern "C" fn(conn: *mut c_void, active: i32);
-#[allow(non_camel_case_types)]
-type CbCheckThreadAlive = unsafe extern "C" fn(thread_id: u64) -> i32;
-#[allow(non_camel_case_types)]
-type CbStmtCacheClear = unsafe extern "C" fn(conn: *mut c_void);
-#[allow(non_camel_case_types)]
-type CbGetDbPath = unsafe extern "C" fn(conn: *mut c_void, buf: *mut c_char, len: usize);
-#[allow(non_camel_case_types)]
-type CbGetCurrentThread = unsafe extern "C" fn() -> u64;
-#[allow(non_camel_case_types)]
-type CbThreadsEqual = unsafe extern "C" fn(a: u64, b: u64) -> i32;
-#[allow(non_camel_case_types)]
-type CbSleepMs = unsafe extern "C" fn(ms: i32);
-#[allow(non_camel_case_types)]
-type CbGetRetryDelays = unsafe extern "C" fn(delays: *mut i32, count: *mut i32);
-#[allow(non_camel_case_types)]
-type CbLogInfo = unsafe extern "C" fn(msg: *const c_char);
-#[allow(non_camel_case_types)]
-type CbLogError = unsafe extern "C" fn(msg: *const c_char);
-#[allow(non_camel_case_types)]
-type CbLogDebug = unsafe extern "C" fn(msg: *const c_char);
-
-/// Storage for all C callback function pointers.
-struct PoolCallbacks {
-    create_conn: CbCreateConn,
-    destroy_conn: CbDestroyConn,
-    check_conn_ok: CbCheckConnOk,
-    reset_conn: CbResetConn,
-    reconnect_slot: CbReconnectSlot,
-    get_txn_status: CbGetTxnStatus,
-    exec_simple: CbExecSimple,
-    is_streaming_active: CbIsStreamingActive,
-    is_pg_active: CbIsPgActive,
-    #[allow(dead_code)]
-    set_pg_active: CbSetPgActive,
-    check_thread_alive: CbCheckThreadAlive,
-    stmt_cache_clear: CbStmtCacheClear,
-    get_db_path: CbGetDbPath,
-    get_current_thread: CbGetCurrentThread,
-    threads_equal: CbThreadsEqual,
-    sleep_ms: CbSleepMs,
-    get_retry_delays: CbGetRetryDelays,
-    log_info: CbLogInfo,
-    log_error: CbLogError,
-    log_debug: CbLogDebug,
+fn stmt_caches() -> &'static Mutex<HashMap<usize, StmtCache>> {
+    STMT_CACHES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-// SAFETY: PoolCallbacks contains only function pointers which are Send+Sync
-unsafe impl Send for PoolCallbacks {}
-unsafe impl Sync for PoolCallbacks {}
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
 
-static CALLBACKS: OnceLock<PoolCallbacks> = OnceLock::new();
+fn stmt_name_from_c(ptr: *const c_char) -> Option<[c_char; STMT_NAME_LEN]> {
+    if ptr.is_null() {
+        return None;
+    }
+    let bytes = unsafe { CStr::from_ptr(ptr) }.to_bytes();
+    let mut buf = [0 as c_char; STMT_NAME_LEN];
+    let len = bytes.len().min(STMT_NAME_LEN.saturating_sub(1));
+    for (i, b) in bytes[..len].iter().enumerate() {
+        buf[i] = *b as c_char;
+    }
+    buf[len] = 0;
+    Some(buf)
+}
 
-fn cb() -> &'static PoolCallbacks {
-    CALLBACKS.get().expect("pool callbacks not registered — call rust_pool_set_callbacks first")
+fn stmt_name_to_string(name: &[c_char; STMT_NAME_LEN]) -> String {
+    unsafe { CStr::from_ptr(name.as_ptr()) }
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn deallocate_stmt(conn: *mut c_void, stmt_name: &[c_char; STMT_NAME_LEN]) {
+    if conn.is_null() {
+        return;
+    }
+    let pg_conn = unsafe { (*(conn as *mut PgConnection)).conn };
+    if pg_conn.is_null() {
+        return;
+    }
+    let name = stmt_name_to_string(stmt_name);
+    if name.is_empty() {
+        return;
+    }
+    let sql = format!("DEALLOCATE {}", name);
+    if let Ok(cs) = CString::new(sql) {
+        let res = rust_pq_exec(pg_conn, cs.as_ptr());
+        if !res.is_null() {
+            rust_pq_clear(res);
+        }
+    }
+}
+
+/// Lookup statement in cache by hash.
+/// Returns 1 on hit, 0 on miss. Writes stmt_name_out to cached name on hit.
+#[no_mangle]
+pub extern "C" fn rust_stmt_cache_lookup(
+    conn: *mut c_void,
+    sql_hash: u64,
+    stmt_name_out: *mut *const c_char,
+) -> i32 {
+    if stmt_name_out.is_null() {
+        return 0;
+    }
+    unsafe {
+        *stmt_name_out = std::ptr::null();
+    }
+    if conn.is_null() || sql_hash == 0 {
+        return 0;
+    }
+
+    let mut caches = stmt_caches().lock().unwrap();
+    let cache = match caches.get_mut(&(conn as usize)) {
+        Some(c) => c,
+        None => return 0,
+    };
+
+    if let Some(entry) = cache.lookup_mut(sql_hash) {
+        entry.last_used = now_secs();
+        unsafe {
+            *stmt_name_out = entry.stmt_name.as_ptr();
+        }
+        return 1;
+    }
+    0
+}
+
+/// Add statement to cache. Returns index on success, -1 on failure.
+#[no_mangle]
+pub extern "C" fn rust_stmt_cache_add(
+    conn: *mut c_void,
+    sql_hash: u64,
+    stmt_name: *const c_char,
+    param_count: i32,
+) -> i32 {
+    if conn.is_null() || sql_hash == 0 {
+        return -1;
+    }
+    let name = match stmt_name_from_c(stmt_name) {
+        Some(n) => n,
+        None => return -1,
+    };
+
+    let now = now_secs();
+    let (idx, evicted) = {
+        let mut caches = stmt_caches().lock().unwrap();
+        let cache = caches.entry(conn as usize).or_insert_with(StmtCache::new);
+        cache.add(sql_hash, name, param_count, now)
+    };
+
+    if let Some(evicted_name) = evicted {
+        deallocate_stmt(conn, &evicted_name);
+        log_debug(&format!(
+            "Evicted prepared statement from cache: {}",
+            stmt_name_to_string(&evicted_name)
+        ));
+    }
+
+    idx
+}
+
+/// Clear local prepared statement cache without sending DEALLOCATE to server.
+#[no_mangle]
+pub extern "C" fn rust_stmt_cache_clear_local(conn: *mut c_void) {
+    if conn.is_null() {
+        return;
+    }
+    let mut caches = stmt_caches().lock().unwrap();
+    if let Some(cache) = caches.get_mut(&(conn as usize)) {
+        cache.clear();
+    }
+    log_info(&format!(
+        "Cleared prepared statement cache (local only) for connection {:p}",
+        conn
+    ));
+}
+
+/// Clear all cached statements for a connection (includes DEALLOCATE).
+#[no_mangle]
+pub extern "C" fn rust_stmt_cache_clear(conn: *mut c_void) {
+    if conn.is_null() {
+        return;
+    }
+
+    let evicted = {
+        let mut caches = stmt_caches().lock().unwrap();
+        if let Some(cache) = caches.get_mut(&(conn as usize)) {
+            cache.clear()
+        } else {
+            Vec::new()
+        }
+    };
+
+    for name in &evicted {
+        deallocate_stmt(conn, name);
+    }
+
+    log_debug(&format!(
+        "Cleared prepared statement cache for connection {:p}",
+        conn
+    ));
+}
+
+/// Drop cache entry for a connection (no DEALLOCATE).
+#[no_mangle]
+pub extern "C" fn rust_stmt_cache_drop(conn: *mut c_void) {
+    if conn.is_null() {
+        return;
+    }
+    let mut caches = stmt_caches().lock().unwrap();
+    caches.remove(&(conn as usize));
 }
 
 // ─── Logging helpers ─────────────────────────────────────────────────────────
 
 fn log_info(msg: &str) {
-    if let Some(cbs) = CALLBACKS.get() {
-        if let Ok(cs) = std::ffi::CString::new(msg) {
-            unsafe { (cbs.log_info)(cs.as_ptr()); }
-        }
+    if let Ok(cs) = CString::new(msg) {
+        crate::pg_logging::rust_logging_write(1, cs.as_ptr());
     }
 }
 
 fn log_error(msg: &str) {
-    if let Some(cbs) = CALLBACKS.get() {
-        if let Ok(cs) = std::ffi::CString::new(msg) {
-            unsafe { (cbs.log_error)(cs.as_ptr()); }
-        }
+    if let Ok(cs) = CString::new(msg) {
+        crate::pg_logging::rust_logging_write(0, cs.as_ptr());
     }
 }
 
 fn log_debug(msg: &str) {
-    if let Some(cbs) = CALLBACKS.get() {
-        if let Ok(cs) = std::ffi::CString::new(msg) {
-            unsafe { (cbs.log_debug)(cs.as_ptr()); }
+    if let Ok(cs) = CString::new(msg) {
+        crate::pg_logging::rust_logging_write(2, cs.as_ptr());
+    }
+}
+
+// ─── Config Helpers ─────────────────────────────────────────────────────────
+
+#[derive(Clone)]
+struct ConnConfig {
+    host: String,
+    port: i32,
+    database: String,
+    user: String,
+    password: String,
+    schema: String,
+}
+
+static CONN_CONFIG: OnceLock<ConnConfig> = OnceLock::new();
+static CLIENT_INIT: Once = Once::new();
+
+fn load_conn_config() -> ConnConfig {
+    fn env(name: &str) -> String {
+        std::env::var(name).unwrap_or_default()
+    }
+    let port = std::env::var("PLEX_PG_PORT")
+        .ok()
+        .and_then(|v| v.trim().parse::<i32>().ok())
+        .unwrap_or(0);
+    ConnConfig {
+        host: env("PLEX_PG_HOST"),
+        port,
+        database: env("PLEX_PG_DATABASE"),
+        user: env("PLEX_PG_USER"),
+        password: env("PLEX_PG_PASSWORD"),
+        schema: env("PLEX_PG_SCHEMA"),
+    }
+}
+
+fn conn_config() -> &'static ConnConfig {
+    CONN_CONFIG.get_or_init(load_conn_config)
+}
+
+fn parse_positive_env_or_default(name: &str, default_value: i32) -> i32 {
+    match std::env::var(name) {
+        Ok(v) => v
+            .trim()
+            .parse::<i32>()
+            .ok()
+            .filter(|n| *n > 0)
+            .unwrap_or(default_value),
+        Err(_) => default_value,
+    }
+}
+
+fn env_nonzero(name: &str) -> bool {
+    match std::env::var(name) {
+        Ok(v) => !v.is_empty() && v != "0",
+        Err(_) => false,
+    }
+}
+
+fn write_str_to_cbuf(buf: &mut [c_char], src: &str) {
+    let bytes = src.as_bytes();
+    let len = bytes.len().min(buf.len().saturating_sub(1));
+    for i in 0..len {
+        buf[i] = bytes[i] as c_char;
+    }
+    if !buf.is_empty() {
+        buf[len] = 0;
+    }
+}
+
+fn cbuf_to_string(buf: &[c_char]) -> String {
+    unsafe { CStr::from_ptr(buf.as_ptr()) }
+        .to_string_lossy()
+        .into_owned()
+}
+
+// ─── Thread Helpers ─────────────────────────────────────────────────────────
+
+fn pthread_to_u64(t: libc::pthread_t) -> u64 {
+    let mut out: u64 = 0;
+    let n = std::cmp::min(
+        std::mem::size_of::<libc::pthread_t>(),
+        std::mem::size_of::<u64>(),
+    );
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            &t as *const _ as *const u8,
+            &mut out as *mut _ as *mut u8,
+            n,
+        );
+    }
+    out
+}
+
+fn u64_to_pthread(id: u64) -> libc::pthread_t {
+    let mut t: libc::pthread_t = unsafe { std::mem::zeroed() };
+    let n = std::cmp::min(
+        std::mem::size_of::<libc::pthread_t>(),
+        std::mem::size_of::<u64>(),
+    );
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            &id as *const _ as *const u8,
+            &mut t as *mut _ as *mut u8,
+            n,
+        );
+    }
+    t
+}
+
+fn current_thread_id() -> u64 {
+    pthread_to_u64(unsafe { libc::pthread_self() })
+}
+
+fn threads_equal(a: u64, b: u64) -> bool {
+    if a == 0 || b == 0 {
+        return false;
+    }
+    unsafe { libc::pthread_equal(u64_to_pthread(a), u64_to_pthread(b)) != 0 }
+}
+
+fn check_thread_alive(thread_id: u64) -> bool {
+    if thread_id == 0 {
+        return false;
+    }
+    unsafe { libc::pthread_kill(u64_to_pthread(thread_id), 0) == 0 }
+}
+
+fn sleep_ms(ms: i32) {
+    if ms <= 0 {
+        return;
+    }
+    unsafe {
+        libc::usleep((ms as u32).saturating_mul(1000));
+    }
+}
+
+// ─── Connection Helpers ─────────────────────────────────────────────────────
+
+const PG_SOCKET_TIMEOUT_SEC: i64 = 60;
+const CONNECTION_OK: i32 = 0;
+const PGRES_COMMAND_OK: i32 = 1;
+const PGRES_TUPLES_OK: i32 = 2;
+
+fn conn_db_path(conn: *mut PgConnection) -> String {
+    if conn.is_null() {
+        return String::new();
+    }
+    unsafe { cbuf_to_string(&(*conn).db_path) }
+}
+
+fn conn_is_pg_active(conn: *mut PgConnection) -> bool {
+    if conn.is_null() {
+        return false;
+    }
+    unsafe { (*conn).is_pg_active != 0 }
+}
+
+fn conn_is_streaming_active(conn: *mut PgConnection) -> bool {
+    if conn.is_null() {
+        return false;
+    }
+    unsafe { (*conn).streaming_active.load(Ordering::Relaxed) != 0 }
+}
+
+fn pg_set_socket_timeout(pg_conn: *mut PGconn) {
+    if pg_conn.is_null() {
+        return;
+    }
+    let sock = rust_pq_socket(pg_conn);
+    if sock < 0 {
+        log_error("pg_set_socket_timeout: invalid socket");
+        return;
+    }
+
+    let tv = libc::timeval {
+        tv_sec: PG_SOCKET_TIMEOUT_SEC,
+        tv_usec: 0,
+    };
+    unsafe {
+        if libc::setsockopt(
+            sock,
+            libc::SOL_SOCKET,
+            libc::SO_RCVTIMEO,
+            &tv as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+        ) < 0
+        {
+            log_error("pg_set_socket_timeout: failed to set SO_RCVTIMEO");
+        }
+        if libc::setsockopt(
+            sock,
+            libc::SOL_SOCKET,
+            libc::SO_SNDTIMEO,
+            &tv as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+        ) < 0
+        {
+            log_error("pg_set_socket_timeout: failed to set SO_SNDTIMEO");
         }
     }
+
+    log_debug(&format!(
+        "Socket timeout set to {} seconds for socket {}",
+        PG_SOCKET_TIMEOUT_SEC, sock
+    ));
+}
+
+fn exec_command(pg_conn: *mut PGconn, sql: &str) -> bool {
+    if pg_conn.is_null() {
+        return false;
+    }
+    let cs = match CString::new(sql) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let res = rust_pq_exec(pg_conn, cs.as_ptr());
+    let ok = !res.is_null() && rust_pq_result_status(res) == PGRES_COMMAND_OK;
+    if !res.is_null() {
+        rust_pq_clear(res);
+    }
+    ok
+}
+
+fn exec_tuples(pg_conn: *mut PGconn, sql: &str) -> bool {
+    if pg_conn.is_null() {
+        return false;
+    }
+    let cs = match CString::new(sql) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let res = rust_pq_exec(pg_conn, cs.as_ptr());
+    let ok = !res.is_null() && rust_pq_result_status(res) == PGRES_TUPLES_OK;
+    if !res.is_null() {
+        rust_pq_clear(res);
+    }
+    ok
+}
+
+fn apply_session_settings(pg_conn: *mut PGconn, schema: &str, deallocate_all: bool) {
+    if pg_conn.is_null() {
+        return;
+    }
+
+    let schema_cmd = format!("SET search_path TO {}, public", schema);
+    let res = match CString::new(schema_cmd) {
+        Ok(s) => rust_pq_exec(pg_conn, s.as_ptr()),
+        Err(_) => std::ptr::null_mut(),
+    };
+    if res.is_null() || rust_pq_result_status(res) != PGRES_COMMAND_OK {
+        let err = if res.is_null() {
+            "<null result>".to_string()
+        } else {
+            unsafe {
+                let msg = rust_pq_result_error_message(res);
+                if msg.is_null() {
+                    "<null>".to_string()
+                } else {
+                    CStr::from_ptr(msg).to_string_lossy().into_owned()
+                }
+            }
+        };
+        log_error(&format!("Failed to set search_path: {}", err));
+    }
+    if !res.is_null() {
+        rust_pq_clear(res);
+    }
+
+    // Deallocate any leftover prepared statements from previous shim instance
+    if deallocate_all {
+        let _ = exec_command(pg_conn, "DEALLOCATE ALL");
+    }
+
+    if !exec_command(pg_conn, "SET statement_timeout = '60s'") {
+        log_error("Failed to set statement_timeout");
+    }
+}
+
+fn build_conninfo(cfg: &ConnConfig, with_keepalives: bool) -> String {
+    if with_keepalives {
+        format!(
+            "host={} port={} dbname={} user={} password={} \
+             connect_timeout=5 keepalives=1 keepalives_idle=30 \
+             keepalives_interval=10 keepalives_count=3",
+            cfg.host, cfg.port, cfg.database, cfg.user, cfg.password
+        )
+    } else {
+        format!(
+            "host={} port={} dbname={} user={} password={} connect_timeout=5",
+            cfg.host, cfg.port, cfg.database, cfg.user, cfg.password
+        )
+    }
+}
+
+fn create_connection_struct(db_path: &str, shadow_db: *mut crate::ffi_types::sqlite3) -> *mut PgConnection {
+    unsafe {
+        let conn_ptr = libc::calloc(1, std::mem::size_of::<PgConnection>()) as *mut PgConnection;
+        if conn_ptr.is_null() {
+            log_error("Failed to allocate pg_connection_t");
+            return std::ptr::null_mut();
+        }
+        if libc::pthread_mutex_init(&mut (*conn_ptr).mutex as *mut _, std::ptr::null()) != 0 {
+            log_error("pthread_mutex_init failed for pg_connection_t");
+            libc::free(conn_ptr as *mut libc::c_void);
+            return std::ptr::null_mut();
+        }
+        (*conn_ptr).shadow_db = shadow_db;
+        write_str_to_cbuf(&mut (*conn_ptr).db_path, db_path);
+        conn_ptr
+    }
+}
+
+fn destroy_connection_struct(conn: *mut PgConnection) {
+    if conn.is_null() {
+        return;
+    }
+    unsafe {
+        libc::pthread_mutex_destroy(&mut (*conn).mutex as *mut _);
+        libc::free(conn as *mut libc::c_void);
+    }
+}
+
+fn create_pool_connection(db_path: *const c_char) -> *mut c_void {
+    let cfg = conn_config();
+    log_debug(&format!(
+        "create_pool_connection: host='{}' port={} db='{}' user='{}' schema='{}'",
+        cfg.host, cfg.port, cfg.database, cfg.user, cfg.schema
+    ));
+
+    if cfg.host.is_empty() || cfg.port == 0 {
+        log_error(&format!(
+            "Pool connection skipped: config not loaded (host='{}' port={}). Check PLEX_PG_HOST/PLEX_PG_PORT env vars.",
+            cfg.host, cfg.port
+        ));
+        return std::ptr::null_mut();
+    }
+
+    let db_path_str = if db_path.is_null() {
+        ""
+    } else {
+        unsafe { cstr_to_str_or_empty(db_path) }
+    };
+
+    let conn_ptr = create_connection_struct(db_path_str, std::ptr::null_mut());
+    if conn_ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+
+    let conninfo = build_conninfo(cfg, true);
+    let conninfo_c = match CString::new(conninfo) {
+        Ok(s) => s,
+        Err(_) => {
+            destroy_connection_struct(conn_ptr);
+            return std::ptr::null_mut();
+        }
+    };
+
+    unsafe {
+        (*conn_ptr).conn = rust_pq_connectdb(conninfo_c.as_ptr());
+        if rust_pq_status((*conn_ptr).conn) != CONNECTION_OK {
+            let err = if (*conn_ptr).conn.is_null() {
+                "<null connection>".to_string()
+            } else {
+                let msg = rust_pq_error_message((*conn_ptr).conn);
+                if msg.is_null() {
+                    "<null>".to_string()
+                } else {
+                    CStr::from_ptr(msg).to_string_lossy().into_owned()
+                }
+            };
+            log_error(&format!("Pool connection failed: {}", err));
+            if !(*conn_ptr).conn.is_null() {
+                rust_pq_finish((*conn_ptr).conn);
+            }
+            (*conn_ptr).conn = std::ptr::null_mut();
+        } else {
+            pg_set_socket_timeout((*conn_ptr).conn);
+            apply_session_settings((*conn_ptr).conn, &cfg.schema, true);
+            (*conn_ptr).is_pg_active = 1;
+        }
+    }
+
+    conn_ptr as *mut c_void
+}
+
+fn destroy_pool_connection(conn: *mut c_void) {
+    let conn = conn as *mut PgConnection;
+    if conn.is_null() {
+        return;
+    }
+    rust_stmt_cache_drop(conn as *mut c_void);
+    unsafe {
+        if !(*conn).conn.is_null() {
+            rust_pq_finish((*conn).conn);
+        }
+    }
+    destroy_connection_struct(conn);
+}
+
+fn check_conn_ok(conn: *mut c_void) -> bool {
+    let conn = conn as *mut PgConnection;
+    if conn.is_null() {
+        return false;
+    }
+    unsafe { !(*conn).conn.is_null() && rust_pq_status((*conn).conn) == CONNECTION_OK }
+}
+
+fn reset_conn(conn: *mut c_void) -> bool {
+    let conn = conn as *mut PgConnection;
+    if conn.is_null() {
+        return false;
+    }
+    unsafe {
+        if (*conn).conn.is_null() {
+            return false;
+        }
+        rust_pq_reset((*conn).conn);
+        if rust_pq_status((*conn).conn) != CONNECTION_OK {
+            return false;
+        }
+        pg_set_socket_timeout((*conn).conn);
+        let cfg = conn_config();
+        apply_session_settings((*conn).conn, &cfg.schema, false);
+    }
+    true
+}
+
+fn reconnect_conn(conn: *mut c_void) -> bool {
+    let conn = conn as *mut PgConnection;
+    if conn.is_null() {
+        return false;
+    }
+    let cfg = conn_config();
+    let conninfo = build_conninfo(cfg, true);
+    let conninfo_c = match CString::new(conninfo) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    unsafe {
+        libc::pthread_mutex_lock(&mut (*conn).mutex as *mut _);
+        if !(*conn).conn.is_null() {
+            rust_pq_finish((*conn).conn);
+            (*conn).conn = std::ptr::null_mut();
+        }
+        libc::pthread_mutex_unlock(&mut (*conn).mutex as *mut _);
+
+        let new_pg = rust_pq_connectdb(conninfo_c.as_ptr());
+        if rust_pq_status(new_pg) == CONNECTION_OK {
+            pg_set_socket_timeout(new_pg);
+            apply_session_settings(new_pg, &cfg.schema, false);
+            (*conn).conn = new_pg;
+            (*conn).is_pg_active = 1;
+            return true;
+        }
+
+        let err = if new_pg.is_null() {
+            "<null connection>".to_string()
+        } else {
+            let msg = rust_pq_error_message(new_pg);
+            if msg.is_null() {
+                "<null>".to_string()
+            } else {
+                CStr::from_ptr(msg).to_string_lossy().into_owned()
+            }
+        };
+        log_error(&format!("Pool: reconnect failed: {}", err));
+        if !new_pg.is_null() {
+            rust_pq_finish(new_pg);
+        }
+        (*conn).conn = std::ptr::null_mut();
+        (*conn).is_pg_active = 0;
+        false
+    }
+}
+
+fn get_txn_status(conn: *mut c_void) -> i32 {
+    let conn = conn as *mut PgConnection;
+    if conn.is_null() {
+        return 0;
+    }
+    unsafe {
+        if (*conn).conn.is_null() {
+            return 0;
+        }
+        rust_pq_transaction_status((*conn).conn)
+    }
+}
+
+fn exec_simple(conn: *mut c_void, sql: *const c_char) -> bool {
+    let conn = conn as *mut PgConnection;
+    if conn.is_null() || sql.is_null() {
+        return false;
+    }
+    let s = unsafe { cstr_to_str_or_empty(sql) };
+    let trimmed = s.trim_start();
+    let lower = trimmed.to_ascii_lowercase();
+
+    if lower.starts_with("commit") || lower.starts_with("rollback") || lower.starts_with("end") {
+        let txn = unsafe {
+            if (*conn).conn.is_null() {
+                0
+            } else {
+                rust_pq_transaction_status((*conn).conn)
+            }
+        };
+        if txn != PQTRANS_INTRANS && txn != PQTRANS_INERROR {
+            log_debug(&format!(
+                "exec_simple: skipped {} in non-transaction state={}",
+                trimmed, txn
+            ));
+            return true;
+        }
+    }
+
+    let cmd = match CString::new(trimmed) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    unsafe {
+        if (*conn).conn.is_null() {
+            return false;
+        }
+        let res = rust_pq_exec((*conn).conn, cmd.as_ptr());
+        let ok = !res.is_null() && rust_pq_result_status(res) == PGRES_COMMAND_OK;
+        if !res.is_null() {
+            rust_pq_clear(res);
+        }
+        ok
+    }
+}
+
+fn close_handle_connection(conn: *mut PgConnection) {
+    if conn.is_null() {
+        return;
+    }
+    rust_stmt_cache_clear(conn as *mut c_void);
+    rust_stmt_cache_drop(conn as *mut c_void);
+    unsafe {
+        libc::pthread_mutex_lock(&mut (*conn).mutex as *mut _);
+        if !(*conn).conn.is_null() {
+            rust_pq_finish((*conn).conn);
+            (*conn).conn = std::ptr::null_mut();
+        }
+        libc::pthread_mutex_unlock(&mut (*conn).mutex as *mut _);
+    }
+    destroy_connection_struct(conn);
 }
 
 // ─── Pool algorithm helpers ──────────────────────────────────────────────────
@@ -746,19 +1417,25 @@ thread_local! {
     static POOL_RETRY_COUNT: Cell<i32> = const { Cell::new(0) };
 }
 
-/// Maximum retry delays from config.
-const MAX_RETRY_DELAYS: usize = 10;
+#[inline]
+fn retry_count_get() -> i32 {
+    POOL_RETRY_COUNT.try_with(|c| c.get()).unwrap_or(0)
+}
+
+#[inline]
+fn retry_count_set(v: i32) {
+    let _ = POOL_RETRY_COUNT.try_with(|c| c.set(v));
+}
 
 // ─── Pool Get Connection: 7-Phase Algorithm ──────────────────────────────────
 //
 // This is the core pool algorithm, migrated from C's pool_get_connection().
-// All libpq operations are done through C callbacks. All state management
-// (slot claiming, TLS cache, generation checks) is in Rust.
+// All libpq operations are performed via Rust helpers; state management
+// (slot claiming, TLS cache, generation checks) stays in Rust.
 
 /// Internal: full 7-phase pool acquisition.
 /// Returns an opaque pg_connection_t* or null.
 fn pool_get_connection_inner(db_path: *const c_char) -> *mut c_void {
-    let cbs = cb();
     let pm = pool();
 
     // Convert db_path to &str for is_library_db check
@@ -772,7 +1449,7 @@ fn pool_get_connection_inner(db_path: *const c_char) -> *mut c_void {
         return std::ptr::null_mut();
     }
 
-    let current_thread = unsafe { (cbs.get_current_thread)() };
+    let current_thread = current_thread_id();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -799,13 +1476,11 @@ fn pool_get_connection_inner(db_path: *const c_char) -> *mut c_void {
                 && slot.generation.load(Ordering::Acquire) == gen
             {
                 let owner = slot.owner_thread.load(Ordering::Acquire);
-                if unsafe { (cbs.threads_equal)(owner, current_thread) } != 0 {
+                if threads_equal(owner, current_thread) {
                     let conn = slot.conn.load(Ordering::Acquire);
-                    if !conn.is_null()
-                        && unsafe { (cbs.check_conn_ok)(conn) } != 0
-                    {
+                    if !conn.is_null() && check_conn_ok(conn) {
                         // Skip if streaming
-                        if unsafe { (cbs.is_streaming_active)(conn) } != 0 {
+                        if conn_is_streaming_active(conn as *mut PgConnection) {
                             log_debug(&format!(
                                 "Pool FAST PATH: streaming_active on slot {}, falling through",
                                 idx
@@ -839,13 +1514,13 @@ fn pool_get_connection_inner(db_path: *const c_char) -> *mut c_void {
         }
 
         let owner = slot.owner_thread.load(Ordering::Acquire);
-        if unsafe { (cbs.check_thread_alive)(owner) } != 0 {
+        if check_thread_alive(owner) {
             continue; // Thread alive — don't touch
         }
 
         // Thread is dead → safe to reclaim, unless streaming
         let conn = slot.conn.load(Ordering::Acquire);
-        if !conn.is_null() && unsafe { (cbs.is_streaming_active)(conn) } != 0 {
+        if !conn.is_null() && conn_is_streaming_active(conn as *mut PgConnection) {
             log_info(&format!(
                 "Pool PHASE 0: slot {} owner dead but streaming_active, skipping reclaim",
                 i
@@ -878,7 +1553,7 @@ fn pool_get_connection_inner(db_path: *const c_char) -> *mut c_void {
             ));
             let to_destroy = pm.reap_idle(now);
             for (_slot_idx, conn_ptr) in to_destroy {
-                unsafe { (cbs.destroy_conn)(conn_ptr); }
+                destroy_pool_connection(conn_ptr);
             }
         }
     }
@@ -893,14 +1568,14 @@ fn pool_get_connection_inner(db_path: *const c_char) -> *mut c_void {
             continue;
         }
         let owner = slot.owner_thread.load(Ordering::Acquire);
-        if unsafe { (cbs.threads_equal)(owner, current_thread) } == 0 {
+        if !threads_equal(owner, current_thread) {
             continue;
         }
 
         let conn = slot.conn.load(Ordering::Acquire);
-        if !conn.is_null() && unsafe { (cbs.check_conn_ok)(conn) } != 0 {
+        if !conn.is_null() && check_conn_ok(conn) {
             // Skip streaming connections
-            if unsafe { (cbs.is_streaming_active)(conn) } != 0 {
+            if conn_is_streaming_active(conn as *mut PgConnection) {
                 log_debug(&format!(
                     "Pool: slot {} streaming_active, skipping for thread",
                     i
@@ -914,9 +1589,9 @@ fn pool_get_connection_inner(db_path: *const c_char) -> *mut c_void {
 
         // Connection is dead — try READY → RECONNECTING
         if slot.try_begin_reconnect() {
-            unsafe { (cbs.stmt_cache_clear)(conn); }
-            let ok = unsafe { (cbs.reconnect_slot)(conn) };
-            if ok != 0 {
+            rust_stmt_cache_clear(conn);
+            let ok = reconnect_conn(conn);
+            if ok {
                 slot.last_used.store(now, Ordering::Release);
                 slot.mark_ready();
                 tls_pool_cache_set(0, i as u32, slot.generation.load(Ordering::Acquire));
@@ -939,7 +1614,7 @@ fn pool_get_connection_inner(db_path: *const c_char) -> *mut c_void {
         }
 
         // Skip streaming connections
-        if unsafe { (cbs.is_streaming_active)(conn) } != 0 {
+        if conn_is_streaming_active(conn as *mut PgConnection) {
             continue;
         }
 
@@ -953,7 +1628,7 @@ fn pool_get_connection_inner(db_path: *const c_char) -> *mut c_void {
         slot.generation.fetch_add(1, Ordering::SeqCst);
 
         // Commit/rollback any pending transaction before reset
-        let txn = unsafe { (cbs.get_txn_status)(conn) };
+        let txn = get_txn_status(conn);
         if txn == PQTRANS_INTRANS || txn == PQTRANS_INERROR {
             let cmd = if txn == PQTRANS_INTRANS {
                 c"COMMIT"
@@ -964,14 +1639,14 @@ fn pool_get_connection_inner(db_path: *const c_char) -> *mut c_void {
                 "Pool PHASE 2: slot {} has pending transaction (status={}), sending cleanup before reset",
                 i, txn
             ));
-            unsafe { (cbs.exec_simple)(conn, cmd.as_ptr()); }
+            let _ = exec_simple(conn, cmd.as_ptr());
         }
 
         // Clear stmt cache and reset connection
-        unsafe { (cbs.stmt_cache_clear)(conn); }
-        let reset_ok = unsafe { (cbs.reset_conn)(conn) };
+        rust_stmt_cache_clear(conn);
+        let reset_ok = reset_conn(conn);
 
-        if reset_ok != 0 {
+        if reset_ok {
             log_debug(&format!("Pool: reusing reset connection in slot {}", i));
             slot.mark_ready();
             tls_pool_cache_set(0, i as u32, slot.generation.load(Ordering::Acquire));
@@ -979,9 +1654,9 @@ fn pool_get_connection_inner(db_path: *const c_char) -> *mut c_void {
         }
 
         // Reset failed — do full reconnect
-        unsafe { (cbs.stmt_cache_clear)(conn); }
-        let reconn_ok = unsafe { (cbs.reconnect_slot)(conn) };
-        if reconn_ok != 0 {
+        rust_stmt_cache_clear(conn);
+        let reconn_ok = reconnect_conn(conn);
+        if reconn_ok {
             slot.last_used.store(now, Ordering::Release);
             slot.mark_ready();
             tls_pool_cache_set(0, i as u32, slot.generation.load(Ordering::Acquire));
@@ -1011,8 +1686,8 @@ fn pool_get_connection_inner(db_path: *const c_char) -> *mut c_void {
 
         log_debug(&format!("Pool: claimed empty slot {} for thread", i));
 
-        let new_conn = unsafe { (cbs.create_conn)(db_path) };
-        if !new_conn.is_null() && unsafe { (cbs.is_pg_active)(new_conn) } != 0 {
+        let new_conn = create_pool_connection(db_path);
+        if !new_conn.is_null() && conn_is_pg_active(new_conn as *mut PgConnection) {
             slot.conn.store(new_conn, Ordering::Release);
             log_info(&format!("Pool: created new connection in slot {}", i));
             slot.mark_ready();
@@ -1022,7 +1697,7 @@ fn pool_get_connection_inner(db_path: *const c_char) -> *mut c_void {
             // Creation failed — release slot
             log_error(&format!("Pool: failed to create connection for slot {}", i));
             if !new_conn.is_null() {
-                unsafe { (cbs.destroy_conn)(new_conn); }
+                destroy_pool_connection(new_conn);
             }
             slot.conn.store(std::ptr::null_mut(), Ordering::Release);
             slot.owner_thread.store(0, Ordering::Release);
@@ -1047,13 +1722,13 @@ fn pool_get_connection_inner(db_path: *const c_char) -> *mut c_void {
         // Free old connection if any
         let old_conn = slot.conn.swap(std::ptr::null_mut(), Ordering::SeqCst);
         if !old_conn.is_null() {
-            unsafe { (cbs.destroy_conn)(old_conn); }
+            destroy_pool_connection(old_conn);
         }
 
         log_debug(&format!("Pool: reclaiming error slot {}", i));
 
-        let new_conn = unsafe { (cbs.create_conn)(db_path) };
-        if !new_conn.is_null() && unsafe { (cbs.is_pg_active)(new_conn) } != 0 {
+        let new_conn = create_pool_connection(db_path);
+        if !new_conn.is_null() && conn_is_pg_active(new_conn as *mut PgConnection) {
             slot.conn.store(new_conn, Ordering::Release);
             log_info(&format!("Pool: recovered slot {} with new connection", i));
             slot.mark_ready();
@@ -1061,7 +1736,7 @@ fn pool_get_connection_inner(db_path: *const c_char) -> *mut c_void {
             return new_conn;
         } else {
             if !new_conn.is_null() {
-                unsafe { (cbs.destroy_conn)(new_conn); }
+                destroy_pool_connection(new_conn);
             }
             slot.conn.store(std::ptr::null_mut(), Ordering::Release);
             slot.owner_thread.store(0, Ordering::Release);
@@ -1073,7 +1748,8 @@ fn pool_get_connection_inner(db_path: *const c_char) -> *mut c_void {
     // PHASE 5: Auto-grow pool
     // =========================================================================
     let current_size = pm.configured_size.load(Ordering::Relaxed);
-    if current_size < POOL_SIZE_MAX {
+    let runtime_max = pm.pool_max();
+    if current_size < runtime_max {
         let new_size = current_size + 1;
         if pm
             .configured_size
@@ -1093,9 +1769,9 @@ fn pool_get_connection_inner(db_path: *const c_char) -> *mut c_void {
                         current_size, new_size
                     ));
 
-                    let new_conn = unsafe { (cbs.create_conn)(db_path) };
+                    let new_conn = create_pool_connection(db_path);
                     if !new_conn.is_null()
-                        && unsafe { (cbs.is_pg_active)(new_conn) } != 0
+                        && conn_is_pg_active(new_conn as *mut PgConnection)
                     {
                         slot.conn.store(new_conn, Ordering::Release);
                         slot.mark_ready();
@@ -1108,7 +1784,7 @@ fn pool_get_connection_inner(db_path: *const c_char) -> *mut c_void {
                     } else {
                         log_error(&format!("Pool: auto-grow slot {} connection failed", idx));
                         if !new_conn.is_null() {
-                            unsafe { (cbs.destroy_conn)(new_conn); }
+                            destroy_pool_connection(new_conn);
                         }
                         slot.conn.store(std::ptr::null_mut(), Ordering::Release);
                         slot.owner_thread.store(0, Ordering::Release);
@@ -1122,11 +1798,10 @@ fn pool_get_connection_inner(db_path: *const c_char) -> *mut c_void {
     // =========================================================================
     // PHASE 6: Retry with backoff
     // =========================================================================
-    let retry_count = POOL_RETRY_COUNT.with(|c| c.get());
+    let retry_count = retry_count_get();
 
-    let mut delays = [0i32; MAX_RETRY_DELAYS];
-    let mut max_retries = 0i32;
-    unsafe { (cbs.get_retry_delays)(delays.as_mut_ptr(), &mut max_retries); }
+    let delays = crate::pg_config::get_retry_delays_vec();
+    let max_retries = delays.len() as i32;
 
     if retry_count < max_retries {
         let delay = delays[retry_count as usize];
@@ -1136,13 +1811,13 @@ fn pool_get_connection_inner(db_path: *const c_char) -> *mut c_void {
             max_retries,
             delay
         ));
-        POOL_RETRY_COUNT.with(|c| c.set(retry_count + 1));
-        unsafe { (cbs.sleep_ms)(delay); }
+        retry_count_set(retry_count + 1);
+        sleep_ms(delay);
 
         // Recursive retry
         let result = pool_get_connection_inner(db_path);
         if !result.is_null() {
-            POOL_RETRY_COUNT.with(|c| c.set(0));
+            retry_count_set(0);
         }
         return result;
     }
@@ -1153,7 +1828,7 @@ fn pool_get_connection_inner(db_path: *const c_char) -> *mut c_void {
         max_retries,
         pm.configured_size.load(Ordering::Relaxed)
     ));
-    POOL_RETRY_COUNT.with(|c| c.set(0));
+    retry_count_set(0);
     std::ptr::null_mut()
 }
 
@@ -1163,7 +1838,6 @@ fn pool_get_connection_inner(db_path: *const c_char) -> *mut c_void {
 /// The connection stays open in the pool for potential reuse.
 fn pool_release_for_db_inner(db_handle: usize) {
     let pm = pool();
-    let cbs = cb();
 
     // Remove db_to_pool mapping
     let slot_opt = pm.db_to_pool.release(db_handle);
@@ -1172,16 +1846,16 @@ fn pool_release_for_db_inner(db_handle: usize) {
         let pool_size = pm.pool_size();
         if slot_idx < pool_size {
             let slot = &pm.slots[slot_idx];
-            let current_thread = unsafe { (cbs.get_current_thread)() };
+            let current_thread = current_thread_id();
             let owner = slot.owner_thread.load(Ordering::Acquire);
 
-            if unsafe { (cbs.threads_equal)(owner, current_thread) } != 0 {
+            if threads_equal(owner, current_thread) {
                 let state = slot.state.load(Ordering::Acquire);
                 if state == SLOT_READY {
                     // Commit/rollback pending transaction before release
                     let conn = slot.conn.load(Ordering::Acquire);
                     if !conn.is_null() {
-                        let txn = unsafe { (cbs.get_txn_status)(conn) };
+                        let txn = get_txn_status(conn);
                         if txn == PQTRANS_INTRANS || txn == PQTRANS_INERROR {
                             let cmd = if txn == PQTRANS_INTRANS {
                                 c"COMMIT"
@@ -1192,7 +1866,7 @@ fn pool_release_for_db_inner(db_handle: usize) {
                                 "Pool: slot {} has pending transaction (status={}), sending cleanup before release",
                                 slot_idx, txn
                             ));
-                            unsafe { (cbs.exec_simple)(conn, cmd.as_ptr()); }
+                            let _ = exec_simple(conn, cmd.as_ptr());
                         }
                     }
 
@@ -1220,17 +1894,15 @@ fn pool_check_health_inner(conn: *mut c_void) -> i32 {
         return 0;
     }
 
-    let cbs = cb();
-
     // Check if connection is still OK
-    if unsafe { (cbs.check_conn_ok)(conn) } != 0 {
+    if check_conn_ok(conn) {
         return 0; // Healthy
     }
 
     log_info("Pool: connection health check failed, resetting");
 
     let pm = pool();
-    let current_thread = unsafe { (cbs.get_current_thread)() };
+    let current_thread = current_thread_id();
     let pool_size = pm.pool_size();
 
     for i in 0..pool_size {
@@ -1239,7 +1911,7 @@ fn pool_check_health_inner(conn: *mut c_void) -> i32 {
             continue;
         }
         let owner = slot.owner_thread.load(Ordering::Acquire);
-        if unsafe { (cbs.threads_equal)(owner, current_thread) } == 0 {
+        if !threads_equal(owner, current_thread) {
             continue;
         }
 
@@ -1248,11 +1920,11 @@ fn pool_check_health_inner(conn: *mut c_void) -> i32 {
             break;
         }
 
-        unsafe { (cbs.stmt_cache_clear)(conn); }
+        rust_stmt_cache_clear(conn);
 
         // Try PQreset first
-        let reset_ok = unsafe { (cbs.reset_conn)(conn) };
-        if reset_ok != 0 {
+        let reset_ok = reset_conn(conn);
+        if reset_ok {
             log_info(&format!("Pool: connection reset successful for slot {}", i));
             slot.last_used.store(
                 std::time::SystemTime::now()
@@ -1270,8 +1942,8 @@ fn pool_check_health_inner(conn: *mut c_void) -> i32 {
             "Pool: PQreset failed for slot {}, trying fresh connection...",
             i
         ));
-        let reconn_ok = unsafe { (cbs.reconnect_slot)(conn) };
-        if reconn_ok != 0 {
+        let reconn_ok = reconnect_conn(conn);
+        if reconn_ok {
             slot.last_used.store(
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -1304,7 +1976,6 @@ fn pool_check_health_inner(conn: *mut c_void) -> i32 {
 /// This is the Rust equivalent of the C pg_find_connection logic for pooled conns.
 /// Returns the pool connection pointer, or null if not a library.db handle.
 fn pool_find_connection_for_db(db_handle: usize, db_path: *const c_char) -> *mut c_void {
-    let cbs = cb();
     let pm = pool();
 
     let path_str = if db_path.is_null() {
@@ -1323,7 +1994,7 @@ fn pool_find_connection_for_db(db_handle: usize, db_path: *const c_char) -> *mut
         return std::ptr::null_mut();
     }
 
-    if unsafe { (cbs.is_pg_active)(pool_conn) } == 0 {
+    if !conn_is_pg_active(pool_conn as *mut PgConnection) {
         return std::ptr::null_mut();
     }
 
@@ -1351,69 +2022,36 @@ fn pool_find_connection_for_db(db_handle: usize, db_path: *const c_char) -> *mut
 // Public C FFI — Pool Operations
 // ═════════════════════════════════════════════════════════════════════════════
 
-/// Register all C callback function pointers with the Rust pool module.
-/// Must be called once at init time before any pool operations.
-///
-/// # Safety
-/// All function pointers must be valid, non-null C function pointers.
-#[no_mangle]
-pub unsafe extern "C" fn rust_pool_set_callbacks(
-    create_conn: CbCreateConn,
-    destroy_conn: CbDestroyConn,
-    check_conn_ok: CbCheckConnOk,
-    reset_conn: CbResetConn,
-    reconnect_slot: CbReconnectSlot,
-    get_txn_status: CbGetTxnStatus,
-    exec_simple: CbExecSimple,
-    is_streaming_active: CbIsStreamingActive,
-    is_pg_active: CbIsPgActive,
-    set_pg_active: CbSetPgActive,
-    check_thread_alive: CbCheckThreadAlive,
-    stmt_cache_clear: CbStmtCacheClear,
-    get_db_path: CbGetDbPath,
-    get_current_thread: CbGetCurrentThread,
-    threads_equal: CbThreadsEqual,
-    sleep_ms: CbSleepMs,
-    get_retry_delays: CbGetRetryDelays,
-    log_info_cb: CbLogInfo,
-    log_error_cb: CbLogError,
-    log_debug_cb: CbLogDebug,
-) {
-    let _ = CALLBACKS.set(PoolCallbacks {
-        create_conn,
-        destroy_conn,
-        check_conn_ok,
-        reset_conn,
-        reconnect_slot,
-        get_txn_status,
-        exec_simple,
-        is_streaming_active,
-        is_pg_active,
-        set_pg_active,
-        check_thread_alive,
-        stmt_cache_clear,
-        get_db_path,
-        get_current_thread,
-        threads_equal,
-        sleep_ms,
-        get_retry_delays,
-        log_info: log_info_cb,
-        log_error: log_error_cb,
-        log_debug: log_debug_cb,
-    });
-}
-
 /// Initialize the pool with optional pool_size and idle_timeout from env vars.
 /// Called from pg_client_init().
-///
-/// # Safety
-/// Must be called after rust_pool_set_callbacks().
 #[no_mangle]
-pub extern "C" fn rust_pool_init(pool_size: i32, idle_timeout: i32) {
-    let pm = pool(); // Initialize via OnceLock
-    if pool_size > 0 && pool_size <= POOL_SIZE_MAX as i32 {
-        pm.configured_size
-            .store(pool_size as usize, Ordering::Relaxed);
+pub extern "C" fn rust_pool_init(pool_size: i32, pool_max: i32, idle_timeout: i32) {
+    let requested_max = if pool_max > 0 {
+        pool_max as usize
+    } else {
+        POOL_SIZE_DEFAULT
+    };
+    let requested_size = if pool_size > 0 {
+        pool_size as usize
+    } else {
+        POOL_SIZE_DEFAULT
+    };
+
+    let pm = POOL.get_or_init(|| PoolManager::new(requested_size, requested_max));
+    let slots_cap = pm.slots.len();
+    let max_sz = requested_max.min(slots_cap).max(1);
+    if requested_max > slots_cap {
+        log_error(&format!(
+            "Pool: requested max {} exceeds initialized slot capacity {}; clamping",
+            requested_max, slots_cap
+        ));
+    }
+    pm.configured_max_size.store(max_sz, Ordering::Relaxed);
+
+    if requested_size <= max_sz {
+        pm.configured_size.store(requested_size, Ordering::Relaxed);
+    } else {
+        pm.configured_size.store(max_sz, Ordering::Relaxed);
     }
     if idle_timeout >= 10 {
         pm.idle_timeout_secs
@@ -1428,10 +2066,6 @@ pub extern "C" fn rust_pool_init(pool_size: i32, idle_timeout: i32) {
 /// Must not be called concurrently.
 #[no_mangle]
 pub extern "C" fn rust_pool_cleanup() {
-    if CALLBACKS.get().is_none() {
-        return;
-    }
-    let cbs = cb();
     let pm = pool();
     let pool_size = pm.pool_size();
 
@@ -1442,7 +2076,7 @@ pub extern "C" fn rust_pool_cleanup() {
 
         let conn = slot.conn.swap(std::ptr::null_mut(), Ordering::SeqCst);
         if !conn.is_null() {
-            unsafe { (cbs.destroy_conn)(conn); }
+            destroy_pool_connection(conn);
         }
         slot.owner_thread.store(0, Ordering::Release);
         slot.generation.store(0, Ordering::Release);
@@ -1568,10 +2202,6 @@ pub unsafe extern "C" fn rust_pool_find_connection(
 /// The returned pointer may be null.
 #[no_mangle]
 pub extern "C" fn rust_find_any_library_connection() -> *mut c_void {
-    if CALLBACKS.get().is_none() {
-        return std::ptr::null_mut();
-    }
-    let cbs = cb();
     let pm = pool();
 
     // First try pool
@@ -1579,7 +2209,7 @@ pub extern "C" fn rust_find_any_library_connection() -> *mut c_void {
     if let Some(path) = lib_path {
         if let Ok(cs) = std::ffi::CString::new(path) {
             let conn = pool_get_connection_inner(cs.as_ptr());
-            if !conn.is_null() && unsafe { (cbs.is_pg_active)(conn) } != 0 {
+            if !conn.is_null() && conn_is_pg_active(conn as *mut PgConnection) {
                 return conn;
             }
         }
@@ -1588,18 +2218,12 @@ pub extern "C" fn rust_find_any_library_connection() -> *mut c_void {
     // Fall back to registry: find any library connection
     pm.registry
         .find_any_library(|conn_ptr| {
-            let conn = conn_ptr as *mut c_void;
-            if unsafe { (cbs.is_pg_active)(conn) } == 0 {
+            let conn = conn_ptr as *mut PgConnection;
+            if !conn_is_pg_active(conn) {
                 return false;
             }
-            let mut buf = [0u8; 1024];
-            unsafe {
-                (cbs.get_db_path)(conn, buf.as_mut_ptr() as *mut c_char, buf.len());
-            }
-            let path = unsafe { CStr::from_ptr(buf.as_ptr() as *const c_char) }
-                .to_str()
-                .unwrap_or("");
-            is_library_db(path)
+            let path = conn_db_path(conn);
+            is_library_db(&path)
         })
         .map(|p| p as *mut c_void)
         .unwrap_or(std::ptr::null_mut())
@@ -1641,6 +2265,488 @@ pub extern "C" fn rust_pool_check_fork() -> i32 {
         return 1;
     }
     0
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Public C FFI — Client/Connection Operations
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Initialize client state and the connection pool.
+#[no_mangle]
+pub extern "C" fn rust_pg_client_init() {
+    CLIENT_INIT.call_once(|| {
+        let mut pool_size = parse_positive_env_or_default("PLEX_PG_POOL_SIZE", POOL_SIZE_DEFAULT as i32);
+        let mut pool_max = parse_positive_env_or_default("PLEX_PG_POOL_MAX", pool_size);
+
+        let cfg = conn_config();
+
+        let db_max_connections = if cfg.host.is_empty() || cfg.port <= 0 {
+            0
+        } else {
+            let host = CString::new(cfg.host.clone()).ok();
+            let db = CString::new(cfg.database.clone()).ok();
+            let user = CString::new(cfg.user.clone()).ok();
+            let pass = CString::new(cfg.password.clone()).ok();
+            if let (Some(h), Some(d), Some(u), Some(p)) = (host, db, user, pass) {
+                rust_pg_probe_max_connections(h.as_ptr(), cfg.port, d.as_ptr(), u.as_ptr(), p.as_ptr())
+            } else {
+                0
+            }
+        };
+
+        if db_max_connections > 0 {
+            if pool_max != db_max_connections {
+                log_info(&format!(
+                    "Pool max ({}) does not match database max_connections ({}); adjusting to {}",
+                    pool_max, db_max_connections, db_max_connections
+                ));
+                pool_max = db_max_connections;
+            }
+        } else {
+            log_info(&format!(
+                "Pool init: could not read database max_connections; keeping pool max={}",
+                pool_max
+            ));
+        }
+
+        if pool_size > pool_max {
+            log_info(&format!(
+                "Pool size {} exceeds pool max {}; clamping",
+                pool_size, pool_max
+            ));
+            pool_size = pool_max;
+        }
+
+        let mut idle_timeout = 300;
+        if let Ok(val) = std::env::var("PLEX_PG_IDLE_TIMEOUT") {
+            if let Ok(v) = val.trim().parse::<i32>() {
+                if v >= 10 {
+                    idle_timeout = v;
+                }
+            }
+        }
+
+        if !cfg.host.is_empty() && cfg.port > 0 {
+            let host = CString::new(cfg.host.clone()).ok();
+            let db = CString::new(cfg.database.clone()).ok();
+            let user = CString::new(cfg.user.clone()).ok();
+            let pass = CString::new(cfg.password.clone()).ok();
+            if let (Some(h), Some(d), Some(u), Some(p)) = (host, db, user, pass) {
+                idle_timeout = rust_pg_align_idle_timeout_with_server(
+                    idle_timeout,
+                    h.as_ptr(),
+                    cfg.port,
+                    d.as_ptr(),
+                    u.as_ptr(),
+                    p.as_ptr(),
+                );
+            }
+        }
+
+        rust_pool_init(pool_size, pool_max, idle_timeout);
+
+        log_info(&format!(
+            "pg_client initialized (Rust pool): pool_size={}, pool_max={}, idle_timeout={}s",
+            pool_size, pool_max, idle_timeout
+        ));
+    });
+}
+
+/// Cleanup client state and connection pool.
+#[no_mangle]
+pub extern "C" fn rust_pg_client_cleanup() {
+    // Close any remaining handle connections
+    let conns = pool().registry.drain_all();
+    for conn in conns {
+        close_handle_connection(conn as *mut PgConnection);
+    }
+    rust_pool_cleanup();
+}
+
+// ─── C ABI wrappers (pg_client.c replacement) ────────────────────────────────
+
+#[no_mangle]
+pub extern "C" fn pg_client_init() {
+    rust_pg_client_init();
+}
+
+#[no_mangle]
+pub extern "C" fn pg_client_cleanup() {
+    rust_pg_client_cleanup();
+}
+
+#[no_mangle]
+pub extern "C" fn pg_connect(db_path: *const c_char, shadow_db: *mut sqlite3) -> *mut PgConnection {
+    rust_pg_connect(db_path, shadow_db)
+}
+
+#[no_mangle]
+pub extern "C" fn pg_close(conn: *mut PgConnection) {
+    rust_pg_close(conn);
+}
+
+#[no_mangle]
+pub extern "C" fn pg_ensure_connection(conn: *mut PgConnection) -> c_int {
+    rust_pg_ensure_connection(conn)
+}
+
+#[no_mangle]
+pub extern "C" fn pg_register_connection(conn: *mut PgConnection) {
+    rust_pg_register_connection(conn);
+}
+
+#[no_mangle]
+pub extern "C" fn pg_unregister_connection(conn: *mut PgConnection) {
+    rust_pg_unregister_connection(conn);
+}
+
+#[no_mangle]
+pub extern "C" fn pg_find_connection(db: *mut sqlite3) -> *mut PgConnection {
+    rust_pg_find_connection(db)
+}
+
+#[no_mangle]
+pub extern "C" fn pg_find_handle_connection(db: *mut sqlite3) -> *mut PgConnection {
+    rust_pg_find_handle_connection(db)
+}
+
+#[no_mangle]
+pub extern "C" fn pg_find_any_library_connection() -> *mut PgConnection {
+    rust_pg_find_any_library_connection()
+}
+
+#[no_mangle]
+pub extern "C" fn pg_get_thread_connection(db_path: *const c_char) -> *mut PgConnection {
+    unsafe { rust_pool_get_connection(db_path) as *mut PgConnection }
+}
+
+#[no_mangle]
+pub extern "C" fn pg_pool_validate_connection(conn: *mut PgConnection) -> c_int {
+    rust_pool_validate_connection(conn as *const c_void)
+}
+
+#[no_mangle]
+pub extern "C" fn pg_pool_touch_connection(conn: *mut PgConnection) {
+    rust_pool_touch_connection(conn as *const c_void);
+}
+
+#[no_mangle]
+pub extern "C" fn pg_pool_check_connection_health(conn: *mut PgConnection) -> c_int {
+    rust_pool_check_health(conn as *mut c_void)
+}
+
+#[no_mangle]
+pub extern "C" fn pg_close_pool_for_db(db: *mut sqlite3) {
+    if db.is_null() {
+        return;
+    }
+    rust_pool_release_for_db(db as *const c_void);
+}
+
+#[no_mangle]
+pub extern "C" fn pg_get_global_metadata_id() -> i64 {
+    rust_get_global_metadata_id()
+}
+
+#[no_mangle]
+pub extern "C" fn pg_set_global_metadata_id(id: i64) {
+    rust_set_global_metadata_id(id);
+}
+
+#[no_mangle]
+pub extern "C" fn pg_get_global_last_insert_rowid() -> i64 {
+    rust_get_global_last_insert_rowid()
+}
+
+#[no_mangle]
+pub extern "C" fn pg_set_global_last_insert_rowid(id: i64) {
+    rust_set_global_last_insert_rowid(id);
+}
+
+#[no_mangle]
+pub extern "C" fn pg_hash_sql(sql: *const c_char) -> u64 {
+    rust_hash_sql(sql)
+}
+
+#[no_mangle]
+pub extern "C" fn pg_stmt_cache_lookup(
+    conn: *mut PgConnection,
+    sql_hash: u64,
+    stmt_name_out: *mut *const c_char,
+) -> c_int {
+    rust_stmt_cache_lookup(conn as *mut c_void, sql_hash, stmt_name_out)
+}
+
+#[no_mangle]
+pub extern "C" fn pg_stmt_cache_add(
+    conn: *mut PgConnection,
+    sql_hash: u64,
+    stmt_name: *const c_char,
+    param_count: c_int,
+) -> c_int {
+    rust_stmt_cache_add(conn as *mut c_void, sql_hash, stmt_name, param_count)
+}
+
+#[no_mangle]
+pub extern "C" fn pg_stmt_cache_clear(conn: *mut PgConnection) {
+    rust_stmt_cache_clear(conn as *mut c_void);
+}
+
+#[no_mangle]
+pub extern "C" fn pg_stmt_cache_clear_local(conn: *mut PgConnection) {
+    rust_stmt_cache_clear_local(conn as *mut c_void);
+}
+
+#[no_mangle]
+pub extern "C" fn pg_is_stale_prepared_stmt(res: *mut PGresult) -> c_int {
+    if res.is_null() {
+        return 0;
+    }
+    let sqlstate = crate::libpq_helpers::rust_pq_result_error_field(res, PG_DIAG_SQLSTATE);
+    rust_is_stale_sqlstate(sqlstate)
+}
+
+#[no_mangle]
+pub extern "C" fn pg_is_duplicate_prepared_stmt(res: *mut PGresult) -> c_int {
+    if res.is_null() {
+        return 0;
+    }
+    let sqlstate = crate::libpq_helpers::rust_pq_result_error_field(res, PG_DIAG_SQLSTATE);
+    rust_is_duplicate_sqlstate(sqlstate)
+}
+
+#[no_mangle]
+pub extern "C" fn pg_pool_cleanup_after_fork() {
+    rust_pool_cleanup_after_fork();
+}
+
+/// Connect a non-pooled PostgreSQL connection (for non-library DBs).
+#[no_mangle]
+pub extern "C" fn rust_pg_connect(
+    db_path: *const c_char,
+    shadow_db: *mut crate::ffi_types::sqlite3,
+) -> *mut PgConnection {
+    let db_path_str = if db_path.is_null() {
+        ""
+    } else {
+        unsafe { cstr_to_str_or_empty(db_path) }
+    };
+
+    let conn_ptr = create_connection_struct(db_path_str, shadow_db);
+    if conn_ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+
+    if is_library_db(db_path_str) {
+        unsafe {
+            (*conn_ptr).conn = std::ptr::null_mut();
+            (*conn_ptr).is_pg_active = 1;
+        }
+        log_info(&format!("PostgreSQL pool-only connection for: {}", db_path_str));
+        return conn_ptr;
+    }
+
+    let cfg = conn_config();
+    let conninfo = build_conninfo(cfg, false);
+    let conninfo_c = match CString::new(conninfo) {
+        Ok(s) => s,
+        Err(_) => return conn_ptr,
+    };
+
+    unsafe {
+        (*conn_ptr).conn = rust_pq_connectdb(conninfo_c.as_ptr());
+        if rust_pq_status((*conn_ptr).conn) != CONNECTION_OK {
+            let err = if (*conn_ptr).conn.is_null() {
+                "<null connection>".to_string()
+            } else {
+                let msg = rust_pq_error_message((*conn_ptr).conn);
+                if msg.is_null() {
+                    "<null>".to_string()
+                } else {
+                    CStr::from_ptr(msg).to_string_lossy().into_owned()
+                }
+            };
+            log_error(&format!("PostgreSQL connection failed: {}", err));
+            if !(*conn_ptr).conn.is_null() {
+                rust_pq_finish((*conn_ptr).conn);
+            }
+            (*conn_ptr).conn = std::ptr::null_mut();
+        } else {
+            log_info(&format!("PostgreSQL connected for: {}", db_path_str));
+            pg_set_socket_timeout((*conn_ptr).conn);
+            apply_session_settings((*conn_ptr).conn, &cfg.schema, false);
+            (*conn_ptr).is_pg_active = 1;
+        }
+    }
+
+    conn_ptr
+}
+
+/// Ensure a non-pooled connection is live; reconnect if needed.
+#[no_mangle]
+pub extern "C" fn rust_pg_ensure_connection(conn: *mut PgConnection) -> i32 {
+    if conn.is_null() {
+        return 0;
+    }
+
+    unsafe {
+        libc::pthread_mutex_lock(&mut (*conn).mutex as *mut _);
+
+        if !(*conn).conn.is_null() && rust_pq_status((*conn).conn) == CONNECTION_OK {
+            if exec_tuples((*conn).conn, "SELECT 1") {
+                libc::pthread_mutex_unlock(&mut (*conn).mutex as *mut _);
+                return 1;
+            }
+            log_info("Connection health check failed, will reconnect");
+        }
+
+        if !(*conn).conn.is_null() {
+            rust_pq_finish((*conn).conn);
+            (*conn).conn = std::ptr::null_mut();
+        }
+
+        let cfg = conn_config();
+        let conninfo = build_conninfo(cfg, false);
+        let conninfo_c = match CString::new(conninfo) {
+            Ok(s) => s,
+            Err(_) => {
+                (*conn).is_pg_active = 0;
+                libc::pthread_mutex_unlock(&mut (*conn).mutex as *mut _);
+                return 0;
+            }
+        };
+
+        (*conn).conn = rust_pq_connectdb(conninfo_c.as_ptr());
+        if rust_pq_status((*conn).conn) != CONNECTION_OK {
+            let err = if (*conn).conn.is_null() {
+                "<null connection>".to_string()
+            } else {
+                let msg = rust_pq_error_message((*conn).conn);
+                if msg.is_null() {
+                    "<null>".to_string()
+                } else {
+                    CStr::from_ptr(msg).to_string_lossy().into_owned()
+                }
+            };
+            log_error(&format!("PostgreSQL reconnection failed: {}", err));
+            if !(*conn).conn.is_null() {
+                rust_pq_finish((*conn).conn);
+            }
+            (*conn).conn = std::ptr::null_mut();
+            (*conn).is_pg_active = 0;
+            libc::pthread_mutex_unlock(&mut (*conn).mutex as *mut _);
+            return 0;
+        }
+
+        log_info("PostgreSQL reconnected successfully");
+        pg_set_socket_timeout((*conn).conn);
+        apply_session_settings((*conn).conn, &cfg.schema, false);
+        (*conn).is_pg_active = 1;
+        libc::pthread_mutex_unlock(&mut (*conn).mutex as *mut _);
+        1
+    }
+}
+
+/// Close and free a non-pooled connection.
+#[no_mangle]
+pub extern "C" fn rust_pg_close(conn: *mut PgConnection) {
+    close_handle_connection(conn);
+}
+
+/// Register a non-pooled connection using its shadow DB handle.
+#[no_mangle]
+pub extern "C" fn rust_pg_register_connection(conn: *mut PgConnection) {
+    if conn.is_null() {
+        return;
+    }
+    unsafe {
+        let db = (*conn).shadow_db;
+        if db.is_null() {
+            return;
+        }
+        pool().registry.register(db as usize, conn as usize);
+    }
+}
+
+/// Unregister a non-pooled connection using its shadow DB handle.
+#[no_mangle]
+pub extern "C" fn rust_pg_unregister_connection(conn: *mut PgConnection) {
+    if conn.is_null() {
+        return;
+    }
+    unsafe {
+        let db = (*conn).shadow_db;
+        if db.is_null() {
+            return;
+        }
+        pool().registry.unregister(db as usize);
+    }
+}
+
+/// Find the handle connection for a sqlite3* handle.
+#[no_mangle]
+pub extern "C" fn rust_pg_find_handle_connection(
+    db_handle: *const crate::ffi_types::sqlite3,
+) -> *mut PgConnection {
+    if db_handle.is_null() {
+        return std::ptr::null_mut();
+    }
+    rust_find_registered_connection(db_handle as *const c_void) as *mut PgConnection
+}
+
+/// Find the active connection for a sqlite3* handle, including pool logic.
+#[no_mangle]
+pub extern "C" fn rust_pg_find_connection(
+    db_handle: *const crate::ffi_types::sqlite3,
+) -> *mut PgConnection {
+    if db_handle.is_null() {
+        return std::ptr::null_mut();
+    }
+
+    // Fork safety
+    let _ = rust_pool_check_fork();
+
+    let handle_conn = rust_find_registered_connection(db_handle as *const c_void) as *mut PgConnection;
+    if handle_conn.is_null() {
+        return std::ptr::null_mut();
+    }
+
+    let path = conn_db_path(handle_conn);
+
+    if is_library_db(&path) {
+        if env_nonzero("PLEX_PG_FORCE_SQLITE_LIBRARY") {
+            return std::ptr::null_mut();
+        }
+
+        if env_nonzero("PLEX_PG_DISABLE_POOL") {
+            if conn_is_pg_active(handle_conn) {
+                return handle_conn;
+            }
+            return std::ptr::null_mut();
+        }
+
+        if let Ok(cs) = CString::new(path) {
+            let pool_conn = pool_find_connection_for_db(db_handle as usize, cs.as_ptr());
+            if !pool_conn.is_null() && conn_is_pg_active(pool_conn as *mut PgConnection) {
+                return pool_conn as *mut PgConnection;
+            }
+        }
+
+        log_debug("Pool full for library.db, falling back to SQLite");
+        return std::ptr::null_mut();
+    }
+
+    if conn_is_pg_active(handle_conn) {
+        handle_conn
+    } else {
+        std::ptr::null_mut()
+    }
+}
+
+/// Find any active library connection (pool or handle).
+#[no_mangle]
+pub extern "C" fn rust_pg_find_any_library_connection() -> *mut PgConnection {
+    rust_find_any_library_connection() as *mut PgConnection
 }
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────
@@ -2004,7 +3110,7 @@ mod tests {
 
     #[test]
     fn tls_pool_cache_generation_detects_stale() {
-        let pool = PoolManager::new(10);
+        let pool = PoolManager::new(10, 64);
         let fake_conn = 0xDEAD as *mut c_void;
 
         // Simulate: slot 3 is ready with generation 5
@@ -2165,10 +3271,10 @@ mod tests {
 
     #[test]
     fn pool_manager_creates_slots() {
-        let pm = PoolManager::new(10);
+        let pm = PoolManager::new(10, 64);
         assert_eq!(pm.pool_size(), 10);
-        // slots.len() is always POOL_SIZE_MAX for auto-grow support
-        assert_eq!(pm.slots.len(), POOL_SIZE_MAX);
+        // slots.len() tracks runtime max for auto-grow support
+        assert_eq!(pm.slots.len(), 64);
         for slot in &pm.slots {
             assert_eq!(slot.state.load(Ordering::Relaxed), SLOT_FREE);
         }
@@ -2176,7 +3282,7 @@ mod tests {
 
     #[test]
     fn pool_manager_validate_connection_found() {
-        let pm = PoolManager::new(5);
+        let pm = PoolManager::new(5, 64);
         let fake_conn = 0xBEEF as *mut c_void;
         pm.slots[2].conn.store(fake_conn, Ordering::Relaxed);
         pm.slots[2].state.store(SLOT_READY, Ordering::Relaxed);
@@ -2185,14 +3291,14 @@ mod tests {
 
     #[test]
     fn pool_manager_validate_connection_not_found() {
-        let pm = PoolManager::new(5);
+        let pm = PoolManager::new(5, 64);
         let fake_conn = 0xBEEF as *mut c_void;
         assert!(!pm.validate_connection(fake_conn));
     }
 
     #[test]
     fn pool_manager_validate_connection_not_ready() {
-        let pm = PoolManager::new(5);
+        let pm = PoolManager::new(5, 64);
         let fake_conn = 0xBEEF as *mut c_void;
         pm.slots[2].conn.store(fake_conn, Ordering::Relaxed);
         pm.slots[2].state.store(SLOT_FREE, Ordering::Relaxed); // not READY
@@ -2201,7 +3307,7 @@ mod tests {
 
     #[test]
     fn pool_manager_touch_connection() {
-        let pm = PoolManager::new(5);
+        let pm = PoolManager::new(5, 64);
         let fake_conn = 0xBEEF as *mut c_void;
         pm.slots[1].conn.store(fake_conn, Ordering::Relaxed);
         pm.slots[1].last_used.store(100, Ordering::Relaxed);
@@ -2212,7 +3318,7 @@ mod tests {
 
     #[test]
     fn pool_manager_touch_unknown_conn_is_noop() {
-        let pm = PoolManager::new(5);
+        let pm = PoolManager::new(5, 64);
         pm.touch_connection(0xBEEF as *const c_void, 999);
         // Should not panic or modify anything
     }
@@ -2223,20 +3329,20 @@ mod tests {
 
     #[test]
     fn global_metadata_id_default_zero() {
-        let pm = PoolManager::new(1);
+        let pm = PoolManager::new(1, 64);
         assert_eq!(pm.global_metadata_id.load(Ordering::Relaxed), 0);
     }
 
     #[test]
     fn global_metadata_id_set_and_get() {
-        let pm = PoolManager::new(1);
+        let pm = PoolManager::new(1, 64);
         pm.global_metadata_id.store(12345, Ordering::Relaxed);
         assert_eq!(pm.global_metadata_id.load(Ordering::Relaxed), 12345);
     }
 
     #[test]
     fn global_last_insert_rowid_set_and_get() {
-        let pm = PoolManager::new(1);
+        let pm = PoolManager::new(1, 64);
         pm.global_last_insert_rowid.store(67890, Ordering::Relaxed);
         assert_eq!(pm.global_last_insert_rowid.load(Ordering::Relaxed), 67890);
     }
@@ -2247,7 +3353,7 @@ mod tests {
 
     #[test]
     fn pool_reset_for_child_clears_all_slots() {
-        let pm = PoolManager::new(5);
+        let pm = PoolManager::new(5, 64);
         let fake_conn = 0xBEEF as *mut c_void;
 
         // Set up slot 2 as READY with a connection
@@ -2281,7 +3387,7 @@ mod tests {
 
     #[test]
     fn reaper_ignores_active_slots() {
-        let pm = PoolManager::new(5);
+        let pm = PoolManager::new(5, 64);
         let fake = 0xBEEF as *mut c_void;
         pm.slots[0].conn.store(fake, Ordering::Relaxed);
         pm.slots[0].state.store(SLOT_READY, Ordering::Relaxed);
@@ -2295,7 +3401,7 @@ mod tests {
 
     #[test]
     fn reaper_destroys_idle_free_slots() {
-        let pm = PoolManager::new(5);
+        let pm = PoolManager::new(5, 64);
         pm.idle_timeout_secs.store(60, Ordering::Relaxed);
         let fake = 0xBEEF as *mut c_void;
 
@@ -2316,7 +3422,7 @@ mod tests {
 
     #[test]
     fn reaper_skips_recently_used() {
-        let pm = PoolManager::new(5);
+        let pm = PoolManager::new(5, 64);
         pm.idle_timeout_secs.store(60, Ordering::Relaxed);
         let fake = 0xBEEF as *mut c_void;
 
@@ -2332,7 +3438,7 @@ mod tests {
 
     #[test]
     fn reaper_skips_free_slot_without_conn() {
-        let pm = PoolManager::new(5);
+        let pm = PoolManager::new(5, 64);
         pm.idle_timeout_secs.store(60, Ordering::Relaxed);
         // Slot 0: FREE, no connection
         pm.slots[0].state.store(SLOT_FREE, Ordering::Relaxed);
@@ -2344,7 +3450,7 @@ mod tests {
 
     #[test]
     fn reaper_bumps_generation_before_destroying() {
-        let pm = PoolManager::new(5);
+        let pm = PoolManager::new(5, 64);
         pm.idle_timeout_secs.store(60, Ordering::Relaxed);
         let fake = 0xBEEF as *mut c_void;
 
@@ -2364,7 +3470,7 @@ mod tests {
         // This test verifies the fix for CRITICAL #1 + #2:
         // After reaping, a TLS-cached (slot_index, generation) pair must
         // fail validation because the generation was bumped.
-        let pm = PoolManager::new(5);
+        let pm = PoolManager::new(5, 64);
         pm.idle_timeout_secs.store(60, Ordering::Relaxed);
         let fake = 0xBEEF as *mut c_void;
 
@@ -2392,6 +3498,11 @@ mod tests {
     // Prepared Statement Cache
     // ═════════════════════════════════════════════════════════════════════════
 
+    fn stmt_name_array(s: &str) -> [c_char; STMT_NAME_LEN] {
+        let c = CString::new(s).unwrap();
+        stmt_name_from_c(c.as_ptr()).unwrap()
+    }
+
     #[test]
     fn stmt_cache_initial_empty() {
         let cache = StmtCache::new();
@@ -2402,10 +3513,10 @@ mod tests {
     #[test]
     fn stmt_cache_add_and_lookup() {
         let mut cache = StmtCache::new();
-        cache.add(12345, "ps_12345", 3, 1000);
+        cache.add(12345, stmt_name_array("ps_12345"), 3, 1000);
         let entry = cache.lookup(12345).unwrap();
         assert_eq!(entry.sql_hash, 12345);
-        assert_eq!(entry.stmt_name, "ps_12345");
+        assert_eq!(stmt_name_to_string(&entry.stmt_name), "ps_12345");
         assert_eq!(entry.param_count, 3);
         assert_eq!(entry.last_used, 1000);
     }
@@ -2413,7 +3524,7 @@ mod tests {
     #[test]
     fn stmt_cache_lookup_miss() {
         let mut cache = StmtCache::new();
-        cache.add(12345, "ps_12345", 3, 1000);
+        cache.add(12345, stmt_name_array("ps_12345"), 3, 1000);
         assert!(cache.lookup(99999).is_none());
     }
 
@@ -2426,7 +3537,8 @@ mod tests {
     #[test]
     fn stmt_cache_add_zero_hash_is_noop() {
         let mut cache = StmtCache::new();
-        let evicted = cache.add(0, "ps_0", 0, 0);
+        let (idx, evicted) = cache.add(0, stmt_name_array("ps_0"), 0, 0);
+        assert_eq!(idx, -1);
         assert!(evicted.is_none());
         assert_eq!(cache.count(), 0);
     }
@@ -2434,10 +3546,10 @@ mod tests {
     #[test]
     fn stmt_cache_update_existing() {
         let mut cache = StmtCache::new();
-        cache.add(12345, "ps_12345", 3, 1000);
-        cache.add(12345, "ps_12345_v2", 5, 2000);
+        cache.add(12345, stmt_name_array("ps_12345"), 3, 1000);
+        cache.add(12345, stmt_name_array("ps_12345_v2"), 5, 2000);
         let entry = cache.lookup(12345).unwrap();
-        assert_eq!(entry.stmt_name, "ps_12345_v2");
+        assert_eq!(stmt_name_to_string(&entry.stmt_name), "ps_12345_v2");
         assert_eq!(entry.param_count, 5);
         assert_eq!(entry.last_used, 2000);
         assert_eq!(cache.count(), 1); // count should not increase
@@ -2447,7 +3559,7 @@ mod tests {
     fn stmt_cache_multiple_entries() {
         let mut cache = StmtCache::new();
         for i in 1..=10u64 {
-            cache.add(i, &format!("ps_{}", i), i as i32, i as i64);
+            cache.add(i, stmt_name_array(&format!("ps_{}", i)), i as i32, i as i64);
         }
         assert_eq!(cache.count(), 10);
         for i in 1..=10u64 {
@@ -2459,15 +3571,16 @@ mod tests {
     #[test]
     fn stmt_cache_clear_returns_names() {
         let mut cache = StmtCache::new();
-        cache.add(1, "ps_a", 1, 100);
-        cache.add(2, "ps_b", 2, 200);
-        cache.add(3, "ps_c", 3, 300);
+        cache.add(1, stmt_name_array("ps_a"), 1, 100);
+        cache.add(2, stmt_name_array("ps_b"), 2, 200);
+        cache.add(3, stmt_name_array("ps_c"), 3, 300);
 
         let evicted = cache.clear();
         assert_eq!(evicted.len(), 3);
-        assert!(evicted.contains(&"ps_a".to_string()));
-        assert!(evicted.contains(&"ps_b".to_string()));
-        assert!(evicted.contains(&"ps_c".to_string()));
+        let names: Vec<String> = evicted.iter().map(stmt_name_to_string).collect();
+        assert!(names.contains(&"ps_a".to_string()));
+        assert!(names.contains(&"ps_b".to_string()));
+        assert!(names.contains(&"ps_c".to_string()));
         assert_eq!(cache.count(), 0);
     }
 
@@ -2483,15 +3596,15 @@ mod tests {
         let mut cache = StmtCache::new();
         // Fill the cache with STMT_CACHE_SIZE entries
         for i in 1..=STMT_CACHE_SIZE as u64 {
-            cache.add(i, &format!("ps_{}", i), 1, i as i64);
+            cache.add(i, stmt_name_array(&format!("ps_{}", i)), 1, i as i64);
         }
         assert_eq!(cache.count(), STMT_CACHE_SIZE);
 
         // Adding one more should evict the LRU (smallest last_used)
-        let evicted = cache.add(99999, "ps_new", 1, 99999);
+        let (_idx, evicted) = cache.add(99999, stmt_name_array("ps_new"), 1, 99999);
         assert!(evicted.is_some());
         // The evicted entry should be ps_1 (last_used=1, the oldest)
-        assert_eq!(evicted.unwrap(), "ps_1");
+        assert_eq!(stmt_name_to_string(&evicted.unwrap()), "ps_1");
     }
 
     #[test]
@@ -2500,10 +3613,10 @@ mod tests {
         // Two hashes that map to the same bucket (same lower bits)
         let h1 = 1u64;
         let h2 = 1 + STMT_CACHE_SIZE as u64; // same bucket
-        cache.add(h1, "ps_a", 1, 100);
-        cache.add(h2, "ps_b", 2, 200);
+        cache.add(h1, stmt_name_array("ps_a"), 1, 100);
+        cache.add(h2, stmt_name_array("ps_b"), 2, 200);
 
-        assert_eq!(cache.lookup(h1).unwrap().stmt_name, "ps_a");
-        assert_eq!(cache.lookup(h2).unwrap().stmt_name, "ps_b");
+        assert_eq!(stmt_name_to_string(&cache.lookup(h1).unwrap().stmt_name), "ps_a");
+        assert_eq!(stmt_name_to_string(&cache.lookup(h2).unwrap().stmt_name), "ps_b");
     }
 }

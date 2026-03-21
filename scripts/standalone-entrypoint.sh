@@ -80,6 +80,7 @@ wait_for_postgres() {
 init_schema() {
     local schema="$PG_SCHEMA"
     local schema_file="$SHIM_DIR/plex_schema.sql"
+    local compat_file="$SHIM_DIR/pg_compat_functions.sql"
 
     psql -c "CREATE SCHEMA IF NOT EXISTS $schema;" 2>/dev/null || true
 
@@ -123,6 +124,11 @@ init_schema() {
             echo "Loading sqlite_column_types metadata..."
             psql -f "$types_file" 2>/dev/null || true
         fi
+    fi
+
+    # Ensure PostgreSQL compatibility helper functions exist.
+    if [ -f "$compat_file" ]; then
+        psql -f "$compat_file" 2>/dev/null || true
     fi
 }
 
@@ -205,6 +211,14 @@ init_plex_directories() {
     echo "Plex directories initialized"
 }
 
+ensure_plex_temp_dir() {
+    local temp_dir="/run/plex-temp"
+
+    mkdir -p "$temp_dir"
+    chmod 1777 "$temp_dir" 2>/dev/null || true
+    chown plex:plex "$temp_dir" 2>/dev/null || true
+}
+
 # Locale setup removed — Plex's bundled musl+boost::locale handles locale internally.
 # Setting LANG/LC_ALL/CHARSET can interfere with exception handling on aarch64.
 
@@ -225,6 +239,30 @@ verify_plex_shim() {
     fi
 }
 
+verify_media_mount() {
+    local media_dir="/media"
+    if [ ! -d "$media_dir" ]; then
+        echo "WARNING: Media mount not found at $media_dir"
+        echo "         Set PLEX_MEDIA_PATH in docker-compose/.env to your real library path."
+        return 0
+    fi
+
+    if [ ! -r "$media_dir" ]; then
+        echo "WARNING: Media mount exists but is not readable: $media_dir"
+        echo "         Check host permissions and Docker file sharing settings."
+        return 0
+    fi
+
+    local sample_file
+    sample_file=$(find "$media_dir" -maxdepth 4 -type f 2>/dev/null | head -n 1 || true)
+    if [ -n "$sample_file" ]; then
+        echo "Media mount OK: found sample file: $sample_file"
+    else
+        echo "WARNING: Media mount is readable but no files found under $media_dir"
+        echo "         Plex can start, but libraries will be empty until media is mounted."
+    fi
+}
+
 # === Main ===
 
 if [ -n "$PLEX_PG_HOST" ]; then
@@ -237,9 +275,11 @@ if [ -n "$PLEX_PG_HOST" ]; then
         check_and_migrate || true
     fi
 
+    ensure_plex_temp_dir
     init_plex_directories
     init_sqlite_schema
     verify_plex_shim
+    verify_media_mount
 
     # Clean crash reports to prevent CrashUploader from running.
     # CrashUploader is replaced with a no-op binary, but cleaning reports

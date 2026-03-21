@@ -1,0 +1,27 @@
+# UPDATE/DELETE basics
+
+statement ok
+CREATE TABLE udl (id INTEGER, score INTEGER, flag INTEGER DEFAULT 0);
+
+statement ok
+INSERT INTO udl (id, score, flag) VALUES
+  (1, 10, 0),
+  (2, 50, 0),
+  (3, 30, 0),
+  (4, 70, 0);
+
+statement ok
+UPDATE udl SET flag = 1 WHERE score >= 50;
+
+query I rowsort
+SELECT COUNT(*) FROM udl WHERE flag = 1;
+----
+2
+
+statement ok
+DELETE FROM udl WHERE score < 20;
+
+query I rowsort
+SELECT COUNT(*) FROM udl;
+----
+3

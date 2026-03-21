@@ -1,0 +1,112 @@
+use rusqlite::{Connection, Result};
+use rusqlite::ffi;
+use std::ffi::CStr;
+use std::ffi::CString;
+use std::ptr;
+
+#[test]
+fn expanded_sql_no_params() -> Result<()> {
+    let conn = Connection::open_in_memory()?;
+    let mut stmt = conn.prepare("SELECT 1, 2, 3")?;
+    let raw = stmt.as_raw();
+    let expanded = unsafe { ffi::sqlite3_expanded_sql(raw) };
+    assert!(!expanded.is_null());
+    let sql = unsafe { CStr::from_ptr(expanded) }.to_string_lossy();
+    assert!(sql.to_ascii_lowercase().contains("select"));
+    unsafe { ffi::sqlite3_free(expanded as *mut std::os::raw::c_void) };
+    Ok(())
+}
+
+#[test]
+fn expanded_sql_with_int_param() -> Result<()> {
+    let conn = Connection::open_in_memory()?;
+    let mut stmt = conn.prepare("SELECT ? + 10")?;
+    stmt.raw_bind_parameter(1, 42i32)?;
+    let raw = stmt.as_raw();
+    let expanded = unsafe { ffi::sqlite3_expanded_sql(raw) };
+    assert!(!expanded.is_null());
+    let sql = unsafe { CStr::from_ptr(expanded) }.to_string_lossy();
+    assert!(sql.contains("42"));
+    unsafe { ffi::sqlite3_free(expanded as *mut std::os::raw::c_void) };
+    Ok(())
+}
+
+#[test]
+fn expanded_sql_with_text_param() -> Result<()> {
+    let conn = Connection::open_in_memory()?;
+    let mut stmt = conn.prepare("SELECT ?")?;
+    stmt.raw_bind_parameter(1, "hello")?;
+    let raw = stmt.as_raw();
+    let expanded = unsafe { ffi::sqlite3_expanded_sql(raw) };
+    assert!(!expanded.is_null());
+    let sql = unsafe { CStr::from_ptr(expanded) }.to_string_lossy();
+    assert!(sql.contains("hello"));
+    unsafe { ffi::sqlite3_free(expanded as *mut std::os::raw::c_void) };
+    Ok(())
+}
+
+#[test]
+fn expanded_sql_null_stmt_is_null() {
+    let expanded = unsafe { ffi::sqlite3_expanded_sql(std::ptr::null_mut()) };
+    assert!(expanded.is_null());
+}
+
+#[test]
+fn value_double_from_true_or_false_is_ok() -> Result<()> {
+    let conn = Connection::open_in_memory()?;
+    conn.execute("CREATE TABLE test_bool(val TEXT)", [])?;
+    conn.execute("INSERT INTO test_bool VALUES('t')", [])?;
+
+    let sql = CString::new("SELECT val FROM test_bool").unwrap();
+    let mut stmt: *mut ffi::sqlite3_stmt = ptr::null_mut();
+    let mut tail: *const std::os::raw::c_char = ptr::null();
+    let rc = unsafe { ffi::sqlite3_prepare_v2(conn.handle(), sql.as_ptr(), -1, &mut stmt, &mut tail) };
+    assert_eq!(rc, ffi::SQLITE_OK);
+    let step_rc = unsafe { ffi::sqlite3_step(stmt) };
+    assert_eq!(step_rc, ffi::SQLITE_ROW);
+    let val = unsafe { ffi::sqlite3_column_value(stmt, 0) };
+    let d = unsafe { ffi::sqlite3_value_double(val) };
+    assert!(d == 1.0 || d == 0.0);
+    unsafe { ffi::sqlite3_finalize(stmt) };
+    Ok(())
+}
+
+#[test]
+fn value_double_from_false_is_zero() -> Result<()> {
+    let conn = Connection::open_in_memory()?;
+    conn.execute("CREATE TABLE test_bool(val TEXT)", [])?;
+    conn.execute("INSERT INTO test_bool VALUES('f')", [])?;
+
+    let sql = CString::new("SELECT val FROM test_bool").unwrap();
+    let mut stmt: *mut ffi::sqlite3_stmt = ptr::null_mut();
+    let mut tail: *const std::os::raw::c_char = ptr::null();
+    let rc = unsafe { ffi::sqlite3_prepare_v2(conn.handle(), sql.as_ptr(), -1, &mut stmt, &mut tail) };
+    assert_eq!(rc, ffi::SQLITE_OK);
+    let step_rc = unsafe { ffi::sqlite3_step(stmt) };
+    assert_eq!(step_rc, ffi::SQLITE_ROW);
+    let val = unsafe { ffi::sqlite3_column_value(stmt, 0) };
+    let d = unsafe { ffi::sqlite3_value_double(val) };
+    assert_eq!(d, 0.0);
+    unsafe { ffi::sqlite3_finalize(stmt) };
+    Ok(())
+}
+
+#[test]
+fn value_double_from_number_parses() -> Result<()> {
+    let conn = Connection::open_in_memory()?;
+    conn.execute("CREATE TABLE test_num(val TEXT)", [])?;
+    conn.execute("INSERT INTO test_num VALUES('3.14159')", [])?;
+
+    let sql = CString::new("SELECT val FROM test_num").unwrap();
+    let mut stmt: *mut ffi::sqlite3_stmt = ptr::null_mut();
+    let mut tail: *const std::os::raw::c_char = ptr::null();
+    let rc = unsafe { ffi::sqlite3_prepare_v2(conn.handle(), sql.as_ptr(), -1, &mut stmt, &mut tail) };
+    assert_eq!(rc, ffi::SQLITE_OK);
+    let step_rc = unsafe { ffi::sqlite3_step(stmt) };
+    assert_eq!(step_rc, ffi::SQLITE_ROW);
+    let val = unsafe { ffi::sqlite3_column_value(stmt, 0) };
+    let d = unsafe { ffi::sqlite3_value_double(val) };
+    assert!(d > 3.14 && d < 3.15);
+    unsafe { ffi::sqlite3_finalize(stmt) };
+    Ok(())
+}

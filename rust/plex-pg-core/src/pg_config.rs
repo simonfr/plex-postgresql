@@ -2,7 +2,9 @@
 ///
 /// SQL classification and PostgreSQL connection config loading, exposed via C FFI.
 /// Replaces the C `pg_config.c` module.
-use std::os::raw::c_char;
+use std::ffi::CString;
+use std::os::raw::{c_char, c_int};
+use std::sync::Once;
 
 use crate::db_interpose_helpers::cstr_to_str_or_empty;
 
@@ -258,6 +260,85 @@ pub struct PgConnConfig {
     pub schema: [u8; 64],
 }
 
+static CONFIG_INIT: Once = Once::new();
+static mut GLOBAL_CONFIG: PgConnConfig = PgConnConfig {
+    host: [0; 256],
+    port: 0,
+    database: [0; 128],
+    user: [0; 128],
+    password: [0; 256],
+    schema: [0; 64],
+};
+
+fn init_config_once() {
+    CONFIG_INIT.call_once(|| {
+        let mut cfg = PgConnConfig {
+            host: [0; 256],
+            port: 0,
+            database: [0; 128],
+            user: [0; 128],
+            password: [0; 256],
+            schema: [0; 64],
+        };
+        let _ = pg_config_load(&mut cfg as *mut PgConnConfig);
+        unsafe {
+            GLOBAL_CONFIG = cfg;
+        }
+
+        let cfg_ptr = std::ptr::addr_of!(GLOBAL_CONFIG);
+        let host = unsafe { cstr_to_str_or_empty((*cfg_ptr).host.as_ptr() as *const c_char) };
+        let user = unsafe { cstr_to_str_or_empty((*cfg_ptr).user.as_ptr() as *const c_char) };
+        let db = unsafe { cstr_to_str_or_empty((*cfg_ptr).database.as_ptr() as *const c_char) };
+        let schema = unsafe { cstr_to_str_or_empty((*cfg_ptr).schema.as_ptr() as *const c_char) };
+        let msg = format!(
+            "PostgreSQL config: {}@{}:{}/{} (schema: {})",
+            user, host, unsafe { (*cfg_ptr).port }, db, schema
+        );
+        if let Ok(cs) = CString::new(msg) {
+            crate::pg_logging::rust_logging_write(1, cs.as_ptr());
+        }
+    });
+}
+
+// ─── C ABI wrappers (pg_config.c replacement) ────────────────────────────────
+
+#[no_mangle]
+pub extern "C" fn pg_config_init() {
+    init_config_once();
+}
+
+#[no_mangle]
+pub extern "C" fn pg_config_get() -> *mut PgConnConfig {
+    init_config_once();
+    std::ptr::addr_of_mut!(GLOBAL_CONFIG)
+}
+
+#[no_mangle]
+pub extern "C" fn should_redirect(filename: *const c_char) -> c_int {
+    let passthrough = unsafe { crate::db_interpose_common::shim_passthrough_only };
+    pg_config_should_redirect(filename, passthrough)
+}
+
+#[no_mangle]
+pub extern "C" fn should_skip_sql(sql: *const c_char) -> c_int {
+    pg_config_should_skip_sql(sql)
+}
+
+#[no_mangle]
+pub extern "C" fn is_write_operation(sql: *const c_char) -> c_int {
+    pg_config_is_write_operation(sql)
+}
+
+#[no_mangle]
+pub extern "C" fn is_read_operation(sql: *const c_char) -> c_int {
+    pg_config_is_read_operation(sql)
+}
+
+#[no_mangle]
+pub extern "C" fn pg_get_retry_delays(delays_out: *mut i32, count_out: *mut i32) {
+    pg_config_get_retry_delays(delays_out, count_out);
+}
+
 /// Write a Rust `&str` into a fixed-size byte buffer as a null-terminated C string.
 /// Silently truncates if `src` is longer than `buf.len() - 1`.
 fn write_str_to_buf(buf: &mut [u8], src: &str) {
@@ -425,6 +506,31 @@ mod tests {
     }
 
     #[test]
+    fn skip_reindex() {
+        assert!(should_skip_sql_str("REINDEX"));
+    }
+
+    #[test]
+    fn skip_attach_database() {
+        assert!(should_skip_sql_str("ATTACH DATABASE ':memory:' AS aux"));
+    }
+
+    #[test]
+    fn skip_detach_database() {
+        assert!(should_skip_sql_str("DETACH DATABASE aux"));
+    }
+
+    #[test]
+    fn skip_icu_load_collation() {
+        assert!(should_skip_sql_str("icu_load_collation('en_US', 'icu_root')"));
+    }
+
+    #[test]
+    fn skip_fts3_tokenizer() {
+        assert!(should_skip_sql_str("fts3_tokenizer('simple')"));
+    }
+
+    #[test]
     fn skip_begin() {
         assert!(!should_skip_sql_str("BEGIN"));
     }
@@ -509,6 +615,11 @@ mod tests {
         assert!(should_skip_sql_str(
             "CREATE VIRTUAL TABLE t USING spellfix1"
         ));
+    }
+
+    #[test]
+    fn skip_spellfix_select_anywhere() {
+        assert!(should_skip_sql_str("SELECT * FROM spellfix_table"));
     }
 
     #[test]

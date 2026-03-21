@@ -88,6 +88,7 @@ wait_for_postgres() {
 init_schema() {
     local schema="${PLEX_PG_SCHEMA:-plex}"
     local schema_file="/usr/local/lib/plex-postgresql/plex_schema.sql"
+    local compat_file="/usr/local/lib/plex-postgresql/pg_compat_functions.sql"
 
     psql -c "CREATE SCHEMA IF NOT EXISTS $schema;" 2>/dev/null || true
 
@@ -131,6 +132,11 @@ init_schema() {
             echo "Loading sqlite_column_types metadata..."
             psql -f "$types_file" 2>/dev/null || true
         fi
+    fi
+
+    # Ensure PostgreSQL compatibility helper functions exist.
+    if [ -f "$compat_file" ]; then
+        psql -f "$compat_file" 2>/dev/null || true
     fi
 }
 
@@ -220,6 +226,15 @@ init_plex_directories() {
     echo "Plex directories initialized"
 }
 
+ensure_plex_temp_dir() {
+    local temp_dir="/run/plex-temp"
+
+    # Plex expects this path to exist and be a directory.
+    mkdir -p "$temp_dir"
+    chmod 1777 "$temp_dir" 2>/dev/null || true
+    chown abc:abc "$temp_dir" 2>/dev/null || true
+}
+
 # Locale setup removed — Plex's bundled musl+boost::locale handles locale internally.
 # Setting LANG/LC_ALL/CHARSET can interfere with exception handling on aarch64.
 
@@ -245,6 +260,30 @@ verify_plex_shim() {
         fi
     else
         echo "Warning: PostgreSQL shim library not found at $shim_path"
+    fi
+}
+
+verify_media_mount() {
+    local media_dir="/media"
+    if [ ! -d "$media_dir" ]; then
+        echo "WARNING: Media mount not found at $media_dir"
+        echo "         Set PLEX_MEDIA_PATH in docker-compose/.env to your real library path."
+        return 0
+    fi
+
+    if [ ! -r "$media_dir" ]; then
+        echo "WARNING: Media mount exists but is not readable: $media_dir"
+        echo "         Check host permissions and Docker file sharing settings."
+        return 0
+    fi
+
+    local sample_file
+    sample_file=$(find "$media_dir" -maxdepth 4 -type f 2>/dev/null | head -n 1 || true)
+    if [ -n "$sample_file" ]; then
+        echo "Media mount OK: found sample file: $sample_file"
+    else
+        echo "WARNING: Media mount is readable but no files found under $media_dir"
+        echo "         Plex can start, but libraries will be empty until media is mounted."
     fi
 }
 
@@ -297,9 +336,11 @@ if [ -n "$PLEX_PG_HOST" ]; then
         check_and_migrate || true
     fi
 
+    ensure_plex_temp_dir
     init_plex_directories
     init_sqlite_schema
     verify_plex_shim
+    verify_media_mount
     
     # Final permission fix - ensure Plex can write to its directories
     # This must be done after all directories are created

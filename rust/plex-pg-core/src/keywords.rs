@@ -456,6 +456,50 @@ fn find_top_level_keyword_from(stmt: &str, start: usize, keyword: &str) -> Optio
                     i += 1;
                 }
             }
+            b'"' => {
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == b'"' {
+                        i += 1;
+                        if i < bytes.len() && bytes[i] == b'"' {
+                            i += 1;
+                            continue;
+                        }
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            b'`' => {
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == b'`' {
+                        i += 1;
+                        if i < bytes.len() && bytes[i] == b'`' {
+                            i += 1;
+                            continue;
+                        }
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            b'-' if i + 1 < bytes.len() && bytes[i + 1] == b'-' => {
+                i += 2;
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
+                i += 2;
+                while i + 1 < bytes.len() {
+                    if bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                        i += 2;
+                        break;
+                    }
+                    i += 1;
+                }
+            }
             b'(' => {
                 depth += 1;
                 i += 1;
@@ -2653,7 +2697,7 @@ fn transform_expr(expr: &mut Expr) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Ordering, TEST_STRICT_PRAGMA_OVERRIDE};
+    use super::{preprocess, Ordering, TEST_STRICT_PRAGMA_OVERRIDE};
     use crate::translate;
     use std::sync::{Mutex, OnceLock};
 
@@ -3111,4 +3155,22 @@ mod tests {
             out
         );
     }
+
+    #[test]
+    fn preprocess_does_not_treat_backtick_limit_identifier_as_limit_clause() {
+        let sql = "SELECT pqg.`id`,pqg.`limit`,pqg.`continuous` FROM play_queue_generators pqg WHERE pqg.`type`!=:C1";
+        let out = preprocess(sql);
+        let low = out.to_ascii_lowercase();
+        assert!(
+            !low.contains(" offset "),
+            "identifier `limit` should not trigger LIMIT/OFFSET rewrite: {}",
+            out
+        );
+        assert!(
+            out.contains("`limit`"),
+            "backtick identifier should remain unchanged in preprocess output: {}",
+            out
+        );
+    }
+
 }

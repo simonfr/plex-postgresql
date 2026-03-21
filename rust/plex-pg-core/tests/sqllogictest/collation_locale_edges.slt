@@ -1,0 +1,19 @@
+# Collation edge checks (ASCII-safe subset)
+
+statement ok
+CREATE TABLE cle (v TEXT);
+
+statement ok
+INSERT INTO cle (v) VALUES ('Zoo'), ('alpha'), ('Bravo');
+
+query T rowsort
+SELECT v FROM cle ORDER BY LOWER(v), v;
+----
+alpha
+Bravo
+Zoo
+
+query I rowsort
+SELECT COUNT(*) FROM cle WHERE v COLLATE NOCASE = 'zoo';
+----
+1

@@ -1,0 +1,39 @@
+# Joins and subqueries
+
+statement ok
+CREATE TABLE js_a (id INTEGER, name TEXT);
+
+statement ok
+CREATE TABLE js_b (id INTEGER, a_id INTEGER, val INTEGER);
+
+statement ok
+INSERT INTO js_a (id, name) VALUES (1, 'A'), (2, 'B'), (3, 'C');
+
+statement ok
+INSERT INTO js_b (id, a_id, val) VALUES (10, 1, 5), (11, 1, 8), (12, 2, 4);
+
+query T rowsort
+SELECT a.name
+FROM js_a a
+JOIN js_b b ON a.id = b.a_id
+WHERE b.val >= 5
+ORDER BY a.name;
+----
+A
+A
+
+query TI rowsort
+SELECT a.name, (
+  SELECT COUNT(*) FROM js_b b WHERE b.a_id = a.id
+)
+FROM js_a a
+ORDER BY a.id;
+----
+A 2
+B 1
+C 0
+
+query T rowsort
+SELECT name FROM js_a WHERE id IN (SELECT a_id FROM js_b WHERE val >= 8);
+----
+A

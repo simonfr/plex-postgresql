@@ -1,0 +1,18 @@
+# PRAGMA and sqlite utility statement handling
+
+statement ok
+PRAGMA case_sensitive_like = ON;
+
+statement ok
+PRAGMA journal_mode;
+
+statement ok
+CREATE TABLE pu (id INTEGER, name TEXT);
+
+statement ok
+INSERT INTO pu (id, name) VALUES (1, 'x');
+
+query I rowsort
+SELECT COUNT(*) FROM pu;
+----
+1

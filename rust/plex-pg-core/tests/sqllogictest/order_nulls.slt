@@ -1,0 +1,23 @@
+# ORDER BY with NULL behavior
+
+statement ok
+CREATE TABLE onl (id INTEGER, v INTEGER);
+
+statement ok
+INSERT INTO onl (id, v) VALUES (1, NULL), (2, 10), (3, 5), (4, NULL);
+
+query I rowsort
+SELECT id FROM onl ORDER BY (v IS NOT NULL), v ASC, id ASC;
+----
+1
+4
+3
+2
+
+query I rowsort
+SELECT id FROM onl ORDER BY (v IS NULL), v DESC, id ASC;
+----
+2
+3
+1
+4

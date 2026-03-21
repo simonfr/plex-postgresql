@@ -1,0 +1,24 @@
+# Common function and time rewrites
+
+statement ok
+CREATE TABLE ft (id INTEGER, name TEXT, ts INTEGER);
+
+statement ok
+INSERT INTO ft (id, name, ts) VALUES (1, 'alpha', 1700000000), (2, 'beta', 1700003600);
+
+query T rowsort
+SELECT IFNULL(name, 'n/a') FROM ft ORDER BY id;
+----
+alpha
+beta
+
+query T rowsort
+SELECT SUBSTR(name, 1, 1) FROM ft ORDER BY id;
+----
+a
+b
+
+query I rowsort
+SELECT unixepoch('now') > 0;
+----
+1

@@ -1,0 +1,11 @@
+# Date/time function rewrites (deterministic inputs)
+
+query I rowsort
+SELECT unixepoch('now') > 0;
+----
+1
+
+query I rowsort
+SELECT strftime('%s', 'now') > 0;
+----
+1

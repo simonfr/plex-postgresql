@@ -25,19 +25,10 @@ typedef struct {
 #define MAX_LOGGED_PER_TYPE 3
 #define MAX_LOGGED_TOTAL 50
 
-// Exception tracking state (defined in common.c)
-extern volatile int total_exception_count;
-extern pthread_mutex_t exception_tracker_mutex;
-
-// Thread-local counters for exception debugging (defined in common.c)
-extern __thread long tls_value_type_calls;
-extern __thread long tls_column_type_calls;
-extern __thread const char *tls_last_query;
-
-// Demangle function pointer (defined in common.c)
+// Demangle function pointer (defined in Rust common module)
 extern char* (*cxa_demangle_fn)(const char*, char*, size_t*, int*);
 
-// Process ID for fork detection (defined in common.c)
+// Process ID for fork detection (defined in Rust common module)
 extern pid_t shim_init_pid;
 
 // Exception tracking functions

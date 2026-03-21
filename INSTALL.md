@@ -64,6 +64,22 @@ PLEX_HOST_PORT=32410 PLEX_DLNA_PORT=32471 docker compose up -d
 - ✅ Required folders are created
 - ✅ Default test media mount: `./fixtures/media:/media:ro`
 
+To use real libraries, set `PLEX_MEDIA_PATH` in `.env`:
+
+```bash
+# macOS example
+PLEX_MEDIA_PATH=/Volumes/media
+
+# Linux example
+PLEX_MEDIA_PATH=/srv/media
+```
+
+Then recreate:
+```bash
+docker compose up -d
+docker compose logs -f plex | grep -E "Media mount|WARNING: Media mount"
+```
+
 ### Migration from Existing Plex Database
 
 If you already have a Plex SQLite library, follow these steps:
@@ -123,7 +139,9 @@ environment:
   - PLEX_PG_SCHEMA=plex
   - PLEX_PG_POOL_SIZE=50
   - PLEX_PG_IDLE_TIMEOUT=300  # seconds, default 300
+  - PLEX_PG_OPENSSL_ARMCAP=0  # optional ARM fallback for container/VM SIGILL crashes
   - PLEX_PG_LOG_LEVEL=DEBUG  # 0=ERROR, 1=INFO, 2=DEBUG
+  - PLEX_PG_SKIP_CLEAR_BINDINGS_FINALIZED=1  # default ON; set 0 to disable (debug only)
   - PLEX_PG_VALIDATE_OUTPUT=off  # off|sample|all (default: off)
   - PLEX_PG_VALIDATE_OUTPUT_SAMPLE_PCT=5  # only used when mode=sample
 ```
@@ -457,7 +475,7 @@ sudo systemctl start plexmediaserver
 
 **Connection Pooling:**
 ```bash
-export PLEX_PG_POOL_SIZE=100   # Default: 50, auto-grows up to 200
+export PLEX_PG_POOL_SIZE=100   # Default: 50
 export PLEX_PG_IDLE_TIMEOUT=300  # Seconds before idle connections are reaped (default: 300)
 ```
 

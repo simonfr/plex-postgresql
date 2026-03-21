@@ -1,0 +1,15 @@
+# DDL + ALTER basics
+
+statement ok
+CREATE TABLE dd (id INTEGER PRIMARY KEY, v TEXT DEFAULT 'x');
+
+statement ok
+ALTER TABLE dd ADD COLUMN extra INTEGER DEFAULT 0;
+
+statement ok
+INSERT INTO dd (id) VALUES (1);
+
+query II rowsort
+SELECT id, extra FROM dd;
+----
+1 0

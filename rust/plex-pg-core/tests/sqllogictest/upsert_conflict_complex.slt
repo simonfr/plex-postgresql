@@ -1,0 +1,42 @@
+# More complex ON CONFLICT / OR IGNORE / OR REPLACE flows
+
+statement ok
+CREATE TABLE uc (
+  id INTEGER PRIMARY KEY,
+  name TEXT,
+  version INTEGER,
+  value TEXT
+);
+
+statement ok
+INSERT INTO uc (id, name, version, value) VALUES
+  (1, 'a', 1, 'x'),
+  (2, 'b', 1, 'y');
+
+statement ok
+INSERT OR IGNORE INTO uc (id, name, version, value) VALUES (2, 'b2', 2, 'z');
+
+query II rowsort
+SELECT id, version FROM uc ORDER BY id;
+----
+1 1
+2 1
+
+statement ok
+INSERT OR REPLACE INTO uc (id, name, version, value) VALUES (2, 'b2', 2, 'z');
+
+query IT rowsort
+SELECT id, value FROM uc ORDER BY id;
+----
+1 x
+2 z
+
+statement ok
+INSERT INTO uc (id, name, version, value) VALUES (1, 'a2', 2, 'w')
+ON CONFLICT(id) DO UPDATE SET value = excluded.value, version = excluded.version;
+
+query II rowsort
+SELECT id, version FROM uc ORDER BY id;
+----
+1 2
+2 2

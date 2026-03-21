@@ -243,7 +243,7 @@ pub(crate) fn prepare_query_loop_tick(sql: &str) -> Option<(i32, u64)> {
 
     let mut detected: Option<(i32, u64)> = None;
 
-    PREPARE_LOOP_DETECT.with(|state| {
+    let _ = PREPARE_LOOP_DETECT.try_with(|state| {
         let mut state = state.borrow_mut();
         let entry = &mut state[slot];
 
@@ -267,4 +267,118 @@ pub(crate) fn prepare_query_loop_tick(sql: &str) -> Option<(i32, u64)> {
     });
 
     detected
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reset_loop_detect() {
+        PREPARE_LOOP_DETECT.with(|state| {
+            *state.borrow_mut() = [QueryLoopEntry::default(); LOOP_DETECT_SLOTS];
+        });
+    }
+
+    #[test]
+    fn prepare_hash_consistency() {
+        let sql1 = "SELECT * FROM metadata_items WHERE id = ?";
+        let sql2 = "SELECT * FROM metadata_items WHERE id = ?";
+        let sql3 = "SELECT * FROM media_items WHERE id = ?";
+
+        let h1 = prepare_simple_hash(sql1, 200);
+        let h2 = prepare_simple_hash(sql2, 200);
+        let h3 = prepare_simple_hash(sql3, 200);
+
+        assert_eq!(h1, h2);
+        assert_ne!(h1, h3);
+    }
+
+    #[test]
+    fn prepare_hash_distribution() {
+        let mut slots = [0usize; LOOP_DETECT_SLOTS];
+        for i in 0..1000 {
+            let sql = format!("SELECT * FROM table_{} WHERE col = {}", i % 50, i);
+            let h = prepare_simple_hash(&sql, 200);
+            slots[(h as usize) % LOOP_DETECT_SLOTS] += 1;
+        }
+        let avg = 1000 / LOOP_DETECT_SLOTS;
+        let mut bad = 0;
+        for count in slots.iter() {
+            if *count > avg * 3 {
+                bad += 1;
+            }
+        }
+        assert_eq!(bad, 0, "hash distribution too uneven: {:?}", slots);
+    }
+
+    #[test]
+    fn loop_detection_triggers_after_threshold() {
+        reset_loop_detect();
+        let sql = "SELECT * FROM metadata_items WHERE id = ?";
+        let mut detected = false;
+        for _ in 0..(LOOP_DETECT_THRESHOLD + 5) {
+            if prepare_query_loop_tick(sql).is_some() {
+                detected = true;
+                break;
+            }
+        }
+        assert!(detected, "expected loop detection to trigger");
+    }
+
+    #[test]
+    fn loop_detection_resets_after_window() {
+        reset_loop_detect();
+        let sql = "SELECT * FROM table_reset";
+        for _ in 0..(LOOP_DETECT_THRESHOLD - 1) {
+            assert!(prepare_query_loop_tick(sql).is_none());
+        }
+
+        let hash = prepare_simple_hash(sql, 200);
+        let slot = (hash as usize) % LOOP_DETECT_SLOTS;
+        PREPARE_LOOP_DETECT.with(|state| {
+            let mut state = state.borrow_mut();
+            state[slot].first_seen_ms = state[slot]
+                .first_seen_ms
+                .saturating_sub(LOOP_DETECT_WINDOW_MS + 1);
+            state[slot].count = 1;
+        });
+
+        let mut detected = false;
+        for _ in 0..(LOOP_DETECT_THRESHOLD - 1) {
+            if prepare_query_loop_tick(sql).is_some() {
+                detected = true;
+                break;
+            }
+        }
+        assert!(!detected, "time window did not reset as expected");
+    }
+
+    #[test]
+    fn loop_detection_collision_handling_no_panic() {
+        reset_loop_detect();
+        let mut pair: Option<(String, String)> = None;
+        for i in 0..1000 {
+            let sql1 = format!("SELECT * FROM table_a WHERE x = {}", i);
+            let h1 = prepare_simple_hash(&sql1, 200);
+            for j in (i + 1)..1000 {
+                let sql2 = format!("SELECT * FROM table_b WHERE y = {}", j);
+                let h2 = prepare_simple_hash(&sql2, 200);
+                if (h1 as usize % LOOP_DETECT_SLOTS) == (h2 as usize % LOOP_DETECT_SLOTS)
+                    && h1 != h2
+                {
+                    pair = Some((sql1, sql2));
+                    break;
+                }
+            }
+            if pair.is_some() {
+                break;
+            }
+        }
+        if let Some((a, b)) = pair {
+            for i in 0..(LOOP_DETECT_THRESHOLD / 2) {
+                let sql = if i % 2 == 0 { &a } else { &b };
+                let _ = prepare_query_loop_tick(sql);
+            }
+        }
+    }
 }

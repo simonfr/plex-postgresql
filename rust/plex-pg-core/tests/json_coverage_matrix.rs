@@ -61,8 +61,14 @@ fn json_set_rewrites() {
 fn json_insert_and_replace_rewrite() {
     let insert_out = t("SELECT json_insert(extra_data, '$.status', 'ok') FROM t");
     let replace_out = t("SELECT json_replace(extra_data, '$.status', 'ok') FROM t");
-    assert!(insert_out.to_lowercase().contains("jsonb_set"), "{}", insert_out);
-    assert!(replace_out.to_lowercase().contains("jsonb_set"), "{}", replace_out);
+    let insert_low = insert_out.to_lowercase();
+    let replace_low = replace_out.to_lowercase();
+    assert!(insert_low.contains("jsonb_set"), "{}", insert_out);
+    assert!(replace_low.contains("jsonb_set"), "{}", replace_out);
+    assert!(insert_low.contains("jsonb_path_exists"), "{}", insert_out);
+    assert!(replace_low.contains("jsonb_path_exists"), "{}", replace_out);
+    assert!(insert_low.contains("case"), "{}", insert_out);
+    assert!(replace_low.contains("case"), "{}", replace_out);
     assert_pg(&insert_out);
     assert_pg(&replace_out);
 }
@@ -75,4 +81,3 @@ fn json_quote_rewrites() {
     assert!(low.contains("::text"), "{}", out);
     assert_pg(&out);
 }
-

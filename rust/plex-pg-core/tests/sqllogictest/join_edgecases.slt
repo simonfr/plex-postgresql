@@ -1,0 +1,29 @@
+# Join edge cases: self joins and nested joins
+
+statement ok
+CREATE TABLE je2 (id INTEGER, parent_id INTEGER, name TEXT);
+
+statement ok
+INSERT INTO je2 (id, parent_id, name) VALUES
+  (1, NULL, 'root'),
+  (2, 1, 'child-a'),
+  (3, 1, 'child-b'),
+  (4, 2, 'grandchild');
+
+query TT rowsort
+SELECT p.name, c.name
+FROM je2 p
+JOIN je2 c ON c.parent_id = p.id
+WHERE p.id = 1
+ORDER BY c.id;
+----
+root child-a
+root child-b
+
+query I rowsort
+SELECT COUNT(*)
+FROM je2 a
+JOIN (SELECT id, parent_id FROM je2 WHERE parent_id IS NOT NULL) b
+  ON a.id = b.parent_id;
+----
+3

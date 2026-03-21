@@ -138,6 +138,10 @@ check_and_migrate() {
 
 migrate_sqlite_to_pg() {
     local schema="$PG_SCHEMA"
+    local compat_file="${SHIM_DIR}/schema/pg_compat_functions.sql"
+    if [[ ! -f "$compat_file" ]]; then
+        compat_file="/usr/local/lib/plex-postgresql/pg_compat_functions.sql"
+    fi
 
     # Ensure schema exists
     psql -c "CREATE SCHEMA IF NOT EXISTS $schema;" 2>/dev/null || true
@@ -156,6 +160,11 @@ migrate_sqlite_to_pg() {
                 psql -f "$schema_file" >/dev/null 2>&1 || true
             fi
         fi
+    fi
+
+    # Ensure PostgreSQL compatibility helper functions exist.
+    if [[ -f "$compat_file" ]]; then
+        psql -f "$compat_file" >/dev/null 2>&1 || true
     fi
 
     # Get tables from SQLite (exclude FTS and virtual tables)

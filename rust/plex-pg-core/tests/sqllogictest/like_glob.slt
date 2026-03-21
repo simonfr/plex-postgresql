@@ -1,0 +1,25 @@
+# LIKE / GLOB behavior
+
+statement ok
+CREATE TABLE lg (v TEXT);
+
+statement ok
+INSERT INTO lg (v) VALUES ('alpha'), ('alphabet'), ('beta'), ('ALPHA');
+
+statement ok
+PRAGMA case_sensitive_like = ON;
+
+query I rowsort
+SELECT COUNT(*) FROM lg WHERE v LIKE 'alp%';
+----
+2
+
+query I rowsort
+SELECT COUNT(*) FROM lg WHERE v GLOB 'alp*' AND v = lower(v);
+----
+2
+
+query I rowsort
+SELECT COUNT(*) FROM lg WHERE v LIKE '%ta';
+----
+1

@@ -1,0 +1,34 @@
+# UNION / INTERSECT / EXCEPT
+
+statement ok
+CREATE TABLE so (id INTEGER, grp INTEGER);
+
+statement ok
+INSERT INTO so (id, grp) VALUES
+  (1, 1),
+  (2, 1),
+  (2, 2),
+  (3, 2);
+
+query I rowsort
+SELECT id FROM so WHERE grp = 1
+UNION
+SELECT id FROM so WHERE grp = 2;
+----
+1
+2
+3
+
+query I rowsort
+SELECT id FROM so WHERE grp = 1
+INTERSECT
+SELECT id FROM so WHERE id IN (2, 3);
+----
+2
+
+query I rowsort
+SELECT id FROM so WHERE grp = 1
+EXCEPT
+SELECT id FROM so WHERE grp = 2;
+----
+1

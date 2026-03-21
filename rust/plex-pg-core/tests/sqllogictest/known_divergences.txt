@@ -1,0 +1,6 @@
+# Regex allowlist for known SQLite vs PostgreSQL divergences.
+# Matches against: case id + SQL + failure detail.
+#
+# Example:
+# json_tree
+# PRAGMA case_sensitive_like

@@ -1,6 +1,15 @@
 *.o
 *.dylib
 *.so
+*.dSYM
+.DS_Store
+.env
+.vscode
+.idea
 .git
 .gitignore
+fixtures/media
+release
+target
+rust/**/target
 rust/sql-translator/target

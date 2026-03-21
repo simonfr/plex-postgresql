@@ -317,11 +317,14 @@ fn with_cache<F, R>(f: F) -> Option<R>
 where
     F: FnOnce(&mut QueryCache) -> R,
 {
-    THREAD_CACHE.with(|cell| {
+    THREAD_CACHE
+        .try_with(|cell| {
         let mut borrow = cell.borrow_mut();
         let cache = borrow.get_or_insert_with(|| Box::new(QueryCache::new()));
         Some(f(cache))
     })
+        .ok()
+        .flatten()
 }
 
 // ─── Logging helper ──────────────────────────────────────────────────────────

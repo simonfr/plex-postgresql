@@ -35,7 +35,7 @@
 ///   - `rust_stmt_find_any`            — lookup in registry + TLS cache
 ///   - `rust_stmt_is_ours`             — check if pg_stmt pointer is registered
 ///   - `rust_stmt_ref`                 — increment ref_count
-///   - `rust_stmt_unref`               — decrement ref_count, call free callback at 0
+///   - `rust_stmt_unref`               — decrement ref_count, free at 0
 ///   - `rust_cached_stmt_register`     — add to TLS cache (with ref)
 ///   - `rust_cached_stmt_find`         — lookup in TLS cache
 ///   - `rust_cached_stmt_clear`        — remove from TLS cache (with unref)
@@ -45,11 +45,12 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
-use std::os::raw::c_char;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::RwLock;
+use std::os::raw::{c_char, c_int, c_void};
+use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
+use std::sync::{Once, RwLock};
 
 use crate::db_interpose_helpers::cstr_to_str_or_empty;
+use crate::ffi_types::{sqlite3_stmt, sqlite3_value, PgConnection, PgStmt, MAX_PARAMS, PARAM_BUF_LEN};
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -110,6 +111,7 @@ RETURNING id";
 /// `pg_is_our_stmt` lookup (which searches by pg_stmt, not sqlite_stmt).
 static REGISTRY: std::sync::LazyLock<RwLock<StmtRegistry>> =
     std::sync::LazyLock::new(|| RwLock::new(StmtRegistry::new()));
+static STMT_INIT: Once = Once::new();
 
 struct StmtRegistry {
     /// Forward map: sqlite3_stmt* → pg_stmt_t*
@@ -185,28 +187,22 @@ impl ThreadCachedStmts {
 
     /// Register a cached statement. Increments ref_count on the pg_stmt.
     /// If the sqlite_stmt is already cached, replaces the pg_stmt (unrefs old).
-    fn register(
-        &mut self,
-        sqlite_stmt: usize,
-        pg_stmt: usize,
-        ref_fn: impl Fn(usize),
-        unref_fn: impl Fn(usize),
-    ) {
+    fn register(&mut self, sqlite_stmt: usize, pg_stmt: usize) {
         // Check if already registered — replace
         for entry in &mut self.entries {
             if entry.sqlite_stmt == sqlite_stmt {
                 let old = entry.pg_stmt;
                 if old != pg_stmt {
-                    unref_fn(old);
+                    stmt_unref_ptr(old);
                 }
-                ref_fn(pg_stmt);
+                stmt_ref_ptr(pg_stmt);
                 entry.pg_stmt = pg_stmt;
                 return;
             }
         }
 
         // New entry — increment ref
-        ref_fn(pg_stmt);
+        stmt_ref_ptr(pg_stmt);
 
         if self.entries.len() < MAX_CACHED_STMTS_PER_THREAD {
             self.entries.push(CachedStmtEntry {
@@ -216,7 +212,7 @@ impl ThreadCachedStmts {
         } else {
             // Evict oldest (index 0)
             let old = self.entries[0].pg_stmt;
-            unref_fn(old);
+            stmt_unref_ptr(old);
             self.entries.remove(0);
             self.entries.push(CachedStmtEntry {
                 sqlite_stmt,
@@ -236,7 +232,7 @@ impl ThreadCachedStmts {
     }
 
     /// Remove a cached statement and unref it.
-    fn clear(&mut self, sqlite_stmt: usize, unref_fn: impl Fn(usize)) {
+    fn clear(&mut self, sqlite_stmt: usize) {
         if let Some(pos) = self
             .entries
             .iter()
@@ -244,7 +240,7 @@ impl ThreadCachedStmts {
         {
             let old_pg_stmt = self.entries[pos].pg_stmt;
             self.entries.remove(pos);
-            unref_fn(old_pg_stmt);
+            stmt_unref_ptr(old_pg_stmt);
         }
     }
 
@@ -266,6 +262,18 @@ impl ThreadCachedStmts {
     }
 }
 
+impl Drop for ThreadCachedStmts {
+    fn drop(&mut self) {
+        if stmt_cache_disabled() {
+            self.entries.clear();
+            return;
+        }
+        for entry in self.entries.drain(..) {
+            stmt_unref_ptr(entry.pg_stmt);
+        }
+    }
+}
+
 thread_local! {
     static TLS_CACHED_STMTS: RefCell<Option<ThreadCachedStmts>> = const { RefCell::new(None) };
 }
@@ -275,11 +283,14 @@ fn with_tls_cache<F, R>(f: F) -> Option<R>
 where
     F: FnOnce(&mut ThreadCachedStmts) -> R,
 {
-    TLS_CACHED_STMTS.with(|cell| {
+    TLS_CACHED_STMTS
+        .try_with(|cell| {
         let mut borrow = cell.borrow_mut();
         let cache = borrow.get_or_insert_with(ThreadCachedStmts::new);
         Some(f(cache))
     })
+        .ok()
+        .flatten()
 }
 
 // ─── Fake sqlite3_value pool ─────────────────────────────────────────────────
@@ -320,6 +331,28 @@ fn log_debug(msg: &str) {
     if let Ok(cmsg) = CString::new(msg) {
         unsafe {
             rust_logging_write(2, cmsg.as_ptr());
+        }
+    }
+}
+
+fn log_info(msg: &str) {
+    extern "C" {
+        fn rust_logging_write(level: i32, message: *const c_char);
+    }
+    if let Ok(cmsg) = CString::new(msg) {
+        unsafe {
+            rust_logging_write(1, cmsg.as_ptr());
+        }
+    }
+}
+
+fn log_error(msg: &str) {
+    extern "C" {
+        fn rust_logging_write(level: i32, message: *const c_char);
+    }
+    if let Ok(cmsg) = CString::new(msg) {
+        unsafe {
+            rust_logging_write(0, cmsg.as_ptr());
         }
     }
 }
@@ -394,31 +427,483 @@ pub(crate) fn extract_metadata_id(sql: &str) -> i64 {
     digits.parse::<i64>().unwrap_or(0)
 }
 
-// ─── Callback type for C-side pg_stmt_free ───────────────────────────────────
+static LEAK_STMTS: std::sync::LazyLock<AtomicI32> =
+    std::sync::LazyLock::new(|| AtomicI32::new(-1));
+static DISABLE_STMT_CACHE: std::sync::LazyLock<AtomicI32> =
+    std::sync::LazyLock::new(|| AtomicI32::new(-1));
 
-/// C function pointer type for freeing a pg_stmt_t when ref_count hits 0.
-/// Set once during init via `rust_stmt_set_free_callback`.
-static FREE_CALLBACK: std::sync::LazyLock<std::sync::Mutex<Option<extern "C" fn(usize)>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
-
-/// C function pointer for incrementing ref_count on a pg_stmt_t.
-/// The C side still owns the atomic ref_count field in the struct.
-static REF_CALLBACK: std::sync::LazyLock<std::sync::Mutex<Option<extern "C" fn(usize)>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
-
-/// C function pointer for decrementing ref_count on a pg_stmt_t.
-static UNREF_CALLBACK: std::sync::LazyLock<std::sync::Mutex<Option<extern "C" fn(usize)>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
-
-fn call_ref(pg_stmt: usize) {
-    if let Some(cb) = *REF_CALLBACK.lock().unwrap() {
-        cb(pg_stmt);
+fn env_truthy(name: &str) -> bool {
+    match std::env::var(name) {
+        Ok(v) if !v.is_empty() => matches!(v.as_bytes()[0], b'1' | b'y' | b'Y' | b't' | b'T'),
+        _ => false,
     }
 }
 
-fn call_unref(pg_stmt: usize) {
-    if let Some(cb) = *UNREF_CALLBACK.lock().unwrap() {
-        cb(pg_stmt);
+fn leak_enabled() -> bool {
+    let cached = LEAK_STMTS.load(Ordering::Relaxed);
+    if cached >= 0 {
+        return cached != 0;
+    }
+    let enabled = env_truthy("PLEX_PG_LEAK_STMTS");
+    LEAK_STMTS.store(enabled as i32, Ordering::Relaxed);
+    enabled
+}
+
+fn stmt_cache_disabled() -> bool {
+    let cached = DISABLE_STMT_CACHE.load(Ordering::Relaxed);
+    if cached >= 0 {
+        return cached != 0;
+    }
+    let enabled = env_truthy("PLEX_PG_DISABLE_STMT_CACHE");
+    DISABLE_STMT_CACHE.store(enabled as i32, Ordering::Relaxed);
+    enabled
+}
+
+fn stmt_ref_ptr(pg_stmt: usize) {
+    if pg_stmt == 0 {
+        return;
+    }
+    rust_stmt_ref(pg_stmt as *mut PgStmt);
+}
+
+fn stmt_unref_ptr(pg_stmt: usize) {
+    if pg_stmt == 0 {
+        return;
+    }
+    rust_stmt_unref(pg_stmt as *mut PgStmt);
+}
+
+extern "C" {
+    fn pg_pool_validate_connection(conn: *mut PgConnection) -> c_int;
+}
+
+const PMT_STMT_SWEEP_EXTRA_FREE: i32 = 6;
+
+unsafe fn is_preallocated_buffer(stmt: &PgStmt, idx: usize) -> bool {
+    let val = stmt.param_values[idx] as usize;
+    if val == 0 {
+        return false;
+    }
+    let buf_ptr = stmt.param_buffers[idx].as_ptr() as usize;
+    val >= buf_ptr && val < buf_ptr + PARAM_BUF_LEN
+}
+
+#[no_mangle]
+pub extern "C" fn rust_stmt_create(
+    conn: *mut PgConnection,
+    sql: *const c_char,
+    shadow_stmt: *mut crate::ffi_types::sqlite3_stmt,
+) -> *mut PgStmt {
+    unsafe {
+        let stmt_ptr = libc::calloc(1, std::mem::size_of::<PgStmt>()) as *mut PgStmt;
+        if stmt_ptr.is_null() {
+            log_error("pg_stmt_create: calloc failed");
+            return std::ptr::null_mut();
+        }
+
+        let mut attr: libc::pthread_mutexattr_t = std::mem::zeroed();
+        if libc::pthread_mutexattr_init(&mut attr as *mut _) != 0 {
+            log_error("pg_stmt_create: pthread_mutexattr_init failed");
+            libc::free(stmt_ptr as *mut c_void);
+            return std::ptr::null_mut();
+        }
+        libc::pthread_mutexattr_settype(&mut attr as *mut _, libc::PTHREAD_MUTEX_RECURSIVE);
+        libc::pthread_mutex_init(&mut (*stmt_ptr).mutex as *mut _, &attr as *const _);
+        libc::pthread_mutexattr_destroy(&mut attr as *mut _);
+
+        (*stmt_ptr).ref_count.store(1, Ordering::Release);
+        (*stmt_ptr).conn = conn;
+        (*stmt_ptr).shadow_stmt = shadow_stmt;
+        (*stmt_ptr).sql = if sql.is_null() {
+            std::ptr::null_mut()
+        } else {
+            libc::strdup(sql)
+        };
+        (*stmt_ptr).current_row = -1;
+        (*stmt_ptr).cached_row = -1;
+        (*stmt_ptr).decoded_blob_row = -1;
+        (*stmt_ptr).write_executed = 0;
+        (*stmt_ptr).read_done = 0;
+
+        stmt_ptr
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rust_stmt_free(stmt_ptr: *mut PgStmt) {
+    if stmt_ptr.is_null() {
+        return;
+    }
+    unsafe {
+        let stmt = &mut *stmt_ptr;
+
+        let ref_count = stmt.ref_count.load(Ordering::Acquire);
+        if ref_count != 0 {
+            let sql = if stmt.sql.is_null() {
+                "NULL"
+            } else {
+                cstr_to_str_or_empty(stmt.sql)
+            };
+            log_error(&format!(
+                "pg_stmt_free: WARNING ref_count={} (expected 0) for stmt={:p} sql={:.50}",
+                ref_count, stmt_ptr, sql
+            ));
+            if ref_count > 0 {
+                log_error(&format!(
+                    "pg_stmt_free: ABORT - ref_count={} not freeing to prevent use-after-free",
+                    ref_count
+                ));
+                return;
+            }
+        }
+
+        if stmt.streaming_mode != 0 && !stmt.streaming_conn.is_null() {
+            if pg_pool_validate_connection(stmt.streaming_conn) == 0 {
+                log_error(&format!(
+                    "pg_stmt_free: streaming_conn invalid, skipping cancel/drain (stmt={:p})",
+                    stmt_ptr
+                ));
+                stmt.streaming_mode = 0;
+                stmt.streaming_conn = std::ptr::null_mut();
+            } else {
+                let sconn = stmt.streaming_conn;
+                libc::pthread_mutex_lock(&mut (*sconn).mutex as *mut _);
+                if !(*sconn).conn.is_null() {
+                    let cancel = crate::libpq_helpers::rust_pq_get_cancel((*sconn).conn);
+                    if !cancel.is_null() {
+                        let mut errbuf = [0i8; 256];
+                        if crate::libpq_helpers::rust_pq_cancel(
+                            cancel,
+                            errbuf.as_mut_ptr(),
+                            errbuf.len() as c_int,
+                        ) == 0
+                        {
+                            let err = cstr_to_str_or_empty(errbuf.as_ptr());
+                            log_error(&format!("pg_stmt_free: PQcancel failed: {}", err));
+                        }
+                        crate::libpq_helpers::rust_pq_free_cancel(cancel);
+                    }
+                    let mut drain_count = 0;
+                    loop {
+                        let drain = crate::libpq_helpers::rust_pq_get_result((*sconn).conn);
+                        if drain.is_null() {
+                            break;
+                        }
+                        drain_count += 1;
+                        crate::libpq_helpers::rust_pq_clear(drain);
+                        if drain_count > 1000 {
+                            log_info(&format!(
+                                "pg_stmt_free: drain after cancel exceeded 1000 on {:p}",
+                                sconn
+                            ));
+                            break;
+                        }
+                    }
+                    if drain_count > 0 {
+                        log_debug(&format!(
+                            "pg_stmt_free: drained {} results after cancel",
+                            drain_count
+                        ));
+                    }
+                }
+                libc::pthread_mutex_unlock(&mut (*sconn).mutex as *mut _);
+                stmt.streaming_mode = 0;
+                (*sconn)
+                    .streaming_active
+                    .store(0, Ordering::Release);
+                stmt.streaming_conn = std::ptr::null_mut();
+            }
+        }
+
+        log_debug(&format!(
+            "pg_stmt_free: START stmt={:p} sql={:p} pg_sql={:p}",
+            stmt_ptr, stmt.sql, stmt.pg_sql
+        ));
+
+        let pg_sql_is_separate = !stmt.pg_sql.is_null() && stmt.pg_sql != stmt.sql;
+
+        if !stmt.sql.is_null() {
+            let sql = if stmt.sql.is_null() {
+                "NULL"
+            } else {
+                cstr_to_str_or_empty(stmt.sql)
+            };
+            log_debug(&format!(
+                "pg_stmt_free: freeing sql={:p} ({:.50})",
+                stmt.sql, sql
+            ));
+            libc::free(stmt.sql as *mut c_void);
+            stmt.sql = std::ptr::null_mut();
+        }
+        if pg_sql_is_separate && !stmt.pg_sql.is_null() {
+            let sql = cstr_to_str_or_empty(stmt.pg_sql);
+            log_debug(&format!(
+                "pg_stmt_free: freeing pg_sql={:p} ({:.50})",
+                stmt.pg_sql, sql
+            ));
+            libc::free(stmt.pg_sql as *mut c_void);
+            stmt.pg_sql = std::ptr::null_mut();
+        }
+        if !stmt.result.is_null() {
+            log_debug(&format!("pg_stmt_free: PQclear result={:p}", stmt.result));
+            crate::libpq_helpers::rust_pq_clear(stmt.result);
+            stmt.result = std::ptr::null_mut();
+        }
+
+        let mut safe_param_count = stmt.param_count;
+        if safe_param_count < 0 {
+            safe_param_count = 0;
+        }
+        if safe_param_count as usize > MAX_PARAMS {
+            safe_param_count = MAX_PARAMS as c_int;
+        }
+
+        for i in 0..MAX_PARAMS {
+            let val = stmt.param_values[i];
+            if !val.is_null() && !is_preallocated_buffer(stmt, i) {
+                log_debug(&format!(
+                    "pg_stmt_free: freeing param_values[{}]={:p}",
+                    i, val
+                ));
+                libc::free(val as *mut c_void);
+                stmt.param_values[i] = std::ptr::null_mut();
+                if (i as c_int) >= safe_param_count
+                    && crate::pg_mem_telemetry::rust_mem_telemetry_enabled() != 0
+                {
+                    crate::pg_mem_telemetry::rust_mem_telemetry_add(
+                        PMT_STMT_SWEEP_EXTRA_FREE,
+                        0,
+                        1,
+                    );
+                }
+            }
+        }
+
+        if !stmt.param_names.is_null() {
+            log_debug(&format!(
+                "pg_stmt_free: freeing param_names={:p} (array of {})",
+                stmt.param_names, safe_param_count
+            ));
+            let count = safe_param_count.max(0) as usize;
+            for i in 0..count {
+                let slot = stmt.param_names.add(i);
+                if !(*slot).is_null() {
+                    let name = cstr_to_str_or_empty(*slot);
+                    log_debug(&format!(
+                        "pg_stmt_free: freeing param_names[{}]={:p} ({:.30})",
+                        i, *slot, name
+                    ));
+                    libc::free(*slot as *mut c_void);
+                    *slot = std::ptr::null_mut();
+                }
+            }
+            log_debug(&format!(
+                "pg_stmt_free: freeing param_names array at {:p}",
+                stmt.param_names
+            ));
+            libc::free(stmt.param_names as *mut c_void);
+            stmt.param_names = std::ptr::null_mut();
+        }
+
+        for i in 0..MAX_PARAMS {
+            let blob = stmt.decoded_blobs[i];
+            if !blob.is_null() {
+                log_debug(&format!(
+                    "pg_stmt_free: freeing decoded_blobs[{}]={:p}",
+                    i, blob
+                ));
+                libc::free(blob as *mut c_void);
+                stmt.decoded_blobs[i] = std::ptr::null_mut();
+            }
+        }
+
+        for i in 0..MAX_PARAMS {
+            let text = stmt.cached_text[i];
+            if !text.is_null() {
+                log_debug(&format!(
+                    "pg_stmt_free: freeing cached_text[{}]={:p}",
+                    i, text
+                ));
+                libc::free(text as *mut c_void);
+                stmt.cached_text[i] = std::ptr::null_mut();
+            }
+            let blob = stmt.cached_blob[i];
+            if !blob.is_null() {
+                log_debug(&format!(
+                    "pg_stmt_free: freeing cached_blob[{}]={:p}",
+                    i, blob
+                ));
+                libc::free(blob as *mut c_void);
+                stmt.cached_blob[i] = std::ptr::null_mut();
+            }
+        }
+
+        for i in 0..MAX_PARAMS {
+            let name = stmt.col_table_names[i];
+            if !name.is_null() {
+                libc::free(name as *mut c_void);
+                stmt.col_table_names[i] = std::ptr::null_mut();
+            }
+        }
+
+        if !stmt.col_names.is_null() {
+            let count = if stmt.num_col_names > 0 {
+                stmt.num_col_names as usize
+            } else {
+                0
+            };
+            for i in 0..count {
+                let slot = stmt.col_names.add(i);
+                if !(*slot).is_null() {
+                    libc::free(*slot as *mut c_void);
+                }
+            }
+            libc::free(stmt.col_names as *mut c_void);
+            stmt.col_names = std::ptr::null_mut();
+            stmt.num_col_names = 0;
+        }
+
+        log_debug(&format!(
+            "pg_stmt_free: destroying mutex and freeing stmt={:p}",
+            stmt_ptr
+        ));
+        libc::pthread_mutex_destroy(&mut stmt.mutex as *mut _);
+        libc::free(stmt_ptr as *mut c_void);
+        log_debug("pg_stmt_free: DONE");
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rust_stmt_clear_result(stmt_ptr: *mut PgStmt) {
+    if stmt_ptr.is_null() {
+        return;
+    }
+    unsafe {
+        let stmt = &mut *stmt_ptr;
+
+        if stmt.streaming_mode != 0 && !stmt.streaming_conn.is_null() {
+            if pg_pool_validate_connection(stmt.streaming_conn) == 0 {
+                log_error(&format!(
+                    "pg_stmt_clear_result: streaming_conn invalid, skipping cancel/drain (stmt={:p})",
+                    stmt_ptr
+                ));
+                stmt.streaming_mode = 0;
+                stmt.streaming_conn = std::ptr::null_mut();
+            } else {
+                let sconn = stmt.streaming_conn;
+                libc::pthread_mutex_lock(&mut (*sconn).mutex as *mut _);
+                if !(*sconn).conn.is_null() {
+                    let cancel = crate::libpq_helpers::rust_pq_get_cancel((*sconn).conn);
+                    if !cancel.is_null() {
+                        let mut errbuf = [0i8; 256];
+                        if crate::libpq_helpers::rust_pq_cancel(
+                            cancel,
+                            errbuf.as_mut_ptr(),
+                            errbuf.len() as c_int,
+                        ) == 0
+                        {
+                            let err = cstr_to_str_or_empty(errbuf.as_ptr());
+                            log_error(&format!(
+                                "pg_stmt_clear_result: PQcancel failed: {}",
+                                err
+                            ));
+                        }
+                        crate::libpq_helpers::rust_pq_free_cancel(cancel);
+                    }
+                    let mut drain_count = 0;
+                    loop {
+                        let drain = crate::libpq_helpers::rust_pq_get_result((*sconn).conn);
+                        if drain.is_null() {
+                            break;
+                        }
+                        drain_count += 1;
+                        crate::libpq_helpers::rust_pq_clear(drain);
+                        if drain_count > 1000 {
+                            log_info(&format!(
+                                "pg_stmt_clear_result: drain after cancel exceeded 1000 on {:p}",
+                                sconn
+                            ));
+                            break;
+                        }
+                    }
+                    if drain_count > 0 {
+                        let sql = if stmt.sql.is_null() {
+                            "NULL"
+                        } else {
+                            cstr_to_str_or_empty(stmt.sql)
+                        };
+                        log_debug(&format!(
+                            "pg_stmt_clear_result: drained {} results after cancel (sql={:.60})",
+                            drain_count, sql
+                        ));
+                    }
+                }
+                libc::pthread_mutex_unlock(&mut (*sconn).mutex as *mut _);
+                stmt.streaming_mode = 0;
+                (*sconn)
+                    .streaming_active
+                    .store(0, Ordering::Release);
+                stmt.streaming_conn = std::ptr::null_mut();
+            }
+        }
+
+        if !stmt.result.is_null() {
+            crate::libpq_helpers::rust_pq_clear(stmt.result);
+            stmt.result = std::ptr::null_mut();
+        }
+        if !stmt.cached_result.is_null() {
+            crate::pg_query_cache::rust_query_cache_release(stmt.cached_result);
+            stmt.cached_result = std::ptr::null_mut();
+        }
+        stmt.result_conn = std::ptr::null_mut();
+        stmt.metadata_only_result = 0;
+        stmt.current_row = -1;
+        stmt.num_rows = 0;
+        stmt.num_cols = 0;
+        stmt.write_executed = 0;
+        stmt.read_done = 0;
+
+        for i in 0..MAX_PARAMS {
+            let blob = stmt.decoded_blobs[i];
+            if !blob.is_null() {
+                libc::free(blob as *mut c_void);
+                stmt.decoded_blobs[i] = std::ptr::null_mut();
+                stmt.decoded_blob_lens[i] = 0;
+            }
+        }
+        stmt.decoded_blob_row = -1;
+
+        for i in 0..MAX_PARAMS {
+            let text = stmt.cached_text[i];
+            if !text.is_null() {
+                libc::free(text as *mut c_void);
+                stmt.cached_text[i] = std::ptr::null_mut();
+            }
+            let blob = stmt.cached_blob[i];
+            if !blob.is_null() {
+                libc::free(blob as *mut c_void);
+                stmt.cached_blob[i] = std::ptr::null_mut();
+                stmt.cached_blob_len[i] = 0;
+            }
+        }
+        stmt.cached_row = -1;
+
+        if !stmt.col_names.is_null() {
+            let count = if stmt.num_col_names > 0 {
+                stmt.num_col_names as usize
+            } else {
+                0
+            };
+            for i in 0..count {
+                let slot = stmt.col_names.add(i);
+                if !(*slot).is_null() {
+                    libc::free(*slot as *mut c_void);
+                }
+            }
+            libc::free(stmt.col_names as *mut c_void);
+            stmt.col_names = std::ptr::null_mut();
+            stmt.num_col_names = 0;
+        }
     }
 }
 
@@ -489,25 +974,85 @@ pub extern "C" fn rust_extract_metadata_id(sql: *const c_char) -> i64 {
 // Public C FFI functions — new Phase 3 (statement registry + TLS cache)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Set the callback functions for ref/unref/free on pg_stmt_t.
-/// Must be called once during initialization, before any other registry operations.
 #[no_mangle]
-pub extern "C" fn rust_stmt_set_callbacks(
-    ref_cb: extern "C" fn(usize),
-    unref_cb: extern "C" fn(usize),
-    free_cb: extern "C" fn(usize),
-) {
-    *REF_CALLBACK.lock().unwrap() = Some(ref_cb);
-    *UNREF_CALLBACK.lock().unwrap() = Some(unref_cb);
-    *FREE_CALLBACK.lock().unwrap() = Some(free_cb);
+pub extern "C" fn rust_stmt_ref(pg_stmt: *mut PgStmt) {
+    if pg_stmt.is_null() {
+        return;
+    }
+    unsafe {
+        let stmt = &*pg_stmt;
+        stmt.ref_count.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rust_stmt_unref(pg_stmt: *mut PgStmt) {
+    if pg_stmt.is_null() {
+        return;
+    }
+    let old = unsafe {
+        let stmt = &*pg_stmt;
+        stmt.ref_count.fetch_sub(1, Ordering::AcqRel)
+    };
+    let new = old - 1;
+    let sql = unsafe {
+        let stmt = &*pg_stmt;
+        if stmt.sql.is_null() {
+            "NULL"
+        } else {
+            if stmt.sql.is_null() {
+                "NULL"
+            } else {
+                cstr_to_str_or_empty(stmt.sql)
+            }
+        }
+    };
+    log_debug(&format!(
+        "pg_stmt_unref: stmt={:p} old_ref={} new_ref={} sql={:.40}",
+        pg_stmt, old, new, sql
+    ));
+
+    if old <= 0 {
+        log_error(&format!(
+            "pg_stmt_unref: CRITICAL BUG - ref_count was {} before decrement! stmt={:p} sql={:.40}",
+            old, pg_stmt, sql
+        ));
+        log_error("pg_stmt_unref: This indicates double-unref or missing ref. RESTORING to prevent negative.");
+        unsafe {
+            let stmt = &*pg_stmt;
+            stmt.ref_count.store(0, Ordering::Release);
+        }
+        return;
+    }
+
+    if old == 1 {
+        if leak_enabled() {
+            log_error(&format!(
+                "pg_stmt_unref: leak enabled via PLEX_PG_LEAK_STMTS, skipping free stmt={:p} sql={:.40}",
+                pg_stmt, sql
+            ));
+            unsafe {
+                let stmt = &*pg_stmt;
+                stmt.ref_count.store(1, Ordering::Release);
+            }
+            return;
+        }
+        log_debug(&format!(
+            "pg_stmt_unref: last reference, freeing stmt={:p}",
+            pg_stmt
+        ));
+        rust_stmt_free(pg_stmt);
+    }
 }
 
 /// Initialize the statement registry.
 #[no_mangle]
 pub extern "C" fn rust_stmt_registry_init() {
-    // Force LazyLock initialization
-    let _reg = REGISTRY.read().unwrap();
-    log_debug("pg_statement registry initialized (Rust HashMap)");
+    STMT_INIT.call_once(|| {
+        // Force LazyLock initialization
+        let _reg = REGISTRY.read().unwrap();
+        log_debug("pg_statement registry initialized (Rust HashMap)");
+    });
 }
 
 /// Clear all entries from the registry.
@@ -520,7 +1065,7 @@ pub extern "C" fn rust_stmt_registry_cleanup() {
     reg.clear();
     drop(reg); // Release write lock before calling unref
     for pg_stmt in pg_stmts {
-        call_unref(pg_stmt);
+        stmt_unref_ptr(pg_stmt);
     }
 }
 
@@ -575,7 +1120,10 @@ pub extern "C" fn rust_stmt_find_any(sqlite_stmt: usize) -> usize {
         }
     }
 
-    // Fallback: TLS cache lookup
+    // Fallback: TLS cache lookup (if enabled)
+    if stmt_cache_disabled() {
+        return 0;
+    }
     with_tls_cache(|cache| cache.find(sqlite_stmt).unwrap_or(0)).unwrap_or(0)
 }
 
@@ -603,14 +1151,17 @@ pub extern "C" fn rust_stmt_registry_count() -> usize {
 // ─── TLS Cached Statements FFI ──────────────────────────────────────────────
 
 /// Register a cached statement in the TLS cache.
-/// Increments ref_count via the ref callback.
+/// Increments ref_count.
 #[no_mangle]
 pub extern "C" fn rust_cached_stmt_register(sqlite_stmt: usize, pg_stmt: usize) {
     if sqlite_stmt == 0 || pg_stmt == 0 {
         return;
     }
+    if stmt_cache_disabled() {
+        return;
+    }
     with_tls_cache(|cache| {
-        cache.register(sqlite_stmt, pg_stmt, call_ref, call_unref);
+        cache.register(sqlite_stmt, pg_stmt);
     });
 }
 
@@ -619,6 +1170,9 @@ pub extern "C" fn rust_cached_stmt_register(sqlite_stmt: usize, pg_stmt: usize) 
 #[no_mangle]
 pub extern "C" fn rust_cached_stmt_find(sqlite_stmt: usize) -> usize {
     if sqlite_stmt == 0 {
+        return 0;
+    }
+    if stmt_cache_disabled() {
         return 0;
     }
     with_tls_cache(|cache| cache.find(sqlite_stmt).unwrap_or(0)).unwrap_or(0)
@@ -630,8 +1184,11 @@ pub extern "C" fn rust_cached_stmt_clear(sqlite_stmt: usize) {
     if sqlite_stmt == 0 {
         return;
     }
+    if stmt_cache_disabled() {
+        return;
+    }
     with_tls_cache(|cache| {
-        cache.clear(sqlite_stmt, call_unref);
+        cache.clear(sqlite_stmt);
     });
 }
 
@@ -640,6 +1197,9 @@ pub extern "C" fn rust_cached_stmt_clear(sqlite_stmt: usize) {
 #[no_mangle]
 pub extern "C" fn rust_cached_stmt_clear_weak(sqlite_stmt: usize) {
     if sqlite_stmt == 0 {
+        return;
+    }
+    if stmt_cache_disabled() {
         return;
     }
     with_tls_cache(|cache| {
@@ -656,6 +1216,14 @@ pub extern "C" fn rust_cached_stmt_clear_weak(sqlite_stmt: usize) {
 /// `count_out` must point to a valid i32.
 #[no_mangle]
 pub extern "C" fn rust_cached_stmt_drain_all(count_out: *mut i32) -> *mut usize {
+    if stmt_cache_disabled() {
+        if !count_out.is_null() {
+            unsafe {
+                *count_out = 0;
+            }
+        }
+        return std::ptr::null_mut();
+    }
     let stmts = with_tls_cache(|cache| cache.drain_all());
     let stmts = stmts.unwrap_or_default();
     let count = stmts.len();
@@ -725,6 +1293,133 @@ pub extern "C" fn rust_is_our_value(val: *const PgValue) -> i32 {
     }
 }
 
+// ─── C ABI wrappers (pg_statement.c replacement) ─────────────────────────────
+
+#[no_mangle]
+pub extern "C" fn pg_statement_init() {
+    rust_stmt_registry_init();
+}
+
+#[no_mangle]
+pub extern "C" fn pg_statement_cleanup() {
+    rust_stmt_registry_cleanup();
+}
+
+#[no_mangle]
+pub extern "C" fn pg_register_stmt(sqlite_stmt: *mut sqlite3_stmt, pg_stmt: *mut PgStmt) {
+    rust_stmt_register(sqlite_stmt as usize, pg_stmt as usize);
+}
+
+#[no_mangle]
+pub extern "C" fn pg_unregister_stmt(sqlite_stmt: *mut sqlite3_stmt) {
+    rust_stmt_unregister(sqlite_stmt as usize);
+}
+
+#[no_mangle]
+pub extern "C" fn pg_find_stmt(stmt: *mut sqlite3_stmt) -> *mut PgStmt {
+    rust_stmt_find(stmt as usize) as *mut PgStmt
+}
+
+#[no_mangle]
+pub extern "C" fn pg_find_any_stmt(stmt: *mut sqlite3_stmt) -> *mut PgStmt {
+    rust_stmt_find_any(stmt as usize) as *mut PgStmt
+}
+
+#[no_mangle]
+pub extern "C" fn pg_is_our_stmt(ptr: *mut c_void) -> c_int {
+    rust_stmt_is_ours(ptr as usize)
+}
+
+#[no_mangle]
+pub extern "C" fn pg_register_cached_stmt(sqlite_stmt: *mut sqlite3_stmt, pg_stmt: *mut PgStmt) {
+    rust_cached_stmt_register(sqlite_stmt as usize, pg_stmt as usize);
+}
+
+#[no_mangle]
+pub extern "C" fn pg_find_cached_stmt(sqlite_stmt: *mut sqlite3_stmt) -> *mut PgStmt {
+    rust_cached_stmt_find(sqlite_stmt as usize) as *mut PgStmt
+}
+
+#[no_mangle]
+pub extern "C" fn pg_clear_cached_stmt(sqlite_stmt: *mut sqlite3_stmt) {
+    rust_cached_stmt_clear(sqlite_stmt as usize);
+}
+
+#[no_mangle]
+pub extern "C" fn pg_clear_cached_stmt_weak(sqlite_stmt: *mut sqlite3_stmt) {
+    rust_cached_stmt_clear_weak(sqlite_stmt as usize);
+}
+
+#[no_mangle]
+pub extern "C" fn pg_stmt_create(
+    conn: *mut PgConnection,
+    sql: *const c_char,
+    shadow_stmt: *mut sqlite3_stmt,
+) -> *mut PgStmt {
+    rust_stmt_create(conn, sql, shadow_stmt)
+}
+
+#[no_mangle]
+pub extern "C" fn pg_stmt_free(stmt: *mut PgStmt) {
+    rust_stmt_free(stmt);
+}
+
+#[no_mangle]
+pub extern "C" fn pg_stmt_ref(stmt: *mut PgStmt) {
+    rust_stmt_ref(stmt);
+}
+
+#[no_mangle]
+pub extern "C" fn pg_stmt_unref(stmt: *mut PgStmt) {
+    rust_stmt_unref(stmt);
+}
+
+#[no_mangle]
+pub extern "C" fn pg_stmt_clear_result(stmt: *mut PgStmt) {
+    rust_stmt_clear_result(stmt);
+}
+
+#[no_mangle]
+pub extern "C" fn pg_oid_to_sqlite_type(oid: u32) -> c_int {
+    rust_oid_to_sqlite_type(oid)
+}
+
+#[no_mangle]
+pub extern "C" fn pg_oid_to_sqlite_decltype(oid: u32) -> *const c_char {
+    rust_oid_to_sqlite_decltype(oid)
+}
+
+#[no_mangle]
+pub extern "C" fn pg_decltype_special_case(
+    oid: u32,
+    col_name: *const c_char,
+    pg_sql: *const c_char,
+    table_oid: u32,
+) -> c_int {
+    rust_decltype_special_case(oid, col_name, pg_sql, table_oid)
+}
+
+#[no_mangle]
+pub extern "C" fn pg_create_column_value(pg_stmt: *mut PgStmt, col_idx: c_int) -> *mut sqlite3_value {
+    if pg_stmt.is_null() || unsafe { (*pg_stmt).result.is_null() } {
+        return rust_create_column_value(pg_stmt as usize, col_idx, SQLITE_NULL) as *mut sqlite3_value;
+    }
+    let sqlite_type = unsafe {
+        crate::db_interpose_helpers::rust_pg_create_column_value(
+            (*pg_stmt).result,
+            (*pg_stmt).current_row,
+            (*pg_stmt).num_rows,
+            col_idx,
+        )
+    };
+    rust_create_column_value(pg_stmt as usize, col_idx, sqlite_type) as *mut sqlite3_value
+}
+
+#[no_mangle]
+pub extern "C" fn pg_is_our_value(val: *mut sqlite3_value) -> c_int {
+    rust_is_our_value(val as *const PgValue)
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Unit tests
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -732,10 +1427,20 @@ pub extern "C" fn rust_is_our_value(val: *const PgValue) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicI32;
 
     fn cs(s: &str) -> CString {
         CString::new(s).unwrap()
+    }
+
+    fn make_stmt(sql: &str) -> *mut PgStmt {
+        let csql = CString::new(sql).unwrap();
+        let stmt = rust_stmt_create(std::ptr::null_mut(), csql.as_ptr(), std::ptr::null_mut());
+        assert!(!stmt.is_null());
+        stmt
+    }
+
+    fn ref_count(stmt: *mut PgStmt) -> i32 {
+        unsafe { (*stmt).ref_count.load(Ordering::Relaxed) }
     }
 
     // ── Registry: basic operations (unit tests on StmtRegistry directly) ────
@@ -838,22 +1543,17 @@ mod tests {
 
     #[test]
     fn tls_cache_register_and_find() {
-        // Track ref/unref calls
-        static REF_COUNT: AtomicI32 = AtomicI32::new(0);
-
         let mut cache = ThreadCachedStmts::new();
-        cache.register(
-            0x100,
-            0x200,
-            |_| {
-                REF_COUNT.fetch_add(1, Ordering::Relaxed);
-            },
-            |_| {
-                REF_COUNT.fetch_sub(1, Ordering::Relaxed);
-            },
-        );
-        assert_eq!(cache.find(0x100), Some(0x200));
-        assert_eq!(REF_COUNT.load(Ordering::Relaxed), 1);
+        let stmt = make_stmt("SELECT 1");
+        cache.register(0x100, stmt as usize);
+        assert_eq!(cache.find(0x100), Some(stmt as usize));
+        assert_eq!(ref_count(stmt), 2);
+
+        cache.clear(0x100);
+        assert_eq!(cache.find(0x100), None);
+        assert_eq!(ref_count(stmt), 1);
+
+        rust_stmt_unref(stmt);
     }
 
     #[test]
@@ -864,163 +1564,120 @@ mod tests {
 
     #[test]
     fn tls_cache_replace_unrefs_old() {
-        static REF_COUNT_A: AtomicI32 = AtomicI32::new(0);
-        static REF_COUNT_B: AtomicI32 = AtomicI32::new(0);
-
         let mut cache = ThreadCachedStmts::new();
+        let stmt_a = make_stmt("SELECT 1");
+        let stmt_b = make_stmt("SELECT 2");
 
         // Register first stmt
-        cache.register(
-            0x100,
-            0x200,
-            |p| {
-                if p == 0x200 {
-                    REF_COUNT_A.fetch_add(1, Ordering::Relaxed);
-                }
-                if p == 0x300 {
-                    REF_COUNT_B.fetch_add(1, Ordering::Relaxed);
-                }
-            },
-            |p| {
-                if p == 0x200 {
-                    REF_COUNT_A.fetch_sub(1, Ordering::Relaxed);
-                }
-                if p == 0x300 {
-                    REF_COUNT_B.fetch_sub(1, Ordering::Relaxed);
-                }
-            },
-        );
-        assert_eq!(REF_COUNT_A.load(Ordering::Relaxed), 1);
+        cache.register(0x100, stmt_a as usize);
+        assert_eq!(ref_count(stmt_a), 2);
 
         // Replace with different pg_stmt
-        cache.register(
-            0x100,
-            0x300,
-            |p| {
-                if p == 0x200 {
-                    REF_COUNT_A.fetch_add(1, Ordering::Relaxed);
-                }
-                if p == 0x300 {
-                    REF_COUNT_B.fetch_add(1, Ordering::Relaxed);
-                }
-            },
-            |p| {
-                if p == 0x200 {
-                    REF_COUNT_A.fetch_sub(1, Ordering::Relaxed);
-                }
-                if p == 0x300 {
-                    REF_COUNT_B.fetch_sub(1, Ordering::Relaxed);
-                }
-            },
-        );
+        cache.register(0x100, stmt_b as usize);
 
         // Old should be unreffed, new should be reffed
-        assert_eq!(REF_COUNT_A.load(Ordering::Relaxed), 0);
-        assert_eq!(REF_COUNT_B.load(Ordering::Relaxed), 1);
-        assert_eq!(cache.find(0x100), Some(0x300));
+        assert_eq!(ref_count(stmt_a), 1);
+        assert_eq!(ref_count(stmt_b), 2);
+        assert_eq!(cache.find(0x100), Some(stmt_b as usize));
+
+        cache.clear(0x100);
+        assert_eq!(cache.find(0x100), None);
+        assert_eq!(ref_count(stmt_b), 1);
+
+        rust_stmt_unref(stmt_a);
+        rust_stmt_unref(stmt_b);
     }
 
     #[test]
     fn tls_cache_clear_unrefs() {
-        static REFS: AtomicI32 = AtomicI32::new(0);
-
         let mut cache = ThreadCachedStmts::new();
-        cache.register(
-            0x100,
-            0x200,
-            |_| {
-                REFS.fetch_add(1, Ordering::Relaxed);
-            },
-            |_| {
-                REFS.fetch_sub(1, Ordering::Relaxed);
-            },
-        );
-        assert_eq!(REFS.load(Ordering::Relaxed), 1);
+        let stmt = make_stmt("SELECT 1");
+        cache.register(0x100, stmt as usize);
+        assert_eq!(ref_count(stmt), 2);
 
-        cache.clear(0x100, |_| {
-            REFS.fetch_sub(1, Ordering::Relaxed);
-        });
-        assert_eq!(REFS.load(Ordering::Relaxed), 0);
+        cache.clear(0x100);
+        assert_eq!(ref_count(stmt), 1);
         assert_eq!(cache.find(0x100), None);
+
+        rust_stmt_unref(stmt);
     }
 
     #[test]
     fn tls_cache_clear_weak_does_not_unref() {
-        static REFS: AtomicI32 = AtomicI32::new(0);
-
         let mut cache = ThreadCachedStmts::new();
-        cache.register(
-            0x100,
-            0x200,
-            |_| {
-                REFS.fetch_add(1, Ordering::Relaxed);
-            },
-            |_| {
-                REFS.fetch_sub(1, Ordering::Relaxed);
-            },
-        );
-        assert_eq!(REFS.load(Ordering::Relaxed), 1);
+        let stmt = make_stmt("SELECT 1");
+        cache.register(0x100, stmt as usize);
+        assert_eq!(ref_count(stmt), 2);
 
         cache.clear_weak(0x100);
         // ref_count should NOT change — weak clear
-        assert_eq!(REFS.load(Ordering::Relaxed), 1);
+        assert_eq!(ref_count(stmt), 2);
         assert_eq!(cache.find(0x100), None);
+
+        rust_stmt_unref(stmt);
+        rust_stmt_unref(stmt);
     }
 
     #[test]
     fn tls_cache_fifo_eviction() {
-        static EVICTED: AtomicI32 = AtomicI32::new(0);
-
         let mut cache = ThreadCachedStmts::new();
+        let mut stmts: Vec<*mut PgStmt> = Vec::new();
 
         // Fill cache to max
         for i in 0..MAX_CACHED_STMTS_PER_THREAD {
-            cache.register(
-                0x1000 + i,
-                0x2000 + i,
-                |_| {},
-                |_| {
-                    EVICTED.fetch_add(1, Ordering::Relaxed);
-                },
-            );
+            let stmt = make_stmt("SELECT 1");
+            cache.register(0x1000 + i, stmt as usize);
+            stmts.push(stmt);
         }
         assert_eq!(cache.entries.len(), MAX_CACHED_STMTS_PER_THREAD);
-        assert_eq!(EVICTED.load(Ordering::Relaxed), 0);
 
         // One more — should evict oldest (0x1000 → 0x2000)
-        cache.register(
-            0x9999,
-            0x8888,
-            |_| {},
-            |_| {
-                EVICTED.fetch_add(1, Ordering::Relaxed);
-            },
-        );
-        assert_eq!(EVICTED.load(Ordering::Relaxed), 1);
+        let extra = make_stmt("SELECT 2");
+        cache.register(0x9999, extra as usize);
+        stmts.push(extra);
         assert_eq!(cache.find(0x1000), None); // evicted
-        assert_eq!(cache.find(0x9999), Some(0x8888)); // new entry
+        assert_eq!(cache.find(0x9999), Some(extra as usize)); // new entry
+
+        // Drop cached refs, then drop initial refs.
+        let cached = cache.drain_all();
+        for pg_stmt in cached {
+            rust_stmt_unref(pg_stmt as *mut PgStmt);
+        }
+        for stmt in stmts {
+            rust_stmt_unref(stmt);
+        }
     }
 
     #[test]
     fn tls_cache_drain_all_returns_all_pg_stmts() {
         let mut cache = ThreadCachedStmts::new();
-        cache.register(0x100, 0x200, |_| {}, |_| {});
-        cache.register(0x300, 0x400, |_| {}, |_| {});
+        let stmt_a = make_stmt("SELECT 1");
+        let stmt_b = make_stmt("SELECT 2");
+        cache.register(0x100, stmt_a as usize);
+        cache.register(0x300, stmt_b as usize);
 
         let drained = cache.drain_all();
         assert_eq!(drained.len(), 2);
-        assert!(drained.contains(&0x200));
-        assert!(drained.contains(&0x400));
+        assert!(drained.contains(&(stmt_a as usize)));
+        assert!(drained.contains(&(stmt_b as usize)));
         assert!(cache.entries.is_empty());
+
+        for pg_stmt in drained {
+            rust_stmt_unref(pg_stmt as *mut PgStmt);
+        }
+        rust_stmt_unref(stmt_a);
+        rust_stmt_unref(stmt_b);
     }
 
     // ── TLS cache: thread isolation ──────────────────────────────────────────
 
     #[test]
     fn tls_cache_is_thread_local() {
+        let stmt = make_stmt("SELECT 1");
+
         // Register on this thread
         with_tls_cache(|cache| {
-            cache.register(0xAAAA, 0xBBBB, |_| {}, |_| {});
+            cache.register(0xAAAA, stmt as usize);
         });
 
         // Other thread should not see it
@@ -1031,8 +1688,10 @@ mod tests {
 
         // Cleanup
         with_tls_cache(|cache| {
-            cache.clear_weak(0xAAAA);
+            cache.clear(0xAAAA);
         });
+
+        rust_stmt_unref(stmt);
     }
 
     // ── pg_value pool ────────────────────────────────────────────────────────
@@ -1103,22 +1762,24 @@ mod tests {
     #[test]
     fn ffi_find_any_falls_back_to_tls() {
         let s = 0x50000_usize;
-        let p = 0x60000_usize;
+        let stmt = make_stmt("SELECT 1");
 
         // Not in registry
         assert_eq!(rust_stmt_find(s), 0);
 
         // Add to TLS cache
         with_tls_cache(|cache| {
-            cache.register(s, p, |_| {}, |_| {});
+            cache.register(s, stmt as usize);
         });
 
-        assert_eq!(rust_stmt_find_any(s), p);
+        assert_eq!(rust_stmt_find_any(s), stmt as usize);
 
         // Cleanup
         with_tls_cache(|cache| {
-            cache.clear_weak(s);
+            cache.clear(s);
         });
+
+        rust_stmt_unref(stmt);
     }
 
     // ── Existing tests (OID mapping, upsert, metadata ID) ────────────────────
@@ -1438,5 +2099,49 @@ mod tests {
         let sql = cs("select id from t");
         let rc = rust_decltype_special_case(23, col.as_ptr(), sql.as_ptr(), 123);
         assert_eq!(rc, DECLTYPE_CASE_NONE);
+    }
+
+    #[test]
+    fn stmt_free_sweeps_extra_param_values_without_crash() {
+        unsafe {
+            let sql = cs("SELECT 1");
+            let stmt = rust_stmt_create(std::ptr::null_mut(), sql.as_ptr(), std::ptr::null_mut());
+            assert!(!stmt.is_null());
+
+            (*stmt).param_count = 1;
+
+            let a = libc::malloc(16) as *mut c_char;
+            let b = libc::malloc(1024 * 1024) as *mut c_char;
+            assert!(!a.is_null());
+            assert!(!b.is_null());
+
+            (*stmt).param_values[0] = a;
+            (*stmt).param_values[200] = b;
+
+            (*stmt).ref_count.store(0, Ordering::Release);
+            rust_stmt_free(stmt);
+        }
+    }
+
+    #[test]
+    fn stmt_unref_cleans_bind_index_mismatch_slots() {
+        unsafe {
+            let sql = cs("SELECT ?");
+            let stmt = rust_stmt_create(std::ptr::null_mut(), sql.as_ptr(), std::ptr::null_mut());
+            assert!(!stmt.is_null());
+
+            (*stmt).param_count = 1;
+
+            for i in 1..16 {
+                let buf = libc::malloc(256) as *mut c_char;
+                assert!(!buf.is_null());
+                *buf = b'x' as c_char;
+                *buf.add(1) = 0;
+                (*stmt).param_values[i] = buf;
+            }
+
+            (*stmt).ref_count.store(1, Ordering::Release);
+            rust_stmt_unref(stmt);
+        }
     }
 }

@@ -9,7 +9,9 @@
 ///   sql_translator_translation_free()— free sql + param_names inside a SqlTranslation
 use std::cell::RefCell;
 use std::ffi::{CStr, CString};
-use std::os::raw::c_char;
+use std::os::raw::{c_char, c_void};
+use std::mem::size_of;
+use std::ptr;
 
 // ─── Thread-local error storage ───────────────────────────────────────────────
 
@@ -20,9 +22,94 @@ thread_local! {
 fn set_last_error(msg: &str) {
     // Replace any interior NUL bytes so CString::new() never panics.
     let safe = msg.replace('\0', "<NUL>");
-    LAST_ERROR.with(|cell| {
+    let _ = LAST_ERROR.try_with(|cell| {
         *cell.borrow_mut() = CString::new(safe).ok();
     });
+}
+
+// ─── sql_translate cache (C ABI compatibility) ───────────────────────────────
+
+const CACHE_SIZE: usize = 256;
+
+#[derive(Clone)]
+struct CacheEntry {
+    hash: u64,
+    input: String,
+    sql: String,
+    param_names: Vec<Option<String>>,
+}
+
+struct TranslationCache {
+    entries: Vec<Option<CacheEntry>>,
+}
+
+impl TranslationCache {
+    fn new() -> Self {
+        Self {
+            entries: vec![None; CACHE_SIZE],
+        }
+    }
+}
+
+thread_local! {
+    static TRANSLATION_CACHE: RefCell<TranslationCache> = RefCell::new(TranslationCache::new());
+}
+
+fn hash_sql_bytes(bytes: &[u8]) -> u64 {
+    let mut h = 14695981039346656037u64;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(1099511628211u64);
+    }
+    h
+}
+
+fn cache_lookup(sql: &str, hash: u64) -> Option<CacheEntry> {
+    TRANSLATION_CACHE
+        .try_with(|cell| {
+            let cache = cell.borrow();
+            let idx = (hash % CACHE_SIZE as u64) as usize;
+            if let Some(entry) = &cache.entries[idx] {
+                if entry.hash == hash && entry.input == sql {
+                    return Some(entry.clone());
+                }
+            }
+            None
+        })
+        .ok()
+        .flatten()
+}
+
+fn cache_store(sql: &str, hash: u64, translated: &str, param_names: &[Option<String>]) {
+    let entry = CacheEntry {
+        hash,
+        input: sql.to_string(),
+        sql: translated.to_string(),
+        param_names: param_names.to_vec(),
+    };
+    let _ = TRANSLATION_CACHE.try_with(|cell| {
+        let mut cache = cell.borrow_mut();
+        let idx = (hash % CACHE_SIZE as u64) as usize;
+        cache.entries[idx] = Some(entry);
+    });
+}
+
+fn write_error(buf: &mut [u8; 256], msg: &str) {
+    let bytes = msg.as_bytes();
+    let len = bytes.len().min(buf.len() - 1);
+    buf[..len].copy_from_slice(&bytes[..len]);
+    buf[len] = 0;
+}
+
+unsafe fn dup_c_bytes(bytes: &[u8]) -> *mut c_char {
+    let len = bytes.len();
+    let alloc = libc::malloc(len + 1) as *mut u8;
+    if alloc.is_null() {
+        return ptr::null_mut();
+    }
+    ptr::copy_nonoverlapping(bytes.as_ptr(), alloc, len);
+    *alloc.add(len) = 0;
+    alloc as *mut c_char
 }
 
 // ─── Simple translate / free ──────────────────────────────────────────────────
@@ -81,12 +168,14 @@ pub extern "C" fn sql_translator_free(ptr: *mut c_char) {
 /// Returns NULL if no error has been recorded yet.
 #[no_mangle]
 pub extern "C" fn sql_translator_last_error() -> *const c_char {
-    LAST_ERROR.with(|cell| {
+    LAST_ERROR
+        .try_with(|cell| {
         cell.borrow()
             .as_ref()
             .map(|cs| cs.as_ptr())
             .unwrap_or(std::ptr::null())
     })
+        .unwrap_or(std::ptr::null())
 }
 
 // ─── Full struct API ──────────────────────────────────────────────────────────
@@ -199,6 +288,183 @@ pub extern "C" fn sql_translator_translate_full(sql: *const c_char) -> SqlTransl
 
     result
 }
+
+// ─── C-compatible sql_translate() (cached) ───────────────────────────────────
+
+#[no_mangle]
+pub extern "C" fn sql_translate(sqlite_sql: *const c_char) -> SqlTranslation {
+    let mut result = SqlTranslation {
+        sql: ptr::null_mut(),
+        param_count: 0,
+        param_names: ptr::null_mut(),
+        success: 0,
+        error: [0u8; 256],
+    };
+
+    if sqlite_sql.is_null() {
+        write_error(&mut result.error, "NULL input SQL");
+        return result;
+    }
+
+    let sql_cstr = unsafe { CStr::from_ptr(sqlite_sql) };
+    let sql_str = match sql_cstr.to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            write_error(&mut result.error, &format!("invalid UTF-8 input: {e}"));
+            return result;
+        }
+    };
+
+    let hash = hash_sql_bytes(sql_cstr.to_bytes());
+    if let Some(entry) = cache_lookup(sql_str, hash) {
+        let sql_dup = unsafe { dup_c_bytes(entry.sql.as_bytes()) };
+        if sql_dup.is_null() {
+            write_error(&mut result.error, "out of memory");
+            return result;
+        }
+        result.sql = sql_dup;
+        result.param_count = entry.param_names.len() as i32;
+
+        if !entry.param_names.is_empty() {
+            let arr = unsafe {
+                libc::calloc(entry.param_names.len(), size_of::<*mut c_char>()) as *mut *mut c_char
+            };
+            if arr.is_null() {
+                unsafe {
+                    libc::free(result.sql as *mut c_void);
+                }
+                result.sql = ptr::null_mut();
+                write_error(&mut result.error, "out of memory");
+                return result;
+            }
+            for (i, name) in entry.param_names.iter().enumerate() {
+                let ptr = match name {
+                    Some(n) => unsafe { dup_c_bytes(n.as_bytes()) },
+                    None => ptr::null_mut(),
+                };
+                unsafe {
+                    *arr.add(i) = ptr;
+                }
+            }
+            result.param_names = arr;
+        }
+
+        result.success = 1;
+        return result;
+    }
+
+    let mut trans = sql_translator_translate_full(sqlite_sql);
+    if trans.success == 0 {
+        let err_bytes = &trans.error;
+        let len = err_bytes.iter().position(|&b| b == 0).unwrap_or(err_bytes.len());
+        let msg = String::from_utf8_lossy(&err_bytes[..len]).to_string();
+        write_error(&mut result.error, &msg);
+        sql_translator_translation_free(&mut trans as *mut SqlTranslation);
+        return result;
+    }
+
+    let mut cache_param_names: Vec<Option<String>> = Vec::new();
+    if trans.param_count > 0 {
+        let count = trans.param_count as usize;
+        if !trans.param_names.is_null() {
+            cache_param_names.reserve(count);
+            for i in 0..count {
+                let ptr_name = unsafe { *trans.param_names.add(i) };
+                if ptr_name.is_null() {
+                    cache_param_names.push(None);
+                } else {
+                    let name = unsafe { CStr::from_ptr(ptr_name) }
+                        .to_string_lossy()
+                        .into_owned();
+                    cache_param_names.push(Some(name));
+                }
+            }
+        }
+    }
+
+    if !trans.sql.is_null() {
+        let sql_bytes = unsafe { CStr::from_ptr(trans.sql).to_bytes() };
+        let sql_dup = unsafe { dup_c_bytes(sql_bytes) };
+        if sql_dup.is_null() {
+            write_error(&mut result.error, "out of memory");
+            sql_translator_translation_free(&mut trans as *mut SqlTranslation);
+            return result;
+        }
+        result.sql = sql_dup;
+    }
+
+    result.param_count = trans.param_count;
+    if trans.param_count > 0 {
+        let count = trans.param_count as usize;
+        let arr = unsafe { libc::calloc(count, size_of::<*mut c_char>()) as *mut *mut c_char };
+        if arr.is_null() {
+            if !result.sql.is_null() {
+                unsafe { libc::free(result.sql as *mut c_void) };
+                result.sql = ptr::null_mut();
+            }
+            write_error(&mut result.error, "out of memory");
+            sql_translator_translation_free(&mut trans as *mut SqlTranslation);
+            return result;
+        }
+        for i in 0..count {
+            let ptr_name = unsafe { *trans.param_names.add(i) };
+            let dup = if ptr_name.is_null() {
+                ptr::null_mut()
+            } else {
+                unsafe { dup_c_bytes(CStr::from_ptr(ptr_name).to_bytes()) }
+            };
+            unsafe {
+                *arr.add(i) = dup;
+            }
+        }
+        result.param_names = arr;
+    }
+
+    if !trans.sql.is_null() {
+        let sql_str_cached = unsafe { CStr::from_ptr(trans.sql).to_string_lossy().into_owned() };
+        cache_store(sql_str, hash, &sql_str_cached, &cache_param_names);
+    }
+
+    sql_translator_translation_free(&mut trans as *mut SqlTranslation);
+    result.success = 1;
+    result
+}
+
+#[no_mangle]
+pub extern "C" fn sql_translation_free(result: *mut SqlTranslation) {
+    if result.is_null() {
+        return;
+    }
+    unsafe {
+        let r = &mut *result;
+        if !r.sql.is_null() {
+            libc::free(r.sql as *mut c_void);
+            r.sql = ptr::null_mut();
+        }
+        if !r.param_names.is_null() && r.param_count > 0 {
+            for i in 0..(r.param_count as usize) {
+                let ptr_name = *r.param_names.add(i);
+                if !ptr_name.is_null() {
+                    libc::free(ptr_name as *mut c_void);
+                }
+            }
+            libc::free(r.param_names as *mut c_void);
+            r.param_names = ptr::null_mut();
+        }
+        r.param_count = 0;
+        r.success = 0;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn sql_translator_init() {
+    if let Ok(msg) = CString::new("sql_translator: Rust (sqlparser-rs) backend active") {
+        crate::pg_logging::rust_logging_write(1, msg.as_ptr());
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn sql_translator_cleanup() {}
 
 /// Free the param_names array and its contents.
 fn free_param_names(arr: *mut *mut c_char, count: usize) {

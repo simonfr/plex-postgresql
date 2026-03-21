@@ -1,7 +1,10 @@
-use std::ffi::CStr;
+use std::collections::HashMap;
+use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::os::raw::c_int;
 use std::os::raw::c_uint;
+use std::os::raw::c_void;
+use std::sync::{LazyLock, RwLock};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use crate::db_interpose_prepare_helpers::{
@@ -14,7 +17,10 @@ use crate::db_interpose_trace_helpers::{
 };
 use crate::db_interpose_value_helpers::{
     pg_oid_to_sqlite_type_impl, pg_text_to_double_impl, pg_text_to_int64_impl, pg_text_to_int_impl,
+    SQLITE_BLOB_CONST, SQLITE_FLOAT_CONST, SQLITE_INTEGER_CONST, SQLITE_TEXT_CONST,
 };
+pub use crate::libpq_helpers::PGresult;
+use crate::pg_query_cache::rust_query_cache_store;
 
 static TYPE_INTEGER: &[u8] = b"INTEGER\0";
 static TYPE_REAL: &[u8] = b"REAL\0";
@@ -22,6 +28,23 @@ static TYPE_TEXT: &[u8] = b"TEXT\0";
 static TYPE_BLOB: &[u8] = b"BLOB\0";
 static TYPE_NUMERIC: &[u8] = b"NUMERIC\0";
 static TYPE_DT_INTEGER_8: &[u8] = b"dt_integer(8)\0";
+const SQLITE_NULL_CONST: i32 = 5;
+
+static DECLTYPE_CACHE: LazyLock<RwLock<HashMap<String, CString>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+static OID_TABLE_CACHE: LazyLock<RwLock<HashMap<u32, CString>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+extern "C" {
+    fn PQgetisnull(res: *const PGresult, row: c_int, col: c_int) -> c_int;
+    fn PQgetvalue(res: *const PGresult, row: c_int, col: c_int) -> *const c_char;
+    fn PQgetlength(res: *const PGresult, row: c_int, col: c_int) -> c_int;
+    fn PQftype(res: *const PGresult, col: c_int) -> c_uint;
+    fn PQfname(res: *const PGresult, col: c_int) -> *const c_char;
+    fn PQftable(res: *const PGresult, col: c_int) -> c_uint;
+    fn PQntuples(res: *const PGresult) -> c_int;
+    fn PQnfields(res: *const PGresult) -> c_int;
+}
 
 #[inline]
 fn cstr_to_str<'a>(ptr: *const c_char) -> Option<&'a str> {
@@ -180,6 +203,61 @@ fn push_capped(buf: &mut Vec<u8>, out_cap: usize, bytes: &[u8]) {
     buf.extend_from_slice(&bytes[..take]);
 }
 
+fn rewrite_server_library_uri_bytes(input_bytes: &[u8], out_cap: usize) -> Option<Vec<u8>> {
+    const SERVER_PREFIX: &[u8] = b"server://";
+    const NEEDLE: &[u8] = b"/com.plexapp.plugins.library/library/";
+    const REPLACEMENT: &[u8] = b"library://";
+
+    if find_subslice(input_bytes, SERVER_PREFIX).is_none()
+        || find_subslice(input_bytes, NEEDLE).is_none()
+    {
+        return None;
+    }
+
+    let mut out_buf = Vec::with_capacity(input_bytes.len().min(out_cap));
+    let mut in_pos = 0usize;
+    let mut rewrites = 0;
+
+    while in_pos < input_bytes.len() {
+        if out_buf.len() >= out_cap {
+            break;
+        }
+        let slice = &input_bytes[in_pos..];
+        let Some(rel_match) = find_subslice(slice, SERVER_PREFIX) else {
+            push_capped(&mut out_buf, out_cap, slice);
+            break;
+        };
+        let abs_match = in_pos + rel_match;
+        push_capped(&mut out_buf, out_cap, &input_bytes[in_pos..abs_match]);
+        in_pos = abs_match;
+
+        let search_start = in_pos + SERVER_PREFIX.len();
+        if search_start >= input_bytes.len() {
+            push_capped(&mut out_buf, out_cap, &input_bytes[in_pos..]);
+            break;
+        }
+
+        let tail = &input_bytes[search_start..];
+        let Some(rel_lib) = find_subslice(tail, NEEDLE) else {
+            push_capped(&mut out_buf, out_cap, &input_bytes[in_pos..search_start]);
+            in_pos = search_start;
+            continue;
+        };
+        let abs_lib = search_start + rel_lib;
+        let lib_end = abs_lib + NEEDLE.len();
+
+        push_capped(&mut out_buf, out_cap, REPLACEMENT);
+        in_pos = lib_end;
+        rewrites += 1;
+    }
+
+    if rewrites == 0 {
+        None
+    } else {
+        Some(out_buf)
+    }
+}
+
 fn starts_with_ascii_icase_at(haystack: &[u8], at: usize, pat: &[u8]) -> bool {
     if haystack.len() < at + pat.len() {
         return false;
@@ -208,6 +286,61 @@ fn find_ascii_icase_from(haystack: &[u8], start: usize, pat: &[u8]) -> Option<us
         i += 1;
     }
     None
+}
+
+fn contains_ascii_icase_str(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let hay = haystack.as_bytes();
+    let ned = needle.as_bytes();
+    if hay.len() < ned.len() {
+        return false;
+    }
+    hay.windows(ned.len()).any(|w| w.eq_ignore_ascii_case(ned))
+}
+
+fn is_aggregate_alias(col: &str) -> bool {
+    if col.is_empty() {
+        return false;
+    }
+    let lower = col.to_ascii_lowercase();
+    matches!(lower.as_str(), "count" | "sum" | "max" | "min" | "avg")
+        || contains_ascii_icase_str(col, "count(")
+}
+
+fn pg_sql_has_timestamp_hint(pg_sql: &str) -> bool {
+    pg_sql.contains("_at")
+        || pg_sql.contains("changed_at")
+        || pg_sql.contains("updated_at")
+        || pg_sql.contains("created_at")
+}
+
+fn write_i64_to_buf(out: *mut c_char, out_len: usize, val: i64) -> bool {
+    if out.is_null() || out_len == 0 {
+        return false;
+    }
+    let fmt = b"%lld\0";
+    unsafe {
+        libc::snprintf(
+            out,
+            out_len,
+            fmt.as_ptr() as *const c_char,
+            val as libc::c_longlong,
+        );
+    }
+    true
+}
+
+fn write_i32_to_buf(out: *mut c_char, out_len: usize, val: i32) -> bool {
+    if out.is_null() || out_len == 0 {
+        return false;
+    }
+    let fmt = b"%d\0";
+    unsafe {
+        libc::snprintf(out, out_len, fmt.as_ptr() as *const c_char, val as libc::c_int);
+    }
+    true
 }
 
 fn is_prev_numeric_boundary(prev: u8) -> bool {
@@ -551,6 +684,996 @@ pub extern "C" fn rust_decltype_hash(ptr: *const c_char) -> u32 {
 }
 
 #[no_mangle]
+pub extern "C" fn rust_decltype_cache_insert(key: *const c_char, decltype_val: *const c_char) -> c_int {
+    let key_str = match cstr_to_str(key) {
+        Some(s) if !s.is_empty() => s,
+        _ => return 0,
+    };
+
+    let normalized = normalize_sqlite_decltype_impl(cstr_to_str(decltype_val));
+    if normalized.is_null() {
+        return 0;
+    }
+    let normalized_bytes = unsafe { CStr::from_ptr(normalized).to_bytes() };
+    let normalized_owned = match CString::new(normalized_bytes) {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    let mut cache = match DECLTYPE_CACHE.write() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    cache.insert(key_str.to_string(), normalized_owned);
+    1
+}
+
+#[no_mangle]
+pub extern "C" fn rust_decltype_cache_lookup(key: *const c_char) -> *const c_char {
+    let key_str = match cstr_to_str(key) {
+        Some(s) if !s.is_empty() => s,
+        _ => return std::ptr::null(),
+    };
+    let cache = match DECLTYPE_CACHE.read() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    cache
+        .get(key_str)
+        .map(|s| s.as_ptr())
+        .unwrap_or(std::ptr::null())
+}
+
+#[no_mangle]
+pub extern "C" fn rust_oid_table_cache_insert(oid: c_uint, name: *const c_char) -> c_int {
+    let name_str = match cstr_to_str(name) {
+        Some(s) if !s.is_empty() => s,
+        _ => return 0,
+    };
+    let cstr = match CString::new(name_str) {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+
+    let mut cache = match OID_TABLE_CACHE.write() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    cache.entry(oid as u32).or_insert(cstr);
+    1
+}
+
+#[no_mangle]
+pub extern "C" fn rust_oid_table_cache_lookup(oid: c_uint) -> *const c_char {
+    let cache = match OID_TABLE_CACHE.read() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    cache
+        .get(&(oid as u32))
+        .map(|s| s.as_ptr())
+        .unwrap_or(std::ptr::null())
+}
+
+#[no_mangle]
+pub extern "C" fn rust_column_text_reformat_aggregate(
+    col_name: *const c_char,
+    oid: c_uint,
+    pg_sql: *const c_char,
+    source_value: *const c_char,
+    out: *mut c_char,
+    out_len: usize,
+) -> c_int {
+    if out.is_null() || out_len == 0 {
+        return 0;
+    }
+
+    let col = match cstr_to_str(col_name) {
+        Some(s) if !s.is_empty() => s,
+        _ => return 0,
+    };
+
+    if !matches!(oid, 20 | 21 | 23) {
+        return 0;
+    }
+
+    if !is_aggregate_alias(col) {
+        return 0;
+    }
+
+    if oid == 20 {
+        let val = pg_text_to_int64_impl(source_value);
+        let pg_sql = cstr_to_str(pg_sql).unwrap_or("");
+        if (col.eq_ignore_ascii_case("max") || col.eq_ignore_ascii_case("min"))
+            && !pg_sql.is_empty()
+            && pg_sql_has_timestamp_hint(pg_sql)
+            && format_epoch_to_datetime_utc_impl(val, out, out_len) != 0
+        {
+            return 1;
+        }
+        return c_int::from(write_i64_to_buf(out, out_len, val));
+    }
+
+    let val = pg_text_to_int_impl(source_value);
+    c_int::from(write_i32_to_buf(out, out_len, val))
+}
+
+#[no_mangle]
+pub extern "C" fn rust_column_text_transform(
+    col_name: *const c_char,
+    oid: c_uint,
+    pg_sql: *const c_char,
+    source_value: *const c_char,
+    source_len: usize,
+    out: *mut c_char,
+    out_len: usize,
+) -> c_int {
+    if out.is_null() || out_len == 0 || source_value.is_null() {
+        return 0;
+    }
+
+    // Validate UTF-8 first.
+    let bytes = unsafe { std::slice::from_raw_parts(source_value as *const u8, source_len) };
+    if std::str::from_utf8(bytes).is_err() {
+        unsafe {
+            *out = 0;
+        }
+        return -1;
+    }
+
+    // Aggregate reformat for integer columns if needed.
+    if rust_column_text_reformat_aggregate(col_name, oid, pg_sql, source_value, out, out_len) != 0 {
+        return 1;
+    }
+
+    // URI rewrite.
+    let out_cap = out_len.saturating_sub(1);
+    if let Some(rewritten) = rewrite_server_library_uri_bytes(bytes, out_cap) {
+        let n = rewritten.len().min(out_cap);
+        unsafe {
+            std::ptr::copy_nonoverlapping(rewritten.as_ptr(), out as *mut u8, n);
+            *out.add(n) = 0;
+        }
+        return 1;
+    }
+
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn rust_decode_hex_bytes(
+    hex: *const c_char,
+    hex_len: usize,
+    out: *mut u8,
+    out_len: usize,
+) -> c_int {
+    if hex.is_null() || out.is_null() {
+        return 0;
+    }
+    if hex_len == 0 || (hex_len % 2) != 0 {
+        return 0;
+    }
+    let expected = hex_len / 2;
+    if out_len < expected {
+        return 0;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(hex as *const u8, hex_len) };
+
+    fn hex_val(b: u8) -> Option<u8> {
+        match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            b'A'..=b'F' => Some(b - b'A' + 10),
+            _ => None,
+        }
+    }
+
+    let out_slice = unsafe { std::slice::from_raw_parts_mut(out, expected) };
+    for i in 0..expected {
+        let hi = match hex_val(bytes[i * 2]) {
+            Some(v) => v,
+            None => return 0,
+        };
+        let lo = match hex_val(bytes[i * 2 + 1]) {
+            Some(v) => v,
+            None => return 0,
+        };
+        out_slice[i] = (hi << 4) | lo;
+    }
+    expected as c_int
+}
+
+#[no_mangle]
+pub extern "C" fn rust_expected_sqlite_type_for_decltype(decl: *const c_char) -> c_int {
+    let norm = normalize_sqlite_decltype_impl(cstr_to_str(decl));
+    if norm.is_null() {
+        return -1;
+    }
+    let norm_bytes = unsafe { CStr::from_ptr(norm) }.to_bytes();
+    if norm_bytes.eq_ignore_ascii_case(b"INTEGER") || norm_bytes.eq_ignore_ascii_case(b"dt_integer(8)") {
+        return SQLITE_INTEGER_CONST;
+    }
+    if norm_bytes.eq_ignore_ascii_case(b"TEXT") {
+        return SQLITE_TEXT_CONST;
+    }
+    if norm_bytes.eq_ignore_ascii_case(b"REAL") {
+        return SQLITE_FLOAT_CONST;
+    }
+    if norm_bytes.eq_ignore_ascii_case(b"BLOB") {
+        return SQLITE_BLOB_CONST;
+    }
+    -1
+}
+
+#[no_mangle]
+pub extern "C" fn rust_decltype_cache_lookup_alias(alias: *const c_char) -> *const c_char {
+    let alias_str = match cstr_to_str(alias) {
+        Some(s) if !s.is_empty() => s,
+        _ => return std::ptr::null(),
+    };
+    let Some((table, column)) = alias_str.split_once('_') else {
+        return std::ptr::null();
+    };
+    if table.is_empty() || column.is_empty() {
+        return std::ptr::null();
+    }
+    let key = format!("{}_{}", table, column);
+    let cache = match DECLTYPE_CACHE.read() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    cache
+        .get(&key)
+        .map(|s| s.as_ptr())
+        .unwrap_or(std::ptr::null())
+}
+
+#[no_mangle]
+pub extern "C" fn rust_pg_result_text_copy(
+    result: *const PGresult,
+    row: c_int,
+    col: c_int,
+    out: *mut c_char,
+    out_len: usize,
+) -> c_int {
+    if result.is_null() || out.is_null() || out_len == 0 {
+        return -1;
+    }
+    let is_null = unsafe { PQgetisnull(result, row, col) } != 0;
+    if is_null {
+        return -1;
+    }
+    let val_ptr = unsafe { PQgetvalue(result, row, col) };
+    if val_ptr.is_null() {
+        return -1;
+    }
+    let len = unsafe { PQgetlength(result, row, col) };
+    if len < 0 {
+        return -1;
+    }
+    let len_usize = len as usize;
+    let copy_len = len_usize.min(out_len.saturating_sub(1));
+    unsafe {
+        std::ptr::copy_nonoverlapping(val_ptr as *const u8, out as *mut u8, copy_len);
+        *out.add(copy_len) = 0;
+    }
+    len
+}
+
+#[no_mangle]
+pub extern "C" fn rust_pg_result_blob_copy(
+    result: *const PGresult,
+    row: c_int,
+    col: c_int,
+    out: *mut u8,
+    out_len: usize,
+) -> c_int {
+    if result.is_null() || out.is_null() || out_len == 0 {
+        return -1;
+    }
+    let is_null = unsafe { PQgetisnull(result, row, col) } != 0;
+    if is_null {
+        return -1;
+    }
+    let val_ptr = unsafe { PQgetvalue(result, row, col) };
+    if val_ptr.is_null() {
+        return -1;
+    }
+    let len = unsafe { PQgetlength(result, row, col) };
+    if len <= 0 {
+        return -1;
+    }
+    let len_usize = len as usize;
+    let copy_len = len_usize.min(out_len);
+    unsafe {
+        std::ptr::copy_nonoverlapping(val_ptr as *const u8, out, copy_len);
+    }
+    copy_len as c_int
+}
+
+#[no_mangle]
+pub extern "C" fn rust_pg_result_length(result: *const PGresult, row: c_int, col: c_int) -> c_int {
+    if result.is_null() {
+        return -1;
+    }
+    let is_null = unsafe { PQgetisnull(result, row, col) } != 0;
+    if is_null {
+        return -1;
+    }
+    unsafe { PQgetlength(result, row, col) }
+}
+
+#[no_mangle]
+pub extern "C" fn rust_pg_result_int(result: *const PGresult, row: c_int, col: c_int) -> c_int {
+    if result.is_null() {
+        return 0;
+    }
+    let is_null = unsafe { PQgetisnull(result, row, col) } != 0;
+    if is_null {
+        return 0;
+    }
+    let val_ptr = unsafe { PQgetvalue(result, row, col) };
+    if val_ptr.is_null() {
+        return 0;
+    }
+    pg_text_to_int_impl(val_ptr)
+}
+
+#[no_mangle]
+pub extern "C" fn rust_pg_result_int64(result: *const PGresult, row: c_int, col: c_int) -> i64 {
+    if result.is_null() {
+        return 0;
+    }
+    let is_null = unsafe { PQgetisnull(result, row, col) } != 0;
+    if is_null {
+        return 0;
+    }
+    let val_ptr = unsafe { PQgetvalue(result, row, col) };
+    if val_ptr.is_null() {
+        return 0;
+    }
+    pg_text_to_int64_impl(val_ptr)
+}
+
+#[no_mangle]
+pub extern "C" fn rust_pg_result_double(result: *const PGresult, row: c_int, col: c_int) -> f64 {
+    if result.is_null() {
+        return 0.0;
+    }
+    let is_null = unsafe { PQgetisnull(result, row, col) } != 0;
+    if is_null {
+        return 0.0;
+    }
+    let val_ptr = unsafe { PQgetvalue(result, row, col) };
+    if val_ptr.is_null() {
+        return 0.0;
+    }
+    pg_text_to_double_impl(val_ptr)
+}
+
+#[no_mangle]
+pub extern "C" fn rust_pg_result_text_transform_copy(
+    result: *const PGresult,
+    row: c_int,
+    col: c_int,
+    col_name: *const c_char,
+    oid: c_uint,
+    pg_sql: *const c_char,
+    is_null: c_int,
+    out: *mut c_char,
+    out_len: usize,
+    preview: *mut c_char,
+    preview_len: usize,
+    source_len_out: *mut usize,
+) -> c_int {
+    if result.is_null() || out.is_null() || out_len == 0 {
+        if !out.is_null() && out_len > 0 {
+            unsafe {
+                *out = 0;
+            }
+        }
+        if !preview.is_null() && preview_len > 0 {
+            unsafe {
+                *preview = 0;
+            }
+        }
+        if !source_len_out.is_null() {
+            unsafe {
+                *source_len_out = 0;
+            }
+        }
+        return -3;
+    }
+
+    if is_null != 0 {
+        unsafe {
+            *out = 0;
+        }
+        if !preview.is_null() && preview_len > 0 {
+            unsafe {
+                *preview = 0;
+            }
+        }
+        if !source_len_out.is_null() {
+            unsafe {
+                *source_len_out = 0;
+            }
+        }
+        return -2;
+    }
+
+    let val_ptr = unsafe { PQgetvalue(result, row, col) };
+    if val_ptr.is_null() {
+        unsafe {
+            *out = 0;
+        }
+        if !preview.is_null() && preview_len > 0 {
+            unsafe {
+                *preview = 0;
+            }
+        }
+        if !source_len_out.is_null() {
+            unsafe {
+                *source_len_out = 0;
+            }
+        }
+        return -2;
+    }
+
+    let len = unsafe { PQgetlength(result, row, col) };
+    if len < 0 {
+        unsafe {
+            *out = 0;
+        }
+        if !preview.is_null() && preview_len > 0 {
+            unsafe {
+                *preview = 0;
+            }
+        }
+        if !source_len_out.is_null() {
+            unsafe {
+                *source_len_out = 0;
+            }
+        }
+        return -3;
+    }
+    let len_usize = len as usize;
+    if !source_len_out.is_null() {
+        unsafe {
+            *source_len_out = len_usize;
+        }
+    }
+
+    if !preview.is_null() && preview_len > 0 {
+        let copy_len = len_usize.min(preview_len.saturating_sub(1));
+        unsafe {
+            std::ptr::copy_nonoverlapping(val_ptr as *const u8, preview as *mut u8, copy_len);
+            *preview.add(copy_len) = 0;
+        }
+    }
+
+    let transform_rc = rust_column_text_transform(
+        col_name,
+        oid,
+        pg_sql,
+        val_ptr,
+        len_usize,
+        out,
+        out_len,
+    );
+    if transform_rc != 0 {
+        return transform_rc;
+    }
+
+    let copy_len = len_usize.min(out_len.saturating_sub(1));
+    unsafe {
+        std::ptr::copy_nonoverlapping(val_ptr as *const u8, out as *mut u8, copy_len);
+        *out.add(copy_len) = 0;
+    }
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn rust_pg_result_value_ptr_len(
+    result: *const PGresult,
+    row: c_int,
+    col: c_int,
+    ptr_out: *mut *const c_char,
+    len_out: *mut c_int,
+    is_null_out: *mut c_int,
+) -> c_int {
+    if result.is_null() {
+        return 0;
+    }
+
+    let is_null = unsafe { PQgetisnull(result, row, col) };
+    if !is_null_out.is_null() {
+        unsafe {
+            *is_null_out = is_null;
+        }
+    }
+    if is_null != 0 {
+        if !ptr_out.is_null() {
+            unsafe {
+                *ptr_out = std::ptr::null();
+            }
+        }
+        if !len_out.is_null() {
+            unsafe {
+                *len_out = 0;
+            }
+        }
+        return 1;
+    }
+
+    let val_ptr = unsafe { PQgetvalue(result, row, col) };
+    if val_ptr.is_null() {
+        if !ptr_out.is_null() {
+            unsafe {
+                *ptr_out = std::ptr::null();
+            }
+        }
+        if !len_out.is_null() {
+            unsafe {
+                *len_out = 0;
+            }
+        }
+        return 0;
+    }
+    let len = unsafe { PQgetlength(result, row, col) };
+    if len < 0 {
+        if !ptr_out.is_null() {
+            unsafe {
+                *ptr_out = std::ptr::null();
+            }
+        }
+        if !len_out.is_null() {
+            unsafe {
+                *len_out = 0;
+            }
+        }
+        return 0;
+    }
+
+    if !ptr_out.is_null() {
+        unsafe {
+            *ptr_out = val_ptr;
+        }
+    }
+    if !len_out.is_null() {
+        unsafe {
+            *len_out = len;
+        }
+    }
+    1
+}
+
+#[no_mangle]
+pub extern "C" fn rust_pg_result_col_oid(result: *const PGresult, col: c_int) -> c_uint {
+    if result.is_null() {
+        return 0;
+    }
+    unsafe { PQftype(result, col) }
+}
+
+#[no_mangle]
+pub extern "C" fn rust_pg_result_col_table_oid(result: *const PGresult, col: c_int) -> c_uint {
+    if result.is_null() {
+        return 0;
+    }
+    unsafe { PQftable(result, col) }
+}
+
+#[no_mangle]
+pub extern "C" fn rust_pg_decode_bytea(
+    result: *const PGresult,
+    row: c_int,
+    col: c_int,
+    ptr_out: *mut *mut u8,
+    len_out: *mut c_int,
+    is_hex_out: *mut c_int,
+    is_null_out: *mut c_int,
+) -> c_int {
+    if result.is_null()
+        || ptr_out.is_null()
+        || len_out.is_null()
+        || is_hex_out.is_null()
+        || is_null_out.is_null()
+    {
+        return 0;
+    }
+
+    let is_null = unsafe { PQgetisnull(result, row, col) };
+    unsafe {
+        *is_null_out = is_null;
+    }
+    if is_null != 0 {
+        unsafe {
+            *ptr_out = std::ptr::null_mut();
+            *len_out = 0;
+            *is_hex_out = 0;
+        }
+        return 1;
+    }
+
+    let val_ptr = unsafe { PQgetvalue(result, row, col) };
+    if val_ptr.is_null() {
+        unsafe {
+            *ptr_out = std::ptr::null_mut();
+            *len_out = 0;
+            *is_hex_out = 0;
+        }
+        return 0;
+    }
+    let len = unsafe { PQgetlength(result, row, col) };
+    if len < 0 {
+        unsafe {
+            *ptr_out = std::ptr::null_mut();
+            *len_out = 0;
+            *is_hex_out = 0;
+        }
+        return 0;
+    }
+
+    let len_usize = len as usize;
+    let bytes = unsafe { std::slice::from_raw_parts(val_ptr as *const u8, len_usize) };
+    if len_usize < 2 || bytes[0] != b'\\' || bytes[1] != b'x' {
+        unsafe {
+            *ptr_out = val_ptr as *mut u8;
+            *len_out = len;
+            *is_hex_out = 0;
+        }
+        return 1;
+    }
+
+    let hex = &bytes[2..];
+    if (hex.len() % 2) != 0 {
+        unsafe {
+            *ptr_out = std::ptr::null_mut();
+            *len_out = 0;
+            *is_hex_out = 1;
+        }
+        return 0;
+    }
+    let bin_len = hex.len() / 2;
+    let alloc = unsafe { libc::malloc(bin_len + 1) } as *mut u8;
+    if alloc.is_null() {
+        unsafe {
+            *ptr_out = std::ptr::null_mut();
+            *len_out = 0;
+            *is_hex_out = 1;
+        }
+        return 0;
+    }
+    let ok = rust_decode_hex_bytes(hex.as_ptr() as *const c_char, hex.len(), alloc, bin_len);
+    if ok == 0 {
+        unsafe {
+            libc::free(alloc as *mut c_void);
+            *ptr_out = std::ptr::null_mut();
+            *len_out = 0;
+            *is_hex_out = 1;
+        }
+        return 0;
+    }
+
+    unsafe {
+        *ptr_out = alloc;
+        *len_out = bin_len as c_int;
+        *is_hex_out = 1;
+    }
+    1
+}
+
+#[no_mangle]
+pub extern "C" fn rust_query_cache_store_from_pgresult(
+    cache_key: u64,
+    result: *const PGresult,
+    num_rows: c_int,
+    num_cols: c_int,
+    pg_sql: *const c_char,
+) {
+    if result.is_null() || cache_key == 0 || num_rows <= 0 || num_cols <= 0 {
+        return;
+    }
+
+    let nr = num_rows as usize;
+    let nc = num_cols as usize;
+    let total = nr.saturating_mul(nc);
+
+    let mut col_types: Vec<u32> = Vec::with_capacity(nc);
+    let mut col_names: Vec<*const c_char> = Vec::with_capacity(nc);
+    for c in 0..nc {
+        col_types.push(unsafe { PQftype(result, c as c_int) } as u32);
+        col_names.push(unsafe { PQfname(result, c as c_int) });
+    }
+
+    let mut values: Vec<*const c_char> = Vec::with_capacity(total);
+    let mut lengths: Vec<i32> = Vec::with_capacity(total);
+    let mut is_null: Vec<i32> = Vec::with_capacity(total);
+
+    for r in 0..nr {
+        for c in 0..nc {
+            let null_flag = unsafe { PQgetisnull(result, r as c_int, c as c_int) };
+            if null_flag != 0 {
+                is_null.push(1);
+                values.push(std::ptr::null());
+                lengths.push(0);
+            } else {
+                let val_ptr = unsafe { PQgetvalue(result, r as c_int, c as c_int) };
+                let len = unsafe { PQgetlength(result, r as c_int, c as c_int) };
+                is_null.push(0);
+                values.push(val_ptr);
+                lengths.push(if len < 0 { 0 } else { len });
+            }
+        }
+    }
+
+    rust_query_cache_store(
+        cache_key,
+        num_rows,
+        num_cols,
+        col_types.as_ptr(),
+        col_names.as_ptr(),
+        values.as_ptr(),
+        lengths.as_ptr(),
+        is_null.as_ptr(),
+        pg_sql,
+    );
+}
+
+#[no_mangle]
+pub extern "C" fn rust_get_table_from_pgresult(
+    result: *const PGresult,
+    out_rows: *mut *mut *mut c_char,
+    out_rows_count: *mut c_int,
+    out_cols_count: *mut c_int,
+) -> c_int {
+    if result.is_null() || out_rows.is_null() || out_rows_count.is_null() || out_cols_count.is_null() {
+        return 0;
+    }
+
+    let num_rows = unsafe { PQntuples(result) };
+    let num_cols = unsafe { PQnfields(result) };
+    if num_rows < 0 || num_cols <= 0 {
+        unsafe {
+            *out_rows = std::ptr::null_mut();
+            *out_rows_count = 0;
+            *out_cols_count = 0;
+        }
+        return 0;
+    }
+
+    let total = (num_rows as usize + 1).saturating_mul(num_cols as usize) + 1;
+    let rows_ptr = unsafe {
+        libc::malloc(total * std::mem::size_of::<*mut c_char>()) as *mut *mut c_char
+    };
+    if rows_ptr.is_null() {
+        unsafe {
+            *out_rows = std::ptr::null_mut();
+            *out_rows_count = 0;
+            *out_cols_count = 0;
+        }
+        return 0;
+    }
+    unsafe {
+        std::ptr::write_bytes(rows_ptr, 0, total);
+    }
+
+    let mut ok = true;
+    // Column names (header row)
+    for c in 0..num_cols {
+        let name = unsafe { PQfname(result, c) };
+        if !name.is_null() {
+            let bytes = unsafe { CStr::from_ptr(name).to_bytes() };
+            let buf = unsafe { libc::malloc(bytes.len() + 1) } as *mut u8;
+            if buf.is_null() {
+                ok = false;
+                break;
+            }
+            unsafe {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, bytes.len());
+                *buf.add(bytes.len()) = 0;
+                *rows_ptr.add(c as usize) = buf as *mut c_char;
+            }
+        }
+    }
+
+    // Data rows
+    if ok {
+        for r in 0..num_rows {
+            for c in 0..num_cols {
+                let idx = (r as usize + 1) * (num_cols as usize) + (c as usize);
+                let is_null = unsafe { PQgetisnull(result, r, c) };
+                if is_null != 0 {
+                    unsafe { *rows_ptr.add(idx) = std::ptr::null_mut() };
+                    continue;
+                }
+                let val_ptr = unsafe { PQgetvalue(result, r, c) };
+                if val_ptr.is_null() {
+                    unsafe { *rows_ptr.add(idx) = std::ptr::null_mut() };
+                    continue;
+                }
+                let len = unsafe { PQgetlength(result, r, c) };
+                let len_usize = if len < 0 { 0 } else { len as usize };
+                let buf = unsafe { libc::malloc(len_usize + 1) } as *mut u8;
+                if buf.is_null() {
+                    ok = false;
+                    break;
+                }
+                unsafe {
+                    if len_usize > 0 {
+                        std::ptr::copy_nonoverlapping(val_ptr as *const u8, buf, len_usize);
+                    }
+                    *buf.add(len_usize) = 0;
+                    *rows_ptr.add(idx) = buf as *mut c_char;
+                }
+            }
+            if !ok {
+                break;
+            }
+        }
+    }
+
+    if !ok {
+        unsafe {
+            for i in 0..total {
+                let ptr = *rows_ptr.add(i);
+                if !ptr.is_null() {
+                    libc::free(ptr as *mut c_void);
+                }
+            }
+            libc::free(rows_ptr as *mut c_void);
+            *out_rows = std::ptr::null_mut();
+            *out_rows_count = 0;
+            *out_cols_count = 0;
+        }
+        return 0;
+    }
+
+    unsafe {
+        *rows_ptr.add(total - 1) = std::ptr::null_mut();
+        *out_rows = rows_ptr;
+        *out_rows_count = num_rows;
+        *out_cols_count = num_cols;
+    }
+    1
+}
+
+#[no_mangle]
+pub extern "C" fn rust_pg_create_column_value(
+    result: *const PGresult,
+    current_row: c_int,
+    num_rows: c_int,
+    col_idx: c_int,
+) -> c_int {
+    let sqlite_type = if result.is_null() || current_row < 0 || current_row >= num_rows {
+        SQLITE_NULL_CONST
+    } else {
+        let is_null = unsafe { PQgetisnull(result, current_row, col_idx) };
+        if is_null != 0 {
+            SQLITE_NULL_CONST
+        } else {
+            let oid = unsafe { PQftype(result, col_idx) };
+            pg_oid_to_sqlite_type_impl(oid as u32)
+        }
+    };
+
+    sqlite_type
+}
+
+#[no_mangle]
+pub extern "C" fn rust_pg_result_type_info(
+    result: *const PGresult,
+    row: c_int,
+    col: c_int,
+    oid_out: *mut c_uint,
+    is_null_out: *mut c_int,
+    sqlite_type_out: *mut c_int,
+) -> c_int {
+    if result.is_null() {
+        return 0;
+    }
+    let is_null = unsafe { PQgetisnull(result, row, col) };
+    if !is_null_out.is_null() {
+        unsafe {
+            *is_null_out = is_null;
+        }
+    }
+    let oid = unsafe { PQftype(result, col) };
+    if !oid_out.is_null() {
+        unsafe {
+            *oid_out = oid;
+        }
+    }
+    if !sqlite_type_out.is_null() {
+        let sqlite_type = if is_null != 0 {
+            SQLITE_NULL_CONST
+        } else {
+            pg_oid_to_sqlite_type_impl(oid as u32)
+        };
+        unsafe {
+            *sqlite_type_out = sqlite_type;
+        }
+    }
+    1
+}
+
+#[no_mangle]
+pub extern "C" fn rust_pg_result_col_name(result: *const PGresult, col: c_int) -> *const c_char {
+    if result.is_null() {
+        return std::ptr::null();
+    }
+    unsafe { PQfname(result, col) }
+}
+
+#[no_mangle]
+pub extern "C" fn rust_step_clear_row_caches(
+    cached_text: *mut *mut c_char,
+    cached_blob: *mut *mut c_void,
+    cached_blob_len: *mut c_int,
+    decoded_blobs: *mut *mut c_void,
+    decoded_blob_lens: *mut c_int,
+    max_params: c_int,
+    cached_row: *mut c_int,
+    decoded_blob_row: *mut c_int,
+) {
+    if max_params <= 0 {
+        if !cached_row.is_null() {
+            unsafe { *cached_row = -1 };
+        }
+        if !decoded_blob_row.is_null() {
+            unsafe { *decoded_blob_row = -1 };
+        }
+        return;
+    }
+
+    for i in 0..(max_params as isize) {
+        unsafe {
+            if !cached_text.is_null() {
+                let slot = cached_text.offset(i);
+                let ptr = *slot;
+                if !ptr.is_null() {
+                    libc::free(ptr as *mut c_void);
+                    *slot = std::ptr::null_mut();
+                }
+            }
+
+            if !cached_blob.is_null() {
+                let slot = cached_blob.offset(i);
+                let ptr = *slot;
+                if !ptr.is_null() {
+                    libc::free(ptr);
+                    *slot = std::ptr::null_mut();
+                }
+            }
+
+            if !cached_blob_len.is_null() {
+                *cached_blob_len.offset(i) = 0;
+            }
+
+            if !decoded_blobs.is_null() {
+                let slot = decoded_blobs.offset(i);
+                let ptr = *slot;
+                if !ptr.is_null() {
+                    libc::free(ptr);
+                    *slot = std::ptr::null_mut();
+                }
+            }
+
+            if !decoded_blob_lens.is_null() {
+                *decoded_blob_lens.offset(i) = 0;
+            }
+        }
+    }
+
+    if !cached_row.is_null() {
+        unsafe { *cached_row = -1 };
+    }
+    if !decoded_blob_row.is_null() {
+        unsafe { *decoded_blob_row = -1 };
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn rust_pg_udt_to_sqlite_decltype(ptr: *const c_char) -> *const c_char {
     pg_udt_to_sqlite_decltype_impl(cstr_to_str(ptr))
 }
@@ -730,6 +1853,15 @@ pub extern "C" fn rust_trace_list_any_token_in_haystack(
         Err(_) => return 0,
     };
     i32::from(list_any_token_in_haystack(list, haystack))
+}
+
+#[no_mangle]
+pub extern "C" fn rust_env_truthy(value: *const c_char) -> c_int {
+    let s = unsafe { cstr_to_str_or_empty(value) };
+    if s.is_empty() {
+        return 0;
+    }
+    matches!(s.as_bytes()[0], b'1' | b'y' | b'Y' | b't' | b'T') as c_int
 }
 
 #[no_mangle]
@@ -980,55 +2112,20 @@ pub extern "C" fn rust_rewrite_server_library_uri(
     }
 
     let input_bytes = unsafe { CStr::from_ptr(input).to_bytes() };
-    const SERVER_PREFIX: &[u8] = b"server://";
-    const NEEDLE: &[u8] = b"/com.plexapp.plugins.library/library/";
-    const REPLACEMENT: &[u8] = b"library://";
-
-    if find_subslice(input_bytes, SERVER_PREFIX).is_none() || find_subslice(input_bytes, NEEDLE).is_none() {
-        return 0;
-    }
-
-    let mut out_buf = Vec::with_capacity(input_bytes.len().min(out_len.saturating_sub(1)));
     let out_cap = out_len.saturating_sub(1);
-    let mut in_pos = 0usize;
-    let mut rewrites = 0;
+    let Some(out_buf) = rewrite_server_library_uri_bytes(input_bytes, out_cap) else {
+        return 0;
+    };
 
-    while in_pos < input_bytes.len() {
-        let slice = &input_bytes[in_pos..];
-        let Some(rel_match) = find_subslice(slice, SERVER_PREFIX) else {
-            push_capped(&mut out_buf, out_cap, slice);
-            break;
-        };
-
-        let match_pos = in_pos + rel_match;
-        push_capped(&mut out_buf, out_cap, &input_bytes[in_pos..match_pos]);
-        in_pos = match_pos;
-
-        let after_server = in_pos + SERVER_PREFIX.len();
-        if after_server > input_bytes.len() {
-            break;
-        }
-
-        if let Some(rel_needle) = find_subslice(&input_bytes[after_server..], NEEDLE) {
-            let needle_pos = after_server + rel_needle;
-            let full_prefix_len = (needle_pos - in_pos) + NEEDLE.len();
-            push_capped(&mut out_buf, out_cap, REPLACEMENT);
-            in_pos += full_prefix_len;
-            rewrites += 1;
-        } else {
-            push_capped(&mut out_buf, out_cap, SERVER_PREFIX);
-            in_pos += SERVER_PREFIX.len();
-        }
-    }
-
+    let n = out_buf.len().min(out_cap);
     unsafe {
-        if !out_buf.is_empty() {
-            std::ptr::copy_nonoverlapping(out_buf.as_ptr(), out as *mut u8, out_buf.len());
+        if n > 0 {
+            std::ptr::copy_nonoverlapping(out_buf.as_ptr(), out as *mut u8, n);
         }
-        *out.add(out_buf.len()) = 0;
+        *out.add(n) = 0;
     }
 
-    i32::from(rewrites > 0)
+    1
 }
 
 #[no_mangle]
@@ -1113,6 +2210,37 @@ mod tests {
     use super::*;
     use std::ffi::{CStr, CString};
 
+    fn c(s: &str) -> CString {
+        CString::new(s).unwrap()
+    }
+
+    fn take_cstring(ptr: *mut c_char) -> String {
+        if ptr.is_null() {
+            return String::new();
+        }
+        unsafe { CString::from_raw(ptr) }
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    fn normalize_decltype(input: Option<&str>) -> String {
+        let ptr = normalize_sqlite_decltype_impl(input);
+        if ptr.is_null() {
+            return String::new();
+        }
+        unsafe { CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    fn djb2(s: &str) -> u32 {
+        let mut hash: u32 = 5381;
+        for b in s.as_bytes() {
+            hash = ((hash << 5).wrapping_add(hash)).wrapping_add(*b as u32);
+        }
+        hash
+    }
+
     #[test]
     fn validate_utf8_accepts_valid_input() {
         let s = "Plex \u{1F4FA}";
@@ -1161,6 +2289,139 @@ mod tests {
             .to_str()
             .expect("utf8 output");
         assert_eq!(rewritten, "a=library://one;b=library://two");
+    }
+
+    fn rewrite_with_buf(input: &str, out_len: usize) -> (i32, String) {
+        let input = CString::new(input).expect("valid c string");
+        let mut out = vec![0 as c_char; out_len];
+        let ok = rust_rewrite_server_library_uri(
+            input.as_ptr(),
+            out.as_mut_ptr(),
+            out.len(),
+        );
+        let rewritten = unsafe { CStr::from_ptr(out.as_ptr()) }
+            .to_str()
+            .unwrap_or("")
+            .to_string();
+        (ok, rewritten)
+    }
+
+    #[test]
+    fn rewrite_server_uri_standalone() {
+        let (ok, out) = rewrite_with_buf(
+            "server://71b2873061a562bf7541852f9a43087e88a63f9a/com.plexapp.plugins.library/library/sections/2/all?type=2",
+            512,
+        );
+        assert_eq!(ok, 1);
+        assert_eq!(out, "library://sections/2/all?type=2");
+    }
+
+    #[test]
+    fn rewrite_server_uri_json_embedded() {
+        let (ok, out) = rewrite_with_buf(
+            "{\"at:childCount\":\"1\",\"at:smart\":\"1\",\"pv:uri\":\"server://71b2873061a562bf7541852f9a43087e88a63f9a/com.plexapp.plugins.library/library/sections/2/all?type=2&sort=date\"}",
+            1024,
+        );
+        assert_eq!(ok, 1);
+        assert_eq!(
+            out,
+            "{\"at:childCount\":\"1\",\"at:smart\":\"1\",\"pv:uri\":\"library://sections/2/all?type=2&sort=date\"}"
+        );
+    }
+
+    #[test]
+    fn rewrite_server_uri_no_server_prefix() {
+        let (ok, out) = rewrite_with_buf("library://sections/1/all", 256);
+        assert_eq!(ok, 0);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn rewrite_server_uri_no_plugin_path() {
+        let (ok, out) = rewrite_with_buf("server://abc123/some/other/path", 256);
+        assert_eq!(ok, 0);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn rewrite_server_uri_empty_string() {
+        let (ok, out) = rewrite_with_buf("", 64);
+        assert_eq!(ok, 0);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn rewrite_server_uri_null_input() {
+        let mut out = [0 as c_char; 64];
+        let ok = rust_rewrite_server_library_uri(std::ptr::null(), out.as_mut_ptr(), out.len());
+        assert_eq!(ok, 0);
+    }
+
+    #[test]
+    fn rewrite_server_uri_plain_text() {
+        let (ok, out) = rewrite_with_buf("{\"at:childCount\":\"5\",\"pv:thumbBlurHash\":\"abc123\"}", 256);
+        assert_eq!(ok, 0);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn rewrite_server_uri_multiple_in_json() {
+        let (ok, out) = rewrite_with_buf(
+            "{\"uri1\":\"server://aaa/com.plexapp.plugins.library/library/sections/1/all\",\"uri2\":\"server://aaa/com.plexapp.plugins.library/library/sections/2/all\"}",
+            2048,
+        );
+        assert_eq!(ok, 1);
+        assert_eq!(
+            out,
+            "{\"uri1\":\"library://sections/1/all\",\"uri2\":\"library://sections/2/all\"}"
+        );
+    }
+
+    #[test]
+    fn rewrite_server_uri_output_shorter() {
+        let input = "server://71b2873061a562bf7541852f9a43087e88a63f9a/com.plexapp.plugins.library/library/sections/2/all";
+        let (ok, out) = rewrite_with_buf(input, 512);
+        assert_eq!(ok, 1);
+        assert!(out.len() < input.len());
+    }
+
+    #[test]
+    fn rewrite_server_uri_encoded_params() {
+        let (ok, out) = rewrite_with_buf(
+            "server://71b287/com.plexapp.plugins.library/library/sections/2/all?type=2&sort=originallyAvailableAt%3Adesc&push=1&show.network=248684&pop=1",
+            1024,
+        );
+        assert_eq!(ok, 1);
+        assert_eq!(
+            out,
+            "library://sections/2/all?type=2&sort=originallyAvailableAt%3Adesc&push=1&show.network=248684&pop=1"
+        );
+    }
+
+    #[test]
+    fn rewrite_server_uri_small_buffer() {
+        let (ok, out) = rewrite_with_buf(
+            "server://abc/com.plexapp.plugins.library/library/sections/2/all?type=2&sort=date",
+            32,
+        );
+        assert!(ok == 0 || out.len() < 32);
+    }
+
+    #[test]
+    fn rewrite_server_uri_tiny_buffer() {
+        let (ok, _) = rewrite_with_buf("server://x", 8);
+        assert_eq!(ok, 0);
+    }
+
+    #[test]
+    fn rewrite_server_uri_real_plex_blob() {
+        let (ok, out) = rewrite_with_buf(
+            "{\"at:childCount\":\"1\",\"at:smart\":\"1\",\"pv:blurHashesChangedAt\":\"277470\",\"pv:thumbBlurHash\":\"LJC?YqM{IVoz\",\"pv:uri\":\"server://71b2873061a562bf7541852f9a43087e88a63f9a/com.plexapp.plugins.library/library/sections/2/all?type=2&sort=originallyAvailableAt%3Adesc&push=1&show.genre=8966&pop=1\"}",
+            2048,
+        );
+        assert_eq!(ok, 1);
+        assert!(out.contains("library://sections/2/all"));
+        assert!(!out.contains("server://"));
     }
 
     #[test]
@@ -1335,5 +2596,292 @@ mod tests {
             Some("abc")
         );
         assert_eq!(trim_first_line("   \n"), None);
+    }
+
+    #[test]
+    fn common_helpers_is_library_db_path_null_returns_false() {
+        assert_eq!(rust_is_library_db_path(std::ptr::null()), 0);
+    }
+
+    #[test]
+    fn common_helpers_is_library_db_path_empty_returns_false() {
+        assert!(!is_library_db_path_impl(""));
+    }
+
+    #[test]
+    fn common_helpers_is_library_db_path_matches_known_paths() {
+        assert!(is_library_db_path_impl(
+            "/data/Databases/com.plexapp.plugins.library.db"
+        ));
+        assert!(is_library_db_path_impl(
+            "/data/Databases/com.plexapp.plugins.library.blobs.db"
+        ));
+        assert!(is_library_db_path_impl("com.plexapp.plugins.library.db"));
+        assert!(is_library_db_path_impl("com.plexapp.plugins.library.blobs.db"));
+        assert!(is_library_db_path_impl("/Users/plex/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db"));
+        assert!(is_library_db_path_impl("/config/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.blobs.db"));
+    }
+
+    #[test]
+    fn common_helpers_is_library_db_path_rejects_non_library_paths() {
+        assert!(!is_library_db_path_impl("com.plexapp.plugins.preferences.db"));
+        assert!(!is_library_db_path_impl("/tmp/test.db"));
+        assert!(!is_library_db_path_impl("library.db"));
+    }
+
+    #[test]
+    fn common_helpers_is_library_db_path_accepts_wal_suffix() {
+        assert!(is_library_db_path_impl(
+            "com.plexapp.plugins.library.db-wal"
+        ));
+    }
+
+    #[test]
+    fn bind_helpers_contains_binary_bytes_null_and_empty() {
+        assert_eq!(rust_contains_binary_bytes(std::ptr::null(), 0), 0);
+        assert_eq!(rust_contains_binary_bytes(b"".as_ptr(), 0), 0);
+    }
+
+    #[test]
+    fn bind_helpers_contains_binary_bytes_text_cases() {
+        assert!(!contains_binary_bytes_impl(b"Hello, World!"));
+        let utf8 = b"H\xc3\xa9llo W\xc3\xb6rld";
+        assert!(!contains_binary_bytes_impl(utf8));
+        assert!(!contains_binary_bytes_impl(b"col1\tcol2"));
+        assert!(!contains_binary_bytes_impl(b"line1\nline2"));
+        assert!(!contains_binary_bytes_impl(b"line1\r\nline2"));
+    }
+
+    #[test]
+    fn bind_helpers_contains_binary_bytes_detects_control_and_invalid() {
+        assert!(contains_binary_bytes_impl(b"\x00"));
+        assert!(contains_binary_bytes_impl(b"\x01"));
+        assert!(contains_binary_bytes_impl(b"\x07test"));
+        assert!(contains_binary_bytes_impl(b"\x7F"));
+        assert!(contains_binary_bytes_impl(b"\xC0"));
+        assert!(contains_binary_bytes_impl(b"\xC1"));
+        assert!(contains_binary_bytes_impl(b"\xF5"));
+        assert!(contains_binary_bytes_impl(&[0x1f, 0x8b, 0x08, 0x00]));
+        let mixed = [b'H', b'e', b'l', b'l', b'o', 0x01, b'W'];
+        assert!(contains_binary_bytes_impl(&mixed));
+        let late_binary = [b'A', b'B', b'C', b'D', b'E', 0x02];
+        assert!(contains_binary_bytes_impl(&late_binary));
+    }
+
+    #[test]
+    fn bind_helpers_bytes_to_pg_hex_null_and_empty() {
+        let out = take_cstring(rust_bytes_to_pg_hex(std::ptr::null(), 0));
+        assert_eq!(out, "");
+        let out = take_cstring(rust_bytes_to_pg_hex(b"".as_ptr(), 0));
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn bind_helpers_bytes_to_pg_hex_known_values() {
+        let out = take_cstring(rust_bytes_to_pg_hex(&[0xAB].as_ptr(), 1));
+        assert_eq!(out, "\\xab");
+        let out = take_cstring(rust_bytes_to_pg_hex(&[0xDE, 0xAD, 0xBE, 0xEF].as_ptr(), 4));
+        assert_eq!(out, "\\xdeadbeef");
+        let out = take_cstring(rust_bytes_to_pg_hex(&[0x00, 0x00, 0x00].as_ptr(), 3));
+        assert_eq!(out, "\\x000000");
+        let out = take_cstring(rust_bytes_to_pg_hex(&[0xFF, 0xFF].as_ptr(), 2));
+        assert_eq!(out, "\\xffff");
+        let out = take_cstring(rust_bytes_to_pg_hex(b"AB".as_ptr(), 2));
+        assert_eq!(out, "\\x4142");
+    }
+
+    #[test]
+    fn bind_helpers_bytes_to_pg_hex_png_header() {
+        let blob = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        let out = take_cstring(rust_bytes_to_pg_hex(blob.as_ptr(), blob.len()));
+        assert_eq!(out, "\\x89504e470d0a1a0a");
+    }
+
+    #[test]
+    fn type_normalization_dt_integer_variants() {
+        assert_eq!(normalize_decltype(Some("DT_INTEGER(8)")), "dt_integer(8)");
+        assert_eq!(normalize_decltype(Some("DT_INTEGER(4)")), "INTEGER");
+        assert_eq!(normalize_decltype(Some("DT_INTEGER(2)")), "INTEGER");
+        assert_eq!(normalize_decltype(Some("DT_INTEGER")), "INTEGER");
+        assert_eq!(normalize_decltype(Some("dt_integer(8)")), "dt_integer(8)");
+    }
+
+    #[test]
+    fn type_normalization_integer_variants() {
+        assert_eq!(normalize_decltype(Some("INTEGER")), "INTEGER");
+        assert_eq!(normalize_decltype(Some("integer")), "INTEGER");
+        assert_eq!(normalize_decltype(Some("INTEGER(8)")), "dt_integer(8)");
+        assert_eq!(normalize_decltype(Some("INTEGER(4)")), "INTEGER");
+    }
+
+    #[test]
+    fn type_normalization_int64_aliases() {
+        assert_eq!(normalize_decltype(Some("BIGINT")), "dt_integer(8)");
+        assert_eq!(normalize_decltype(Some("bigint")), "dt_integer(8)");
+        assert_eq!(normalize_decltype(Some("BIGINT(8)")), "dt_integer(8)");
+        assert_eq!(normalize_decltype(Some("INT8")), "dt_integer(8)");
+        assert_eq!(normalize_decltype(Some("INT64")), "dt_integer(8)");
+        assert_eq!(normalize_decltype(Some("LONG")), "dt_integer(8)");
+    }
+
+    #[test]
+    fn type_normalization_boolean_timestamp_float() {
+        assert_eq!(normalize_decltype(Some("boolean")), "INTEGER");
+        assert_eq!(normalize_decltype(Some("TIMESTAMP")), "INTEGER");
+        assert_eq!(normalize_decltype(Some("FLOAT")), "REAL");
+        assert_eq!(normalize_decltype(Some("DOUBLE")), "REAL");
+    }
+
+    #[test]
+    fn type_normalization_string_variants() {
+        assert_eq!(normalize_decltype(Some("VARCHAR")), "TEXT");
+        assert_eq!(normalize_decltype(Some("VARCHAR(255)")), "TEXT");
+        assert_eq!(normalize_decltype(Some("STRING")), "TEXT");
+        assert_eq!(normalize_decltype(Some("CHAR")), "TEXT");
+    }
+
+    #[test]
+    fn type_normalization_standard_sqlite_types() {
+        assert_eq!(normalize_decltype(Some("REAL")), "REAL");
+        assert_eq!(normalize_decltype(Some("TEXT")), "TEXT");
+        assert_eq!(normalize_decltype(Some("BLOB")), "BLOB");
+        assert_eq!(normalize_decltype(Some("NUMERIC")), "NUMERIC");
+    }
+
+    #[test]
+    fn type_normalization_unknown_and_empty_fallback_to_text() {
+        assert_eq!(normalize_decltype(Some("WAT")), "TEXT");
+        assert_eq!(normalize_decltype(Some("")), "TEXT");
+        assert_eq!(normalize_decltype(None), "TEXT");
+    }
+
+    #[test]
+    fn type_normalization_decltype_hash_matches_djb2() {
+        let s = "dt_integer(8)";
+        let cs = c(s);
+        assert_eq!(rust_decltype_hash(cs.as_ptr()), djb2(s));
+    }
+
+    #[test]
+    fn type_normalization_decltype_hash_null_matches_empty() {
+        assert_eq!(rust_decltype_hash(std::ptr::null()), djb2(""));
+    }
+
+    #[test]
+    fn type_normalization_decltype_hash_differs_for_different_strings() {
+        let a = c("INTEGER");
+        let b = c("TEXT");
+        assert_ne!(rust_decltype_hash(a.as_ptr()), rust_decltype_hash(b.as_ptr()));
+    }
+
+    #[test]
+    fn fts_quotes_simple_query_rewrites() {
+        let sql = "SELECT * FROM metadata_items \
+                   JOIN fts4_metadata_titles ON metadata_items.id = fts4_metadata_titles.id \
+                   WHERE fts4_metadata_titles.title match 'test'";
+        let out = simplify_fts_for_sqlite(sql).expect("should simplify");
+        assert!(!out.to_ascii_lowercase().contains("fts4_metadata_titles"));
+        assert!(out.contains("1=0"));
+    }
+
+    #[test]
+    fn fts_quotes_handles_apostrophes() {
+        let sql = "SELECT * FROM metadata_items \
+                   JOIN fts4_metadata_titles ON metadata_items.id = fts4_metadata_titles.id \
+                   WHERE fts4_metadata_titles.title match 'it''s a test'";
+        let out = simplify_fts_for_sqlite(sql).expect("should simplify");
+        let out_lower = out.to_ascii_lowercase();
+        assert!(out.contains("1=0"));
+        assert!(!out_lower.contains(" match "));
+    }
+
+    #[test]
+    fn fts_quotes_handles_escaped_quote_pairs() {
+        let sql = "SELECT * FROM items \
+                   JOIN fts4_metadata_titles ON items.id = fts4_metadata_titles.id \
+                   WHERE fts4_metadata_titles.title match 'can''t stop'";
+        let out = simplify_fts_for_sqlite(sql).expect("should simplify");
+        assert!(out.contains("1=0"));
+        assert!(!out.to_ascii_lowercase().contains(" match "));
+    }
+
+    #[test]
+    fn expected_sqlite_type_for_decltype_maps_basic_types() {
+        let int = c("INTEGER");
+        let real = c("REAL");
+        let text = c("TEXT");
+        let blob = c("BLOB");
+        let dt_int8 = c("DT_INTEGER(8)");
+
+        assert_eq!(
+            rust_expected_sqlite_type_for_decltype(int.as_ptr()),
+            SQLITE_INTEGER_CONST
+        );
+        assert_eq!(
+            rust_expected_sqlite_type_for_decltype(real.as_ptr()),
+            SQLITE_FLOAT_CONST
+        );
+        assert_eq!(
+            rust_expected_sqlite_type_for_decltype(text.as_ptr()),
+            SQLITE_TEXT_CONST
+        );
+        assert_eq!(
+            rust_expected_sqlite_type_for_decltype(blob.as_ptr()),
+            SQLITE_BLOB_CONST
+        );
+        assert_eq!(
+            rust_expected_sqlite_type_for_decltype(dt_int8.as_ptr()),
+            SQLITE_INTEGER_CONST
+        );
+    }
+
+    #[test]
+    fn expected_sqlite_type_for_decltype_unknown_returns_negative() {
+        let numeric = c("NUMERIC");
+        let unknown = c("WHAT");
+        assert!(rust_expected_sqlite_type_for_decltype(numeric.as_ptr()) < 0);
+        assert!(rust_expected_sqlite_type_for_decltype(unknown.as_ptr()) < 0);
+        assert!(rust_expected_sqlite_type_for_decltype(std::ptr::null()) < 0);
+    }
+
+    #[test]
+    fn column_text_reformat_aggregate_int8() {
+        let col = c("count");
+        let sql = c("select count(*) from t");
+        let src = c("123");
+        let mut out = [0 as c_char; 32];
+
+        let rc = rust_column_text_reformat_aggregate(
+            col.as_ptr(),
+            20,
+            sql.as_ptr(),
+            src.as_ptr(),
+            out.as_mut_ptr(),
+            out.len(),
+        );
+
+        assert_eq!(rc, 1);
+        let out_s = unsafe { CStr::from_ptr(out.as_ptr()) }
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(out_s, "123");
+    }
+
+    #[test]
+    fn column_text_reformat_aggregate_non_match_returns_zero() {
+        let col = c("id");
+        let sql = c("select id from t");
+        let src = c("456");
+        let mut out = [0 as c_char; 32];
+
+        let rc = rust_column_text_reformat_aggregate(
+            col.as_ptr(),
+            20,
+            sql.as_ptr(),
+            src.as_ptr(),
+            out.as_mut_ptr(),
+            out.len(),
+        );
+        assert_eq!(rc, 0);
     }
 }

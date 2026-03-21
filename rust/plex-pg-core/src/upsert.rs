@@ -38,7 +38,7 @@ fn transform_insert(insert: &mut Insert) {
         _ => String::new(),
     };
     let conflict_cols = get_conflict_columns(&table_name);
-    let conflict_target = conflict_cols
+    let mut conflict_target = conflict_cols
         .as_ref()
         .map(|cols| ConflictTarget::Columns(cols.iter().map(|c| Ident::new(*c)).collect()));
 
@@ -47,12 +47,25 @@ fn transform_insert(insert: &mut Insert) {
     let is_ignore = matches!(insert.or, Some(SqliteOnConflict::Ignore));
 
     if is_replace {
+        // Fallback for unknown tables: if insert list contains id, use ON CONFLICT(id).
+        if conflict_target.is_none()
+            && insert
+                .columns
+                .iter()
+                .any(|c| c.value.eq_ignore_ascii_case("id"))
+        {
+            conflict_target = Some(ConflictTarget::Columns(vec![Ident::new("id")]));
+        }
+
         // INSERT OR REPLACE / REPLACE INTO → ON CONFLICT (target) DO UPDATE SET col=EXCLUDED.col, ...
         let columns = insert.columns.clone();
-        let conflict_col_names: Vec<String> = conflict_cols
+        let mut conflict_col_names: Vec<String> = conflict_cols
             .as_ref()
             .map(|cols| cols.iter().map(|c| c.to_lowercase()).collect())
             .unwrap_or_else(|| vec!["id".to_string()]);
+        if conflict_col_names.is_empty() {
+            conflict_col_names.push("id".to_string());
+        }
         insert.on = Some(OnInsert::OnConflict(make_do_update(
             columns,
             conflict_target,
@@ -395,6 +408,19 @@ mod tests {
         assert!(low.contains("value = excluded.value"));
         assert!(!low.contains("id = excluded.id"));
         assert!(!low.contains("returning"));
+    }
+
+    #[test]
+    fn upsert_unknown_table_with_id_uses_on_conflict_id_target() {
+        let out = sql("INSERT OR REPLACE INTO ur (id, name, v) VALUES (1, 'a2', 99)");
+        let low = out.to_lowercase();
+        assert!(
+            low.contains("on conflict (id)") || low.contains("on conflict(id)"),
+            "expected fallback ON CONFLICT(id), got: {}",
+            out
+        );
+        assert!(low.contains("name = excluded.name"));
+        assert!(low.contains("v = excluded.v"));
     }
 
     #[test]

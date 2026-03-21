@@ -1,19 +1,45 @@
 pub mod dedup;
+pub mod db_interpose_exec;
+pub mod c_abi;
+pub mod db_interpose_bind;
+pub mod db_interpose_column;
+pub mod db_interpose_common;
+pub mod exception_what;
+pub mod db_interpose_open;
+pub mod db_interpose_prepare;
+pub mod db_interpose_stmt_lifecycle;
+pub mod db_interpose_value;
 pub mod db_interpose_helpers;
+pub mod db_interpose_metadata;
 pub mod db_interpose_prepare_helpers;
 pub mod db_interpose_trace_helpers;
+pub mod db_interpose_conn_utils;
+pub mod db_interpose_step_cached_read_utils;
+pub mod db_interpose_step_read_utils;
+pub mod db_interpose_step;
+pub mod db_interpose_step_write_utils;
+pub mod db_interpose_txn_utils;
 pub mod db_interpose_value_helpers;
 pub mod emit;
+pub mod ffi_types;
 pub mod ffi;
 pub mod functions;
 pub mod groupby;
 pub mod keywords;
+pub mod libpq_helpers;
 pub mod pg_client;
 pub mod pg_config;
 pub mod pg_logging;
 pub mod pg_mem_telemetry;
 pub mod pg_query_cache;
 pub mod pg_statement;
+pub mod platform_backtrace;
+#[cfg(target_os = "macos")]
+pub mod fishhook;
+#[cfg(target_os = "macos")]
+pub mod runtime_macos;
+#[cfg(target_os = "linux")]
+pub mod runtime_linux;
 /// plex-pg-core: SQLite → PostgreSQL SQL translation, caching, statement lifecycle & more
 ///
 /// Pipeline (in order):
@@ -34,7 +60,7 @@ pub mod shim_alloc;
 pub mod types;
 pub mod upsert;
 
-use sqlparser::dialect::{PostgreSqlDialect, SQLiteDialect};
+use sqlparser::dialect::{MySqlDialect, PostgreSqlDialect, SQLiteDialect};
 use sqlparser::parser::Parser;
 
 /// Result of a full translation
@@ -124,9 +150,28 @@ pub fn translate(sqlite_sql: &str) -> Result<Translation, String> {
         });
     }
 
-    let dialect = SQLiteDialect {};
-    let mut stmts =
-        Parser::parse_sql(&dialect, &preprocessed).map_err(|e| format!("parse error: {e}"))?;
+    let sqlite_dialect = SQLiteDialect {};
+    let mut stmts = match Parser::parse_sql(&sqlite_dialect, &preprocessed) {
+        Ok(stmts) => stmts,
+        Err(sqlite_err) => {
+            // sqlparser's SQLiteDialect rejects some valid SQLite/MySQL-style
+            // backtick-qualified forms (`alias.`reserved``). In that case,
+            // retry with MySQL dialect to keep translation coverage broad.
+            if preprocessed.as_bytes().contains(&b'`') {
+                let mysql_dialect = MySqlDialect {};
+                match Parser::parse_sql(&mysql_dialect, &preprocessed) {
+                    Ok(stmts) => stmts,
+                    Err(mysql_err) => {
+                        return Err(format!(
+                            "parse error: {sqlite_err}; mysql fallback parse error: {mysql_err}"
+                        ));
+                    }
+                }
+            } else {
+                return Err(format!("parse error: {sqlite_err}"));
+            }
+        }
+    };
 
     let mut param_names: Vec<Option<String>> = Vec::new();
 

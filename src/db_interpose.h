@@ -46,7 +46,7 @@
 
 #define WORKER_STACK_SIZE (8 * 1024 * 1024)  // 8MB stack for worker
 #define WORKER_DELEGATION_THRESHOLD 400000   // 400KB - delegate early!
-#define MAX_FAKE_VALUES 256
+#define MAX_FAKE_VALUES 4096
 #define PG_FAKE_VALUE_MAGIC 0x50475641  // "PGVA"
 
 // ============================================================================
@@ -81,16 +81,12 @@ typedef struct {
     void *pg_stmt;       // Pointer to pg_stmt_t
     int col_idx;         // Column index
     int row_idx;         // Row index at time of column_value call
+    pthread_t owner_thread;  // Thread that created this fake value
 } pg_fake_value_t;
 
 // ============================================================================
 // Shared Global State (extern declarations)
 // ============================================================================
-
-// Recursion prevention
-extern __thread int in_interpose_call;
-extern __thread int prepare_v2_depth;
-extern __thread int in_resolve_tables;  // Prevent recursion in resolve_column_tables
 
 // SQLite library handle for dlsym fallback
 extern void *sqlite_handle;
@@ -291,6 +287,7 @@ EXPORT int my_sqlite3_step(sqlite3_stmt *pStmt);
 EXPORT int my_sqlite3_reset(sqlite3_stmt *pStmt);
 EXPORT int my_sqlite3_finalize(sqlite3_stmt *pStmt);
 EXPORT int my_sqlite3_clear_bindings(sqlite3_stmt *pStmt);
+void pg_note_stmt_prepare(sqlite3_stmt *pStmt, const char *sql);
 
 // ============================================================================
 // Column Functions (db_interpose_column.c)

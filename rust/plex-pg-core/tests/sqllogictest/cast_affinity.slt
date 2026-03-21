@@ -1,0 +1,25 @@
+# Cast and affinity-style comparisons
+
+statement ok
+CREATE TABLE ca (id INTEGER, s TEXT, n INTEGER);
+
+statement ok
+INSERT INTO ca (id, s, n) VALUES
+  (1, '10', 10),
+  (2, '20', 20),
+  (3, '30', 30);
+
+query I rowsort
+SELECT COUNT(*) FROM ca WHERE CAST(s AS INTEGER) >= 15;
+----
+2
+
+query I rowsort
+SELECT COUNT(*) FROM ca WHERE n = '10';
+----
+1
+
+query I rowsort
+SELECT COUNT(*) FROM ca WHERE CAST(s AS INTEGER) = 20;
+----
+1

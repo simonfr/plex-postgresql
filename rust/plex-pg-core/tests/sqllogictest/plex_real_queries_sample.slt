@@ -1,0 +1,32 @@
+# Representative Plex-like query shapes (anonymized).
+
+statement ok
+CREATE TABLE metadata_items (
+  id INTEGER,
+  metadata_type INTEGER,
+  title TEXT,
+  title_sort TEXT,
+  extra_data TEXT
+);
+
+statement ok
+INSERT INTO metadata_items (id, metadata_type, title, title_sort, extra_data) VALUES
+  (1, 1, 'Alpha', 'alpha', '{"pv:version":"1"}'),
+  (2, 1, 'Beta', 'beta', '{"pv:version":"2"}'),
+  (3, 2, 'Series', 'series', '{"pv:version":"1"}');
+
+query IT rowsort
+SELECT id, title
+FROM metadata_items
+WHERE metadata_type = 1
+ORDER BY title_sort ASC;
+----
+1 Alpha
+2 Beta
+
+query I rowsort
+SELECT COUNT(*)
+FROM metadata_items
+WHERE json_extract(extra_data, '$.pv:version') = '1';
+----
+2

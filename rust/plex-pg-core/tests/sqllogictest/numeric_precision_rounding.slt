@@ -1,0 +1,19 @@
+# Numeric precision and rounding basics
+
+statement ok
+CREATE TABLE npr (id INTEGER, v REAL);
+
+statement ok
+INSERT INTO npr (id, v) VALUES (1, 1.234), (2, 2.345), (3, 3.999);
+
+query T rowsort
+SELECT ROUND(v) FROM npr ORDER BY id;
+----
+1.0
+2.0
+4.0
+
+query I rowsort
+SELECT ROUND(SUM(v)) FROM npr;
+----
+8

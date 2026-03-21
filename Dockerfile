@@ -1,7 +1,11 @@
+# syntax=docker/dockerfile:1.5
 # Dockerfile for plex-postgresql
 # Build with Alpine 3.15 which has musl 1.2.2 - same as Plex's bundled musl!
 
 FROM alpine:3.15 AS builder
+
+ARG PLEX_PG_SANITIZE
+ENV PLEX_PG_SANITIZE=${PLEX_PG_SANITIZE}
 
 # Install build dependencies
 RUN apk add --no-cache \
@@ -17,8 +21,16 @@ RUN /lib/ld-musl-*.so.1 --version 2>&1 | head -2
 WORKDIR /build
 
 # Install Rust toolchain
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
-ENV PATH="/root/.cargo/bin:${PATH}"
+ENV CARGO_HOME=/usr/local/cargo
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV RUSTUP_TOOLCHAIN=stable
+ENV CARGO_TARGET_DIR=/build/target
+ENV PATH="/usr/local/cargo/bin:${PATH}"
+RUN --mount=type=cache,target=/usr/local/rustup \
+    --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal && \
+    /usr/local/cargo/bin/rustup default stable
 
 # Copy source files
 COPY src/ src/
@@ -27,7 +39,11 @@ COPY rust/ rust/
 COPY scripts/docker-build-shim.sh scripts/docker-build-shim.sh
 
 # Build PostgreSQL/libpq, Rust core, shim, and collect runtime libs in /libs
-RUN sh scripts/docker-build-shim.sh
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/build/target \
+    --mount=type=cache,target=/build/.cache \
+    sh scripts/docker-build-shim.sh
 
 # Runtime stage
 FROM linuxserver/plex:latest
@@ -67,6 +83,7 @@ COPY --from=builder /libs/*.so* /usr/local/lib/plex-postgresql/
 COPY schema/plex_schema.sql /usr/local/lib/plex-postgresql/
 COPY schema/sqlite_schema.sql /usr/local/lib/plex-postgresql/
 COPY schema/sqlite_column_types.sql /usr/local/lib/plex-postgresql/
+COPY schema/pg_compat_functions.sql /usr/local/lib/plex-postgresql/
 COPY scripts/migrate_lib.sh /usr/local/lib/plex-postgresql/
 COPY scripts/migrate_table.py /usr/local/lib/plex-postgresql/
 
@@ -96,17 +113,25 @@ RUN if [ -f /etc/s6-overlay/s6-rc.d/init-plex-claim/run ]; then \
         echo "Patched init-plex-claim for PostgreSQL shim"; \
     fi
 
-# Replace CrashUploader with no-op to prevent SIGCHLD crashes
-# When CrashUploader exits, it sends SIGCHLD to Plex. With LD_PRELOAD active,
-# libpq's pqsignal() interferes with Plex's signal handling, causing
-# "Received unexpected async signal 17" crashes.
-RUN mv /usr/lib/plexmediaserver/CrashUploader /usr/lib/plexmediaserver/CrashUploader.real 2>/dev/null || true && \
-    printf '#!/bin/sh\nexit 0\n' > /usr/lib/plexmediaserver/CrashUploader && \
-    chmod +x /usr/lib/plexmediaserver/CrashUploader
+# Keep upstream CrashUploader binary.
+# With SIGCHLD forced to SIG_IGN, child exits should no longer destabilize Plex.
 
-# Modify Plex run script at BUILD TIME to inject LD_PRELOAD
-# This must be done at build time because s6-rc compiles services before oneshots run
-# We use a heredoc approach via a temp file since sed multiline is tricky in Dockerfile
-RUN SHIM_INJECT='# PostgreSQL shim injection\nexport LD_LIBRARY_PATH="/usr/local/lib/plex-postgresql:/usr/lib/plexmediaserver/lib:$LD_LIBRARY_PATH"\nexport LD_PRELOAD="/usr/local/lib/plex-postgresql/db_interpose_pg.so"' && \
-    sed -i "2i\\${SHIM_INJECT}" /etc/s6-overlay/s6-rc.d/svc-plex/run && \
+# Inject shim env only for the actual Plex binary, not wrapper/helper processes.
+# This avoids preloading into s6-notifyoncheck and short-lived helper binaries.
+RUN printf '%s\n' \
+      '#!/usr/bin/env bash' \
+      'mkdir -p /run/plex-temp' \
+      'chmod 1777 /run/plex-temp 2>/dev/null || true' \
+      'export LD_LIBRARY_PATH="/usr/local/lib/plex-postgresql:/usr/lib/plexmediaserver/lib:$LD_LIBRARY_PATH"' \
+      'export LD_PRELOAD="/usr/local/lib/plex-postgresql/db_interpose_pg.so"' \
+      'if [[ "$(uname -m)" == "aarch64" || "$(uname -m)" == "arm64" ]]; then' \
+      '  export OPENSSL_armcap="${PLEX_PG_OPENSSL_ARMCAP:-0}"' \
+      'fi' \
+      'exec "/usr/lib/plexmediaserver/Plex Media Server" "$@"' \
+      > /usr/local/lib/plex-postgresql/plex-with-shim.sh && \
+    chmod +x /usr/local/lib/plex-postgresql/plex-with-shim.sh && \
+    sed -i 's|s6-setuidgid abc "/usr/lib/plexmediaserver/Plex Media Server"|s6-setuidgid abc /usr/local/lib/plex-postgresql/plex-with-shim.sh|' \
+      /etc/s6-overlay/s6-rc.d/svc-plex/run && \
+    sed -i 's|"/usr/lib/plexmediaserver/Plex Media Server"|/usr/local/lib/plex-postgresql/plex-with-shim.sh|' \
+      /etc/s6-overlay/s6-rc.d/svc-plex/run && \
     cat /etc/s6-overlay/s6-rc.d/svc-plex/run

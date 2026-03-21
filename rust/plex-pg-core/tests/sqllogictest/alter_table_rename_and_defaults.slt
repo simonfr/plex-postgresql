@@ -1,0 +1,18 @@
+# ALTER TABLE rename/default flows
+
+statement ok
+CREATE TABLE atr (id INTEGER, v TEXT DEFAULT 'x');
+
+statement ok
+ALTER TABLE atr RENAME TO atr2;
+
+statement ok
+ALTER TABLE atr2 ADD COLUMN n INTEGER DEFAULT 7;
+
+statement ok
+INSERT INTO atr2 (id, v) VALUES (1, 'a');
+
+query II rowsort
+SELECT id, n FROM atr2;
+----
+1 7

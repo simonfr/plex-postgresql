@@ -280,6 +280,50 @@ fn make_number_literal(s: &str) -> Expr {
     })
 }
 
+fn make_case_when(condition: Expr, then_expr: Expr, else_expr: Expr) -> Expr {
+    Expr::Case {
+        case_token: AttachedToken::empty(),
+        end_token: AttachedToken::empty(),
+        operand: None,
+        conditions: vec![CaseWhen {
+            condition,
+            result: then_expr,
+        }],
+        else_result: Some(Box::new(else_expr)),
+    }
+}
+
+fn is_integer_path_segment(seg: &str) -> bool {
+    seg.parse::<i64>().is_ok()
+}
+
+fn escape_jsonpath_key_segment(seg: &str) -> String {
+    seg.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn jsonpath_from_segments(path_segments: &[String]) -> String {
+    let mut out = String::from("$");
+    for seg in path_segments {
+        if is_integer_path_segment(seg) {
+            out.push('[');
+            out.push_str(seg);
+            out.push(']');
+        } else {
+            out.push_str("[\"");
+            out.push_str(&escape_jsonpath_key_segment(seg));
+            out.push_str("\"]");
+        }
+    }
+    out
+}
+
+fn make_jsonb_path_exists(doc: Expr, path_segments: &[String]) -> Expr {
+    make_function_call(
+        "jsonb_path_exists",
+        vec![doc, make_string_literal(&jsonpath_from_segments(path_segments))],
+    )
+}
+
 /// Parse a limited SQLite JSON path syntax into segments:
 ///   $.a.b[0].c -> ["a","b","0","c"]
 /// Returns None for unsupported path syntax.
@@ -515,7 +559,13 @@ fn rewrite_json_array_length_call(mut args: Vec<Expr>) -> Option<Expr> {
     ))
 }
 
-fn rewrite_json_set_like_call(args: Vec<Expr>, create_missing: bool) -> Option<Expr> {
+enum JsonSetMode {
+    Set,
+    Insert,
+    Replace,
+}
+
+fn rewrite_json_set_like_call(args: Vec<Expr>, mode: JsonSetMode) -> Option<Expr> {
     if args.len() < 3 {
         return None;
     }
@@ -529,18 +579,32 @@ fn rewrite_json_set_like_call(args: Vec<Expr>, create_missing: bool) -> Option<E
         let path_expr = &rest[i];
         let value_expr = rest[i + 1].clone();
         if let Some(path_segments) = get_literal_json_path(path_expr) {
-            current = make_function_call(
+            let should_create = matches!(mode, JsonSetMode::Set | JsonSetMode::Insert);
+            let rewritten = make_function_call(
                 "jsonb_set",
                 vec![
-                    current,
+                    current.clone(),
                     make_path_text_array_expr(&path_segments),
                     make_to_jsonb(value_expr),
                     Expr::Value(ValueWithSpan {
-                        value: Value::Boolean(create_missing),
+                        value: Value::Boolean(should_create),
                         span: Span::empty(),
                     }),
                 ],
             );
+            current = match mode {
+                JsonSetMode::Set => rewritten,
+                JsonSetMode::Insert => make_case_when(
+                    make_jsonb_path_exists(current.clone(), &path_segments),
+                    current,
+                    rewritten,
+                ),
+                JsonSetMode::Replace => make_case_when(
+                    make_jsonb_path_exists(current.clone(), &path_segments),
+                    rewritten,
+                    current,
+                ),
+            };
             rewrote_any = true;
         }
         i += 2;
@@ -578,11 +642,7 @@ fn rewrite_json_patch_call(args: Vec<Expr>) -> Option<Expr> {
     }
     let left = make_jsonb_cast(args[0].clone());
     let right = make_jsonb_cast(args[1].clone());
-    Some(Expr::BinaryOp {
-        left: Box::new(left),
-        op: BinaryOperator::StringConcat,
-        right: Box::new(right),
-    })
+    Some(make_function_call("jsonb_mergepatch", vec![left, right]))
 }
 
 fn rewrite_group_concat_call(args: Vec<Expr>) -> Option<Expr> {
@@ -810,13 +870,21 @@ fn transform_expr(expr: &mut Expr) {
                 // json_set/json_insert/json_replace -> jsonb_set(...)
                 "json_set" => {
                     let args = extract_unnamed_args(func);
-                    if let Some(new_expr) = rewrite_json_set_like_call(args, true) {
+                    if let Some(new_expr) = rewrite_json_set_like_call(args, JsonSetMode::Set) {
                         *expr = new_expr;
                     }
                 }
-                "json_insert" | "json_replace" => {
+                "json_insert" => {
                     let args = extract_unnamed_args(func);
-                    if let Some(new_expr) = rewrite_json_set_like_call(args, false) {
+                    if let Some(new_expr) = rewrite_json_set_like_call(args, JsonSetMode::Insert)
+                    {
+                        *expr = new_expr;
+                    }
+                }
+                "json_replace" => {
+                    let args = extract_unnamed_args(func);
+                    if let Some(new_expr) = rewrite_json_set_like_call(args, JsonSetMode::Replace)
+                    {
                         *expr = new_expr;
                     }
                 }
@@ -1443,11 +1511,11 @@ mod tests {
     }
 
     #[test]
-    fn function_json_patch_rewrites_to_jsonb_concat() {
+    fn function_json_patch_rewrites_to_jsonb_mergepatch() {
         let r = translate("SELECT json_patch(a, b) FROM t").unwrap();
         let low = r.sql.to_lowercase();
         assert!(low.contains("::jsonb"), "{}", r.sql);
-        assert!(low.contains("||"), "{}", r.sql);
+        assert!(low.contains("jsonb_mergepatch"), "{}", r.sql);
     }
 
     #[test]
@@ -1476,6 +1544,24 @@ mod tests {
         let r = translate("SELECT json_group_object(k, v) FROM t").unwrap();
         let low = r.sql.to_lowercase();
         assert!(low.contains("jsonb_object_agg"), "{}", r.sql);
+    }
+
+    #[test]
+    fn function_json_insert_is_conditional_on_missing_path() {
+        let r = translate("SELECT json_insert(extra_data, '$.status', 'ok') FROM t").unwrap();
+        let low = r.sql.to_lowercase();
+        assert!(low.contains("case"), "{}", r.sql);
+        assert!(low.contains("jsonb_path_exists"), "{}", r.sql);
+        assert!(low.contains("jsonb_set"), "{}", r.sql);
+    }
+
+    #[test]
+    fn function_json_replace_is_conditional_on_existing_path() {
+        let r = translate("SELECT json_replace(extra_data, '$.status', 'ok') FROM t").unwrap();
+        let low = r.sql.to_lowercase();
+        assert!(low.contains("case"), "{}", r.sql);
+        assert!(low.contains("jsonb_path_exists"), "{}", r.sql);
+        assert!(low.contains("jsonb_set"), "{}", r.sql);
     }
 
     #[test]

@@ -20,6 +20,7 @@ fn backtick_identifier_matrix() {
         "SELECT `order` FROM `t`",
         "SELECT `itemId` AS `itemAlias` FROM `mixedCaseTable`",
         "SELECT `state` FROM `queue_items` WHERE `state` = 1",
+        "SELECT pqg.`id`,pqg.`playlist_id`,pqg.`metadata_item_id`,pqg.`uri`,pqg.`limit`,pqg.`continuous`,pqg.`recursive`,pqg.`order`,pqg.`created_at`,pqg.`updated_at`,pqg.`changed_at`,pqg.`type`,pqg.`extra_data` FROM play_queue_generators pqg WHERE pqg.`type`!=:C1",
     ];
     for sql in cases {
         let out = tr(sql);
@@ -65,4 +66,3 @@ fn distinct_orderby_matrix() {
     assert!(low2.contains("title"), "{}", out2);
     assert_pg(&out2);
 }
-

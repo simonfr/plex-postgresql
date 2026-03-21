@@ -1,0 +1,33 @@
+# JSON focused coverage
+
+statement ok
+CREATE TABLE j (id INTEGER, extra TEXT);
+
+statement ok
+INSERT INTO j (id, extra) VALUES
+  (1, '{"status":"active","items":[1,2]}'),
+  (2, '{"status":"paused","items":[3]}');
+
+query T rowsort
+SELECT json_extract(extra, '$.status') FROM j ORDER BY id;
+----
+active
+paused
+
+query T rowsort
+SELECT json_type(extra, '$.items') FROM j ORDER BY id;
+----
+array
+array
+
+query I rowsort
+SELECT json_array_length(extra, '$.items') FROM j ORDER BY id;
+----
+2
+1
+
+query T rowsort
+SELECT json_quote(json_extract(extra, '$.status')) FROM j ORDER BY id;
+----
+"active"
+"paused"

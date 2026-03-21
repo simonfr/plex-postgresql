@@ -1,0 +1,30 @@
+# Sequential proxy for concurrency-sensitive semantics.
+
+statement ok
+CREATE TABLE cs (id INTEGER, v INTEGER);
+
+statement ok
+INSERT INTO cs (id, v) VALUES (1, 0);
+
+statement ok
+BEGIN IMMEDIATE;
+
+statement ok
+UPDATE cs SET v = v + 1 WHERE id = 1;
+
+statement ok
+COMMIT;
+
+statement ok
+BEGIN IMMEDIATE;
+
+statement ok
+UPDATE cs SET v = v + 1 WHERE id = 1;
+
+statement ok
+COMMIT;
+
+query I rowsort
+SELECT v FROM cs WHERE id = 1;
+----
+2

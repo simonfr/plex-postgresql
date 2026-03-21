@@ -1,0 +1,17 @@
+# Placeholder-related patterns using deterministic literals (harness-safe).
+
+statement ok
+CREATE TABLE pp (id INTEGER, name TEXT, score INTEGER);
+
+statement ok
+INSERT INTO pp (id, name, score) VALUES (1, 'a', 10), (2, 'b', 20), (3, 'c', 30);
+
+query I rowsort
+SELECT COUNT(*) FROM pp WHERE score > 15;
+----
+2
+
+query T rowsort
+SELECT name FROM pp WHERE id = 2;
+----
+b

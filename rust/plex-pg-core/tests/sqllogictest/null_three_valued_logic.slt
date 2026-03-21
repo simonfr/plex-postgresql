@@ -1,0 +1,26 @@
+# NULL and three-valued logic
+
+statement ok
+CREATE TABLE n3 (id INTEGER, a INTEGER, b INTEGER);
+
+statement ok
+INSERT INTO n3 (id, a, b) VALUES
+  (1, 1, NULL),
+  (2, NULL, 2),
+  (3, NULL, NULL),
+  (4, 1, 2);
+
+query I rowsort
+SELECT COUNT(*) FROM n3 WHERE a = 1 AND b = 2;
+----
+1
+
+query I rowsort
+SELECT COUNT(*) FROM n3 WHERE a IS NULL OR b IS NULL;
+----
+3
+
+query I rowsort
+SELECT COUNT(*) FROM n3 WHERE NOT (a = 1);
+----
+0

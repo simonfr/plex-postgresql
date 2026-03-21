@@ -36,6 +36,9 @@ $PSQL -c "CREATE SCHEMA IF NOT EXISTS $PG_SCHEMA;"
 echo "Step 2: Applying schema..."
 $PSQL -f "$(dirname "$0")/../schema/plex_schema.sql"
 
+echo "Step 2b: Applying PostgreSQL compatibility functions..."
+$PSQL -f "$(dirname "$0")/../schema/pg_compat_functions.sql"
+
 echo "Step 3: Exporting tables from SQLite..."
 
 # Get list of tables

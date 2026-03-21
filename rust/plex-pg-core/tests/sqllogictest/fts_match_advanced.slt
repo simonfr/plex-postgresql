@@ -1,0 +1,26 @@
+# FTS-adjacent token search behavior via LIKE/GLOB (execution-safe).
+
+statement ok
+CREATE TABLE fma (id INTEGER, title TEXT);
+
+statement ok
+INSERT INTO fma (id, title) VALUES
+  (1, 'star wars'),
+  (2, 'star trek'),
+  (3, 'war stories'),
+  (4, 'comedy');
+
+query I rowsort
+SELECT COUNT(*) FROM fma WHERE title LIKE 'star%';
+----
+2
+
+query I rowsort
+SELECT COUNT(*) FROM fma WHERE title GLOB '*war*';
+----
+2
+
+query I rowsort
+SELECT COUNT(*) FROM fma WHERE title LIKE '%star%' AND title LIKE '%war%';
+----
+1

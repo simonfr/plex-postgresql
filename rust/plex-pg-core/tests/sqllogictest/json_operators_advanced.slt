@@ -1,0 +1,27 @@
+# JSON operator variants
+
+statement ok
+CREATE TABLE joa (id INTEGER, extra TEXT);
+
+statement ok
+INSERT INTO joa (id, extra) VALUES
+  (1, '{"status":"ok","meta":{"v":"1.0"},"arr":[1,2]}'),
+  (2, '{"status":"paused","meta":{"v":"2.0"},"arr":[3]}');
+
+query T rowsort
+SELECT extra ->> '$.status' FROM joa ORDER BY id;
+----
+ok
+paused
+
+query T rowsort
+SELECT json_extract(extra, '$.meta.v') FROM joa ORDER BY id;
+----
+1.0
+2.0
+
+query T rowsort
+SELECT extra -> '$.arr[0]' FROM joa ORDER BY id;
+----
+1
+3

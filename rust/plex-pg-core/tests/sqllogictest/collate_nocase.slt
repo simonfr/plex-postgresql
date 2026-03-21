@@ -1,0 +1,17 @@
+# COLLATE NOCASE behavior
+
+statement ok
+CREATE TABLE cn (name TEXT);
+
+statement ok
+INSERT INTO cn (name) VALUES ('Alpha'), ('alpha'), ('BETA');
+
+query I rowsort
+SELECT COUNT(*) FROM cn WHERE name COLLATE NOCASE = 'alpha';
+----
+2
+
+query I rowsort
+SELECT COUNT(*) FROM cn WHERE name COLLATE NOCASE = 'beta';
+----
+1

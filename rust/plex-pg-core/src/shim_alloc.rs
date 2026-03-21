@@ -26,6 +26,8 @@
 ///   rust_shim_alloc_dump_leaks()
 ///   rust_shim_alloc_reset()
 use std::os::raw::{c_char, c_int};
+use std::ptr;
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -414,6 +416,11 @@ pub extern "C" fn rust_shim_alloc_maybe_log() {
     }
 }
 
+#[no_mangle]
+pub extern "C" fn shim_alloc_maybe_log() {
+    rust_shim_alloc_maybe_log();
+}
+
 /// Log a note that per-site leak data is not available from the Rust backend.
 ///
 /// The C implementation aggregates file/line pairs stored in the hash table.
@@ -465,6 +472,253 @@ pub extern "C" fn rust_shim_alloc_reset() {
         entry.size.store(0, Ordering::Relaxed);
         entry.ptr.store(0, Ordering::Release);
     }
+}
+
+// ─── Guarded allocator (ported from shim_alloc.c) ────────────────────────────
+
+const SHIM_GUARD_MAGIC: u64 = 0x504C455847554152; // "PLEXGUAR"
+const SHIM_GUARD_ALIGN: usize = 16;
+
+#[repr(C)]
+struct ShimGuardHeader {
+    magic: u64,
+    size: usize,
+    map_len: usize,
+    map_base: *mut libc::c_void,
+}
+
+const SHIM_GUARD_HEADER_SIZE: usize =
+    (std::mem::size_of::<ShimGuardHeader>() + (SHIM_GUARD_ALIGN - 1)) & !(SHIM_GUARD_ALIGN - 1);
+
+static SHIM_GUARD_ENABLED: AtomicI32 = AtomicI32::new(-1);
+static SHIM_GUARD_PAGE_SIZE: AtomicUsize = AtomicUsize::new(0);
+
+fn shim_guard_alloc_enabled() -> bool {
+    let cached = SHIM_GUARD_ENABLED.load(Ordering::Relaxed);
+    if cached != -1 {
+        return cached == 1;
+    }
+    let enabled = std::env::var("PLEX_PG_GUARD_ALLOC")
+        .map(|v| !v.is_empty() && v != "0")
+        .unwrap_or(false);
+    SHIM_GUARD_ENABLED.store(if enabled { 1 } else { 0 }, Ordering::Relaxed);
+    enabled
+}
+
+fn shim_guard_page_size() -> usize {
+    let cached = SHIM_GUARD_PAGE_SIZE.load(Ordering::Relaxed);
+    if cached != 0 {
+        return cached;
+    }
+    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    let page_size = if page > 0 { page as usize } else { 4096 };
+    SHIM_GUARD_PAGE_SIZE.store(page_size, Ordering::Relaxed);
+    page_size
+}
+
+#[cfg(target_os = "macos")]
+const MAP_ANON_FLAG: c_int = libc::MAP_ANON;
+#[cfg(not(target_os = "macos"))]
+const MAP_ANON_FLAG: c_int = libc::MAP_ANONYMOUS;
+
+unsafe fn shim_guard_malloc(size: usize) -> *mut libc::c_void {
+    let size = if size == 0 { 1 } else { size };
+    let page = shim_guard_page_size();
+    let data_len = SHIM_GUARD_HEADER_SIZE + size;
+    let data_pages = (data_len + page - 1) / page;
+    let total = (data_pages + 2) * page;
+
+    let base = libc::mmap(
+        ptr::null_mut(),
+        total,
+        libc::PROT_READ | libc::PROT_WRITE,
+        libc::MAP_PRIVATE | MAP_ANON_FLAG,
+        -1,
+        0,
+    );
+    if base == libc::MAP_FAILED {
+        return ptr::null_mut();
+    }
+
+    libc::mprotect(base, page, libc::PROT_NONE);
+    let end_guard = (base as *mut u8).add(total - page) as *mut libc::c_void;
+    libc::mprotect(end_guard, page, libc::PROT_NONE);
+
+    let hdr = (base as *mut u8).add(page) as *mut ShimGuardHeader;
+    (*hdr).magic = SHIM_GUARD_MAGIC;
+    (*hdr).size = size;
+    (*hdr).map_len = total;
+    (*hdr).map_base = base;
+
+    (hdr as *mut u8).add(SHIM_GUARD_HEADER_SIZE) as *mut libc::c_void
+}
+
+unsafe fn shim_guard_header_from_ptr(ptr_in: *mut libc::c_void) -> *mut ShimGuardHeader {
+    if ptr_in.is_null() {
+        return ptr::null_mut();
+    }
+    let hdr = (ptr_in as *mut u8).sub(SHIM_GUARD_HEADER_SIZE) as *mut ShimGuardHeader;
+    if (*hdr).magic != SHIM_GUARD_MAGIC {
+        return ptr::null_mut();
+    }
+    hdr
+}
+
+unsafe fn shim_guard_free(ptr_in: *mut libc::c_void) {
+    if ptr_in.is_null() {
+        return;
+    }
+    let hdr = shim_guard_header_from_ptr(ptr_in);
+    if hdr.is_null() || (*hdr).map_base.is_null() || (*hdr).map_len == 0 {
+        libc::free(ptr_in);
+        return;
+    }
+    libc::munmap((*hdr).map_base, (*hdr).map_len);
+}
+
+unsafe fn shim_guard_realloc(old_ptr: *mut libc::c_void, new_size: usize) -> *mut libc::c_void {
+    if old_ptr.is_null() {
+        return shim_guard_malloc(new_size);
+    }
+    let hdr = shim_guard_header_from_ptr(old_ptr);
+    if hdr.is_null() {
+        return libc::realloc(old_ptr, new_size);
+    }
+    let copy_size = if (*hdr).size < new_size { (*hdr).size } else { new_size };
+    let new_ptr = shim_guard_malloc(new_size);
+    if new_ptr.is_null() {
+        return ptr::null_mut();
+    }
+    libc::memcpy(new_ptr, old_ptr, copy_size);
+    libc::munmap((*hdr).map_base, (*hdr).map_len);
+    new_ptr
+}
+
+// ─── C ABI wrappers (shim_alloc.c replacement) ───────────────────────────────
+
+#[no_mangle]
+pub extern "C" fn shim_malloc_tracked(size: usize, file: *const c_char, line: c_int) -> *mut libc::c_void {
+    let ptr_out = unsafe {
+        if shim_guard_alloc_enabled() {
+            shim_guard_malloc(size)
+        } else {
+            libc::malloc(size)
+        }
+    };
+    if !ptr_out.is_null() && rust_shim_alloc_enabled() != 0 {
+        unsafe {
+            rust_shim_alloc_record(ptr_out as u64, size as u64, file, line);
+        }
+        rust_shim_alloc_record_alloc(size as u64);
+    }
+    ptr_out
+}
+
+#[no_mangle]
+pub extern "C" fn shim_calloc_tracked(
+    count: usize,
+    size: usize,
+    file: *const c_char,
+    line: c_int,
+) -> *mut libc::c_void {
+    let total = count.saturating_mul(size);
+    let ptr_out = unsafe {
+        if shim_guard_alloc_enabled() {
+            let p = shim_guard_malloc(total);
+            if !p.is_null() && total > 0 {
+                libc::memset(p, 0, total);
+            }
+            p
+        } else {
+            libc::calloc(count, size)
+        }
+    };
+    if !ptr_out.is_null() && rust_shim_alloc_enabled() != 0 {
+        unsafe {
+            rust_shim_alloc_record(ptr_out as u64, total as u64, file, line);
+        }
+        rust_shim_alloc_record_alloc(total as u64);
+    }
+    ptr_out
+}
+
+#[no_mangle]
+pub extern "C" fn shim_realloc_tracked(
+    old_ptr: *mut libc::c_void,
+    new_size: usize,
+    file: *const c_char,
+    line: c_int,
+) -> *mut libc::c_void {
+    if rust_shim_alloc_enabled() == 0 {
+        return unsafe {
+            if shim_guard_alloc_enabled() {
+                shim_guard_realloc(old_ptr, new_size)
+            } else {
+                libc::realloc(old_ptr, new_size)
+            }
+        };
+    }
+
+    let old_size = if old_ptr.is_null() {
+        0
+    } else {
+        rust_shim_alloc_remove(old_ptr as u64)
+    };
+
+    let ptr_out = unsafe {
+        if shim_guard_alloc_enabled() {
+            shim_guard_realloc(old_ptr, new_size)
+        } else {
+            libc::realloc(old_ptr, new_size)
+        }
+    };
+
+    if !ptr_out.is_null() {
+        unsafe {
+            rust_shim_alloc_record(ptr_out as u64, new_size as u64, file, line);
+        }
+        rust_shim_alloc_record_realloc(old_size, new_size as u64);
+    } else if !old_ptr.is_null() {
+        unsafe {
+            rust_shim_alloc_record(old_ptr as u64, old_size, file, line);
+        }
+    }
+
+    ptr_out
+}
+
+#[no_mangle]
+pub extern "C" fn shim_free_tracked(ptr_in: *mut libc::c_void, _file: *const c_char, _line: c_int) {
+    if ptr_in.is_null() {
+        return;
+    }
+    if rust_shim_alloc_enabled() != 0 {
+        let size = rust_shim_alloc_remove(ptr_in as u64);
+        rust_shim_alloc_record_free(size);
+    }
+    unsafe {
+        if shim_guard_alloc_enabled() {
+            shim_guard_free(ptr_in);
+        } else {
+            libc::free(ptr_in);
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn shim_strdup_tracked(s: *const c_char, file: *const c_char, line: c_int) -> *mut c_char {
+    if s.is_null() {
+        return ptr::null_mut();
+    }
+    let len = unsafe { libc::strlen(s) } + 1;
+    let dst = shim_malloc_tracked(len, file, line) as *mut c_char;
+    if dst.is_null() {
+        return ptr::null_mut();
+    }
+    unsafe {
+        libc::memcpy(dst as *mut libc::c_void, s as *const libc::c_void, len);
+    }
+    dst
 }
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────

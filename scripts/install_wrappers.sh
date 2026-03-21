@@ -182,6 +182,47 @@ init_pg_schema() {
     else
         echo "[plex-pg] PostgreSQL schema '$schema' is empty (Plex will create tables on first run)"
     fi
+
+    # Ensure PostgreSQL compatibility helper functions exist.
+    psql <<'SQL' >/dev/null 2>&1 || true
+CREATE OR REPLACE FUNCTION public.jsonb_mergepatch(target jsonb, patch jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+PARALLEL SAFE
+AS $fn$
+DECLARE
+    result jsonb;
+    k text;
+    v jsonb;
+BEGIN
+    IF jsonb_typeof(patch) <> 'object' THEN
+        RETURN patch;
+    END IF;
+
+    IF jsonb_typeof(target) <> 'object' THEN
+        result := '{}'::jsonb;
+    ELSE
+        result := target;
+    END IF;
+
+    FOR k, v IN SELECT e.key, e.value FROM jsonb_each(patch) AS e(key, value) LOOP
+        IF v = 'null'::jsonb THEN
+            result := result - k;
+        ELSIF (result ? k)
+              AND jsonb_typeof(result -> k) = 'object'
+              AND jsonb_typeof(v) = 'object' THEN
+            result := jsonb_set(result, ARRAY[k], public.jsonb_mergepatch(result -> k, v), true);
+        ELSE
+            result := jsonb_set(result, ARRAY[k], v, true);
+        END IF;
+    END LOOP;
+
+    RETURN result;
+END;
+$fn$;
+SQL
 }
 
 init_sqlite_schema() {

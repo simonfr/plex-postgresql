@@ -1,0 +1,22 @@
+# Placeholder ordering/reuse analogs with fixed literals.
+
+statement ok
+CREATE TABLE pro (id INTEGER, a INTEGER, b INTEGER);
+
+statement ok
+INSERT INTO pro (id, a, b) VALUES (1, 5, 5), (2, 5, 7), (3, 8, 8), (4, 9, 1);
+
+query I rowsort
+SELECT COUNT(*) FROM pro WHERE a = 5 OR b = 5;
+----
+2
+
+query I rowsort
+SELECT COUNT(*) FROM pro WHERE a = b;
+----
+2
+
+query I rowsort
+SELECT COUNT(*) FROM pro WHERE a > 4 AND b > 4;
+----
+3

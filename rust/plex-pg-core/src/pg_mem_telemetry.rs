@@ -274,6 +274,23 @@ pub extern "C" fn rust_mem_telemetry_maybe_log() {
     }
 }
 
+// ─── C ABI wrappers (pg_mem_telemetry.c replacement) ─────────────────────────
+
+#[no_mangle]
+pub extern "C" fn pg_mem_telemetry_enabled() -> i32 {
+    rust_mem_telemetry_enabled()
+}
+
+#[no_mangle]
+pub extern "C" fn pg_mem_telemetry_add(counter: i32, bytes: u64, events: u64) {
+    rust_mem_telemetry_add(counter, bytes, events);
+}
+
+#[no_mangle]
+pub extern "C" fn pg_mem_telemetry_maybe_log() {
+    rust_mem_telemetry_maybe_log();
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
