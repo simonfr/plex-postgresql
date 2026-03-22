@@ -1,7 +1,8 @@
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 use std::os::raw::{c_char, c_int, c_void};
 
 use crate::db_interpose_common::tls_in_interpose_call_ptr;
+use crate::db_interpose_conn_utils::{cstr_to_string_or, log_debug, PthreadMutexGuard};
 use crate::ffi_types::{sqlite3, sqlite3_stmt, PgStmt, MAX_PARAMS};
 const SQLITE_OK: c_int = 0;
 const SQLITE_ERROR: c_int = 1;
@@ -107,19 +108,6 @@ impl Drop for InterposeGuard {
     }
 }
 
-fn log_debug(msg: &str) {
-    if let Ok(cs) = CString::new(msg) {
-        crate::pg_logging::rust_logging_write(2, cs.as_ptr());
-    }
-}
-
-fn cstr_to_string_or(ptr: *const c_char, default: &str) -> String {
-    if ptr.is_null() {
-        return default.to_string();
-    }
-    unsafe { CStr::from_ptr(ptr).to_string_lossy().into_owned() }
-}
-
 fn contains_icase_bytes(haystack: &[u8], needle: &[u8]) -> bool {
     if needle.is_empty() || haystack.len() < needle.len() {
         return false;
@@ -213,7 +201,7 @@ pub extern "C" fn rust_my_sqlite3_last_insert_rowid(db: *mut sqlite3) -> i64 {
             && (*pg_conn).is_pg_active != 0
             && !(*pg_conn).conn.is_null()
         {
-            libc::pthread_mutex_lock(&mut (*pg_conn).mutex as *mut _);
+            let mut conn_guard = PthreadMutexGuard::lock(&mut (*pg_conn).mutex as *mut _);
             log_debug(&format!(
                 "last_insert_rowid: EXECUTING lastval() on conn {:p}",
                 (*pg_conn).conn
@@ -223,7 +211,7 @@ pub extern "C" fn rust_my_sqlite3_last_insert_rowid(db: *mut sqlite3) -> i64 {
                 b"SELECT lastval()\0".as_ptr() as *const c_char,
             );
             if res.is_null() {
-                libc::pthread_mutex_unlock(&mut (*pg_conn).mutex as *mut _);
+                conn_guard.unlock();
                 log_debug("last_insert_rowid: NULL result, RETURNING 0");
                 return 0;
             }
@@ -254,7 +242,7 @@ pub extern "C" fn rust_my_sqlite3_last_insert_rowid(db: *mut sqlite3) -> i64 {
                     rowid
                 ));
                 crate::libpq_helpers::rust_pq_clear(res);
-                libc::pthread_mutex_unlock(&mut (*pg_conn).mutex as *mut _);
+                conn_guard.unlock();
                 if rowid > 0 {
                     log_debug(&format!("last_insert_rowid: RETURNING rowid={}", rowid));
                     result = rowid;
@@ -272,7 +260,7 @@ pub extern "C" fn rust_my_sqlite3_last_insert_rowid(db: *mut sqlite3) -> i64 {
                     log_debug(&format!("last_insert_rowid: NON-TUPLES status={}", status));
                 }
                 crate::libpq_helpers::rust_pq_clear(res);
-                libc::pthread_mutex_unlock(&mut (*pg_conn).mutex as *mut _);
+                conn_guard.unlock();
                 log_debug("last_insert_rowid: RETURNING 0 due to error");
             }
         } else {
@@ -397,7 +385,7 @@ pub extern "C" fn rust_my_sqlite3_get_table(
         {
             let mut trans = sql_translate(sql);
             if trans.success != 0 && !trans.sql.is_null() {
-                libc::pthread_mutex_lock(&mut (*pg_conn).mutex as *mut _);
+                let mut conn_guard = PthreadMutexGuard::lock(&mut (*pg_conn).mutex as *mut _);
                 let res = crate::libpq_helpers::rust_pq_exec((*pg_conn).conn, trans.sql);
                 if crate::libpq_helpers::rust_pq_result_status(res) == PGRES_TUPLES_OK {
                     let mut result: *mut *mut c_char = std::ptr::null_mut();
@@ -423,13 +411,13 @@ pub extern "C" fn rust_my_sqlite3_get_table(
                             *pz_err_msg = std::ptr::null_mut();
                         }
                         crate::libpq_helpers::rust_pq_clear(res);
-                        libc::pthread_mutex_unlock(&mut (*pg_conn).mutex as *mut _);
+                        conn_guard.unlock();
                         sql_translation_free(&mut trans as *mut SqlTranslation);
                         return SQLITE_OK;
                     }
                 }
                 crate::libpq_helpers::rust_pq_clear(res);
-                libc::pthread_mutex_unlock(&mut (*pg_conn).mutex as *mut _);
+                conn_guard.unlock();
             }
             sql_translation_free(&mut trans as *mut SqlTranslation);
         }

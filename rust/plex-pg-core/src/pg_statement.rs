@@ -49,6 +49,7 @@ use std::os::raw::{c_char, c_int, c_void};
 use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 use std::sync::{Once, RwLock};
 
+use crate::db_interpose_conn_utils::{log_debug, log_error, log_info, PthreadMutexGuard};
 use crate::db_interpose_helpers::cstr_to_str_or_empty;
 use crate::ffi_types::{sqlite3_stmt, sqlite3_value, PgConnection, PgStmt, MAX_PARAMS, PARAM_BUF_LEN};
 
@@ -324,39 +325,6 @@ static PG_VALUES: std::sync::LazyLock<Vec<std::sync::Mutex<PgValue>>> =
         v
     });
 
-fn log_debug(msg: &str) {
-    extern "C" {
-        fn rust_logging_write(level: i32, message: *const c_char);
-    }
-    if let Ok(cmsg) = CString::new(msg) {
-        unsafe {
-            rust_logging_write(2, cmsg.as_ptr());
-        }
-    }
-}
-
-fn log_info(msg: &str) {
-    extern "C" {
-        fn rust_logging_write(level: i32, message: *const c_char);
-    }
-    if let Ok(cmsg) = CString::new(msg) {
-        unsafe {
-            rust_logging_write(1, cmsg.as_ptr());
-        }
-    }
-}
-
-fn log_error(msg: &str) {
-    extern "C" {
-        fn rust_logging_write(level: i32, message: *const c_char);
-    }
-    if let Ok(cmsg) = CString::new(msg) {
-        unsafe {
-            rust_logging_write(0, cmsg.as_ptr());
-        }
-    }
-}
-
 // ─── Internal pure helpers (unchanged from Phase 2) ──────────────────────────
 
 /// Map a PostgreSQL OID to an SQLite type constant.
@@ -433,10 +401,7 @@ static DISABLE_STMT_CACHE: std::sync::LazyLock<AtomicI32> =
     std::sync::LazyLock::new(|| AtomicI32::new(-1));
 
 fn env_truthy(name: &str) -> bool {
-    match std::env::var(name) {
-        Ok(v) if !v.is_empty() => matches!(v.as_bytes()[0], b'1' | b'y' | b'Y' | b't' | b'T'),
-        _ => false,
-    }
+    crate::env_utils::env_truthy_str(name)
 }
 
 fn leak_enabled() -> bool {
@@ -567,7 +532,7 @@ pub extern "C" fn rust_stmt_free(stmt_ptr: *mut PgStmt) {
                 stmt.streaming_conn = std::ptr::null_mut();
             } else {
                 let sconn = stmt.streaming_conn;
-                libc::pthread_mutex_lock(&mut (*sconn).mutex as *mut _);
+                let _conn_guard = PthreadMutexGuard::lock(&mut (*sconn).mutex as *mut _);
                 if !(*sconn).conn.is_null() {
                     let cancel = crate::libpq_helpers::rust_pq_get_cancel((*sconn).conn);
                     if !cancel.is_null() {
@@ -606,7 +571,6 @@ pub extern "C" fn rust_stmt_free(stmt_ptr: *mut PgStmt) {
                         ));
                     }
                 }
-                libc::pthread_mutex_unlock(&mut (*sconn).mutex as *mut _);
                 stmt.streaming_mode = 0;
                 (*sconn)
                     .streaming_active
@@ -791,7 +755,7 @@ pub extern "C" fn rust_stmt_clear_result(stmt_ptr: *mut PgStmt) {
                 stmt.streaming_conn = std::ptr::null_mut();
             } else {
                 let sconn = stmt.streaming_conn;
-                libc::pthread_mutex_lock(&mut (*sconn).mutex as *mut _);
+                let _conn_guard = PthreadMutexGuard::lock(&mut (*sconn).mutex as *mut _);
                 if !(*sconn).conn.is_null() {
                     let cancel = crate::libpq_helpers::rust_pq_get_cancel((*sconn).conn);
                     if !cancel.is_null() {
@@ -838,7 +802,6 @@ pub extern "C" fn rust_stmt_clear_result(stmt_ptr: *mut PgStmt) {
                         ));
                     }
                 }
-                libc::pthread_mutex_unlock(&mut (*sconn).mutex as *mut _);
                 stmt.streaming_mode = 0;
                 (*sconn)
                     .streaming_active

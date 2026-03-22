@@ -1,8 +1,8 @@
-use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_uchar, c_void};
 use std::ptr;
 use std::sync::atomic::{AtomicI32, Ordering};
 
+use crate::db_interpose_conn_utils::{cstr_to_string_or, log_debug, PthreadMutexGuard};
 use crate::ffi_types::{sqlite3, sqlite3_stmt, sqlite3_value, PgStmt, MAX_PARAMS, PARAM_BUF_LEN};
 
 const SQLITE_OK: c_int = 0;
@@ -30,23 +30,6 @@ static PHASE_BIND_BLOB: &[u8] = b"bind_blob\0";
 static PHASE_BIND_BLOB64: &[u8] = b"bind_blob64\0";
 static PHASE_BIND_VALUE: &[u8] = b"bind_value\0";
 static PHASE_BIND_NULL: &[u8] = b"bind_null\0";
-
-struct PthreadMutexGuard(*mut libc::pthread_mutex_t);
-
-impl PthreadMutexGuard {
-    unsafe fn lock(mutex: *mut libc::pthread_mutex_t) -> Self {
-        libc::pthread_mutex_lock(mutex);
-        Self(mutex)
-    }
-}
-
-impl Drop for PthreadMutexGuard {
-    fn drop(&mut self) {
-        unsafe {
-            libc::pthread_mutex_unlock(self.0);
-        }
-    }
-}
 
 extern "C" {
     static mut orig_sqlite3_bind_int: Option<unsafe extern "C" fn(*mut sqlite3_stmt, c_int, c_int) -> c_int>;
@@ -77,19 +60,6 @@ extern "C" {
         stmt: *mut sqlite3_stmt,
         db: *mut sqlite3,
     );
-}
-
-fn log_debug(msg: &str) {
-    if let Ok(cs) = CString::new(msg) {
-        crate::pg_logging::rust_logging_write(2, cs.as_ptr());
-    }
-}
-
-fn cstr_to_string_or(ptr: *const c_char, default: &str) -> String {
-    if ptr.is_null() {
-        return default.to_string();
-    }
-    unsafe { CStr::from_ptr(ptr).to_string_lossy().into_owned() }
 }
 
 unsafe fn pg_map_param_index(pg_stmt: *mut PgStmt, p_stmt: *mut sqlite3_stmt, sqlite_idx: c_int) -> c_int {

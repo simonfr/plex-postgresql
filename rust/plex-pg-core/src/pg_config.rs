@@ -406,13 +406,8 @@ pub extern "C" fn pg_config_load(config: *mut PgConnConfig) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::env_lock;
     use std::ffi::CString;
-    use std::sync::{Mutex, OnceLock};
-
-    fn retry_env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     // Helper: call FFI via CString
     fn c(s: &str) -> CString {
@@ -887,7 +882,7 @@ mod tests {
 
     #[test]
     fn retry_delays_capped_at_60000() {
-        let _guard = retry_env_lock().lock().unwrap();
+        let _guard = env_lock().lock().unwrap();
         let prev = std::env::var("PLEX_PG_RETRY_DELAYS").ok();
         std::env::set_var("PLEX_PG_RETRY_DELAYS", "100,999999,200");
 
@@ -902,7 +897,7 @@ mod tests {
 
     #[test]
     fn retry_delays_max_10_entries() {
-        let _guard = retry_env_lock().lock().unwrap();
+        let _guard = env_lock().lock().unwrap();
         let prev = std::env::var("PLEX_PG_RETRY_DELAYS").ok();
         std::env::set_var("PLEX_PG_RETRY_DELAYS", "1,2,3,4,5,6,7,8,9,10,11,12");
 
@@ -917,7 +912,7 @@ mod tests {
 
     #[test]
     fn retry_delays_invalid_env_falls_back_to_default() {
-        let _guard = retry_env_lock().lock().unwrap();
+        let _guard = env_lock().lock().unwrap();
         let prev = std::env::var("PLEX_PG_RETRY_DELAYS").ok();
         std::env::set_var("PLEX_PG_RETRY_DELAYS", "not,valid,numbers!");
 
@@ -932,7 +927,7 @@ mod tests {
 
     #[test]
     fn retry_delays_ffi() {
-        let _guard = retry_env_lock().lock().unwrap();
+        let _guard = env_lock().lock().unwrap();
         let prev = std::env::var("PLEX_PG_RETRY_DELAYS").ok();
         std::env::remove_var("PLEX_PG_RETRY_DELAYS");
 

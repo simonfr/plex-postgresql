@@ -187,13 +187,7 @@ mod impl_unix {
     }
 
     fn env_truthy(name: &[u8]) -> bool {
-        unsafe {
-            let val = libc::getenv(name.as_ptr() as *const c_char);
-            if val.is_null() || *val == 0 {
-                return false;
-            }
-            matches!(*val as u8, b'1' | b'y' | b'Y' | b't' | b'T')
-        }
+        crate::env_utils::env_truthy(name)
     }
 
     unsafe fn is_exception_like(type_name: *const c_char) -> bool {

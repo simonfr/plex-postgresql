@@ -3,16 +3,7 @@ use std::ffi::CString;
 use std::os::raw::{c_char, c_int, c_void};
 
 use crate::db_interpose_common::stderr_ptr;
-
-pub(crate) fn env_truthy(name: &[u8]) -> bool {
-    unsafe {
-        let val = libc::getenv(name.as_ptr() as *const c_char);
-        if val.is_null() || *val == 0 {
-            return false;
-        }
-        matches!(*val as u8, b'1' | b'y' | b'Y' | b't' | b'T')
-    }
-}
+use crate::env_utils;
 
 pub(crate) fn log_info(msg: &str) {
     if let Ok(cs) = CString::new(msg) {
@@ -24,7 +15,7 @@ pub(crate) fn should_skip_shim_init() -> bool {
     if cfg!(test) {
         return true;
     }
-    env_truthy(b"PLEX_PG_DISABLE_SHIM_INIT\0")
+    env_utils::env_truthy(b"PLEX_PG_DISABLE_SHIM_INIT\0")
 }
 
 pub(crate) fn log_ctor_start(os_label: &str) {

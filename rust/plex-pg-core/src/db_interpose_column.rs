@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, Once};
 
 use crate::db_interpose_common::{tls_column_type_calls_ptr, tls_in_resolve_tables_ptr, tls_last_query_ptr};
+use crate::db_interpose_conn_utils::{cstr_prefix, cstr_to_string_or, log_debug, log_error, log_info, PthreadMutexGuard};
 use crate::db_interpose_trace_helpers::{list_any_token_in_haystack, list_contains_idx};
 use crate::db_interpose_value_helpers::{
     pg_oid_to_sqlite_type_impl, pg_text_to_double_impl, pg_text_to_int64_impl, pg_text_to_int_impl,
@@ -80,23 +81,6 @@ struct PgFakeValue {
     owner_thread: libc::pthread_t,
 }
 
-struct PthreadMutexGuard(*mut libc::pthread_mutex_t);
-
-impl PthreadMutexGuard {
-    unsafe fn lock(mutex: *mut libc::pthread_mutex_t) -> Self {
-        libc::pthread_mutex_lock(mutex);
-        Self(mutex)
-    }
-}
-
-impl Drop for PthreadMutexGuard {
-    fn drop(&mut self) {
-        unsafe {
-            libc::pthread_mutex_unlock(self.0);
-        }
-    }
-}
-
 extern "C" {
     static mut orig_sqlite3_column_count: Option<unsafe extern "C" fn(*mut sqlite3_stmt) -> c_int>;
     static mut orig_sqlite3_column_type: Option<unsafe extern "C" fn(*mut sqlite3_stmt, c_int) -> c_int>;
@@ -132,40 +116,6 @@ extern "C" {
         stmt: *mut sqlite3_stmt,
         db: *mut sqlite3,
     );
-}
-
-fn log_error(msg: &str) {
-    if let Ok(cs) = CString::new(msg) {
-        crate::pg_logging::rust_logging_write(0, cs.as_ptr());
-    }
-}
-
-fn log_info(msg: &str) {
-    if let Ok(cs) = CString::new(msg) {
-        crate::pg_logging::rust_logging_write(1, cs.as_ptr());
-    }
-}
-
-fn log_debug(msg: &str) {
-    if let Ok(cs) = CString::new(msg) {
-        crate::pg_logging::rust_logging_write(2, cs.as_ptr());
-    }
-}
-
-fn cstr_to_string_or(ptr: *const c_char, default: &str) -> String {
-    if ptr.is_null() {
-        return default.to_string();
-    }
-    unsafe { CStr::from_ptr(ptr).to_string_lossy().into_owned() }
-}
-
-fn cstr_prefix(ptr: *const c_char, max_len: usize, default: &str) -> String {
-    if ptr.is_null() {
-        return default.to_string();
-    }
-    let bytes = unsafe { CStr::from_ptr(ptr).to_bytes() };
-    let slice = &bytes[..bytes.len().min(max_len)];
-    String::from_utf8_lossy(slice).into_owned()
 }
 
 #[inline]

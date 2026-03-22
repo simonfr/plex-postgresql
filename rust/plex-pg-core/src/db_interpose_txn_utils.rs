@@ -1,5 +1,6 @@
 use std::os::raw::{c_char, c_int};
 
+use crate::db_interpose_conn_utils::PthreadMutexGuard;
 use crate::ffi_types::PgConnection;
 
 const PQTRANS_IDLE: i32 = 0;
@@ -121,11 +122,10 @@ pub extern "C" fn rust_txn_terminator_should_noop(
         }
 
         let mut txn_state = PQTRANS_IDLE;
-        libc::pthread_mutex_lock(&mut (*conn).mutex as *mut _);
+        let _guard = PthreadMutexGuard::lock(&mut (*conn).mutex as *mut _);
         if !(*conn).conn.is_null() {
             txn_state = crate::libpq_helpers::rust_pq_transaction_status((*conn).conn);
         }
-        libc::pthread_mutex_unlock(&mut (*conn).mutex as *mut _);
 
         if !txn_state_out.is_null() {
             *txn_state_out = txn_state;

@@ -1,8 +1,9 @@
-use std::ffi::{CStr, CString};
+use std::ffi::CString;
 use std::os::raw::{c_char, c_int, c_void};
 use std::ptr;
 use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 
+use crate::db_interpose_conn_utils::{cstr_to_string_or, log_debug, log_error, log_info, PthreadMutexGuard};
 use crate::ffi_types::{sqlite3_stmt, PgStmt, MAX_PARAMS, PARAM_BUF_LEN};
 
 const SQLITE_OK: c_int = 0;
@@ -66,23 +67,6 @@ static mut FINALIZED_RING: [FinalizedEntry; FINALIZED_RING_SIZE] =
 static mut PREPARED_RING: [PreparedEntry; PREPARED_RING_SIZE] =
     [PreparedEntry::empty(); PREPARED_RING_SIZE];
 
-struct PthreadMutexGuard(*mut libc::pthread_mutex_t);
-
-impl PthreadMutexGuard {
-    unsafe fn lock(mutex: *mut libc::pthread_mutex_t) -> Self {
-        libc::pthread_mutex_lock(mutex);
-        Self(mutex)
-    }
-}
-
-impl Drop for PthreadMutexGuard {
-    fn drop(&mut self) {
-        unsafe {
-            libc::pthread_mutex_unlock(self.0);
-        }
-    }
-}
-
 extern "C" {
     static mut orig_sqlite3_reset: Option<unsafe extern "C" fn(*mut sqlite3_stmt) -> c_int>;
     static mut orig_sqlite3_finalize: Option<unsafe extern "C" fn(*mut sqlite3_stmt) -> c_int>;
@@ -98,31 +82,6 @@ extern "C" {
     fn pg_unregister_stmt(stmt: *mut sqlite3_stmt);
     fn pg_stmt_unref(stmt: *mut PgStmt);
     fn pg_stmt_clear_result(stmt: *mut PgStmt);
-}
-
-fn log_error(msg: &str) {
-    if let Ok(cs) = CString::new(msg) {
-        crate::pg_logging::rust_logging_write(0, cs.as_ptr());
-    }
-}
-
-fn log_info(msg: &str) {
-    if let Ok(cs) = CString::new(msg) {
-        crate::pg_logging::rust_logging_write(1, cs.as_ptr());
-    }
-}
-
-fn log_debug(msg: &str) {
-    if let Ok(cs) = CString::new(msg) {
-        crate::pg_logging::rust_logging_write(2, cs.as_ptr());
-    }
-}
-
-fn cstr_to_string_or(ptr: *const c_char, default: &str) -> String {
-    if ptr.is_null() {
-        return default.to_string();
-    }
-    unsafe { CStr::from_ptr(ptr).to_string_lossy().into_owned() }
 }
 
 fn skip_clear_bindings_on_finalized() -> bool {

@@ -1,6 +1,7 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
 
+use crate::db_interpose_conn_utils::{log_debug, log_error, PthreadMutexGuard};
 use crate::ffi_types::{PgConnection, PgStmt, sqlite3_stmt};
 use crate::libpq_helpers::{PGresult};
 
@@ -25,18 +26,6 @@ extern "C" {
         error_msg: *const c_char,
         context: *const c_char,
     );
-}
-
-fn log_error(msg: &str) {
-    if let Ok(cs) = CString::new(msg) {
-        crate::pg_logging::rust_logging_write(0, cs.as_ptr());
-    }
-}
-
-fn log_debug(msg: &str) {
-    if let Ok(cs) = CString::new(msg) {
-        crate::pg_logging::rust_logging_write(2, cs.as_ptr());
-    }
 }
 
 fn cstr_to_str(ptr: *const c_char) -> &'static str {
@@ -151,11 +140,11 @@ pub extern "C" fn rust_step_cached_read_execute(
         }
 
         crate::pg_client::rust_pool_touch_connection(conn as *const c_void);
-        libc::pthread_mutex_lock(&mut (*conn).mutex as *mut _);
+        let mut conn_guard = PthreadMutexGuard::lock(&mut (*conn).mutex as *mut _);
 
         if (*conn).conn.is_null() {
             log_error("CACHED READ: conn became NULL after lock (TOCTOU race)");
-            libc::pthread_mutex_unlock(&mut (*conn).mutex as *mut _);
+            conn_guard.unlock();
             if !pg_conn_error_out.is_null() {
                 *pg_conn_error_out = 1;
             }
@@ -253,8 +242,6 @@ pub extern "C" fn rust_step_cached_read_execute(
                     crate::libpq_helpers::rust_pq_exec((*conn).conn, translated_sql);
             }
         }
-        libc::pthread_mutex_unlock(&mut (*conn).mutex as *mut _);
-
         if crate::libpq_helpers::rust_pq_result_status((*stmt).result) == PGRES_TUPLES_OK {
             (*stmt).num_rows = crate::libpq_helpers::rust_pq_ntuples((*stmt).result);
             (*stmt).num_cols = crate::libpq_helpers::rust_pq_nfields((*stmt).result);

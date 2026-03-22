@@ -8,11 +8,10 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use crate::c_abi;
 use crate::db_interpose_common;
 use crate::db_interpose_common::stderr_ptr;
+use crate::env_utils;
 use crate::exception_what::pg_exception_install_terminate_logger;
 use crate::ffi_types::{sqlite3, sqlite3_stmt, sqlite3_value};
-use crate::runtime_common::{
-    env_truthy, handle_exception_with_tls, log_shim_unloading, shim_init_common,
-};
+use crate::runtime_common::{handle_exception_with_tls, log_shim_unloading, shim_init_common};
 
 type SigactionFn = unsafe extern "C" fn(c_int, *const libc::sigaction, *mut libc::sigaction) -> c_int;
 type CxaThrowFn =
@@ -31,7 +30,7 @@ fn signal_log_enabled() -> bool {
     if cached != -1 {
         return cached != 0;
     }
-    let enabled = env_truthy(b"PLEX_PG_ENABLE_SIGNAL_LOG\0");
+    let enabled = env_utils::env_truthy(b"PLEX_PG_ENABLE_SIGNAL_LOG\0");
     SIGNAL_LOG_ENABLED_CACHED.store(if enabled { 1 } else { 0 }, Ordering::Release);
     enabled
 }
@@ -41,7 +40,7 @@ fn exception_catcher_enabled() -> bool {
     if cached != -1 {
         return cached != 0;
     }
-    let enabled = env_truthy(b"PLEX_PG_ENABLE_EXCEPTION_CATCHER\0");
+    let enabled = env_utils::env_truthy(b"PLEX_PG_ENABLE_EXCEPTION_CATCHER\0");
     EXCEPTION_CATCHER_ENABLED_CACHED.store(if enabled { 1 } else { 0 }, Ordering::Release);
     enabled
 }
@@ -267,13 +266,13 @@ unsafe extern "C" fn shim_init() {
                     return false;
                 }
 
-                if env_truthy(b"PLEX_PG_DISABLE_SIGCHLD_IGNORE\0") {
+                if env_utils::env_truthy(b"PLEX_PG_DISABLE_SIGCHLD_IGNORE\0") {
                     FORCE_IGNORE_SIGCHLD.store(0, Ordering::Relaxed);
                 }
-                if env_truthy(b"PLEX_PG_FORCE_SIGCHLD_IGNORE\0") {
+                if env_utils::env_truthy(b"PLEX_PG_FORCE_SIGCHLD_IGNORE\0") {
                     FORCE_IGNORE_SIGCHLD.store(1, Ordering::Relaxed);
                 }
-                if env_truthy(b"PLEX_PG_DISABLE_SIGACTION_INTERCEPT\0") {
+                if env_utils::env_truthy(b"PLEX_PG_DISABLE_SIGACTION_INTERCEPT\0") {
                     INTERCEPT_SIGACTION.store(0, Ordering::Relaxed);
                 }
             }
@@ -307,7 +306,7 @@ unsafe extern "C" fn shim_init() {
         || {
             setup_exception_catcher_if_enabled();
 
-            if env_truthy(b"PLEX_PG_ENABLE_SIGNAL_LOG\0") {
+            if env_utils::env_truthy(b"PLEX_PG_ENABLE_SIGNAL_LOG\0") {
                 install_signal_handler(libc::SIGSEGV);
                 install_signal_handler(libc::SIGABRT);
                 install_signal_handler(libc::SIGFPE);
@@ -380,7 +379,7 @@ unsafe extern "C" fn shim_init() {
             let _ = libc::fflush(stderr_ptr());
         },
         || {
-            if !env_truthy(b"PLEX_PG_NO_INIT_DELAY\0") {
+            if !env_utils::env_truthy(b"PLEX_PG_NO_INIT_DELAY\0") {
                 let delay_ms = std::env::var("PLEX_PG_INIT_DELAY_MS")
                     .ok()
                     .and_then(|s| s.parse::<i32>().ok())

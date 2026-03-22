@@ -11,13 +11,18 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
 
+use crate::db_interpose_conn_utils::{log_debug, log_error, log_info, PthreadMutexGuard};
 use crate::db_interpose_helpers::cstr_to_str_or_empty;
-use crate::ffi_types::{sqlite3, PgConnection, STMT_NAME_LEN};
+use crate::ffi_types::{sqlite3, PgConnection};
 use crate::libpq_helpers::{
     rust_pg_align_idle_timeout_with_server, rust_pg_probe_max_connections, rust_pq_clear,
     rust_pq_connectdb, rust_pq_error_message, rust_pq_exec, rust_pq_finish, rust_pq_reset,
     rust_pq_result_error_message, rust_pq_result_status, rust_pq_socket, rust_pq_status,
     rust_pq_transaction_status, PGconn, PGresult,
+};
+pub use crate::pg_client_stmt_cache::{
+    rust_stmt_cache_add, rust_stmt_cache_clear, rust_stmt_cache_clear_local,
+    rust_stmt_cache_drop, rust_stmt_cache_lookup,
 };
 
 const PG_DIAG_SQLSTATE: c_int = b'C' as c_int;
@@ -110,8 +115,6 @@ pub(crate) const SLOT_RECONNECTING: u8 = 3;
 pub(crate) const SLOT_ERROR: u8 = 4;
 
 pub(crate) const POOL_SIZE_DEFAULT: usize = 50;
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) const STMT_CACHE_SIZE: usize = 512;
 
 // ─── Pool Slot ───────────────────────────────────────────────────────────────
 
@@ -359,149 +362,6 @@ impl DbToPool {
     }
 }
 
-// ─── Prepared Statement Cache ────────────────────────────────────────────────
-
-/// Per-connection prepared statement cache entry.
-#[derive(Clone)]
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) struct StmtCacheEntry {
-    pub sql_hash: u64,
-    pub stmt_name: [c_char; STMT_NAME_LEN],
-    pub param_count: i32,
-    pub last_used: i64,
-}
-
-/// Per-connection prepared statement cache (hash table with linear probing).
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) struct StmtCache {
-    entries: Vec<Option<StmtCacheEntry>>,
-    count: usize,
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-impl StmtCache {
-    pub fn new() -> Self {
-        Self {
-            entries: (0..STMT_CACHE_SIZE).map(|_| None).collect(),
-            count: 0,
-        }
-    }
-
-    /// Lookup by sql_hash (mutable) to update last_used.
-    pub fn lookup_mut(&mut self, sql_hash: u64) -> Option<&mut StmtCacheEntry> {
-        if sql_hash == 0 {
-            return None;
-        }
-        let start = (sql_hash as usize) & (STMT_CACHE_SIZE - 1);
-        let entries_ptr = self.entries.as_mut_ptr();
-        for i in 0..STMT_CACHE_SIZE {
-            let idx = (start + i) & (STMT_CACHE_SIZE - 1);
-            let slot = unsafe { &mut *entries_ptr.add(idx) };
-            match slot {
-                Some(entry) if entry.sql_hash == sql_hash => return Some(entry),
-                None => return None, // empty slot = end of probe chain
-                _ => continue,
-            }
-        }
-        None
-    }
-
-    /// Lookup by sql_hash. Returns Some(&entry) on hit, None on miss.
-    pub fn lookup(&self, sql_hash: u64) -> Option<&StmtCacheEntry> {
-        if sql_hash == 0 {
-            return None;
-        }
-        let start = (sql_hash as usize) & (STMT_CACHE_SIZE - 1);
-        for i in 0..STMT_CACHE_SIZE {
-            let idx = (start + i) & (STMT_CACHE_SIZE - 1);
-            match &self.entries[idx] {
-                Some(entry) if entry.sql_hash == sql_hash => return Some(entry),
-                None => return None, // empty slot = end of probe chain
-                _ => continue,       // collision, keep probing
-            }
-        }
-        None
-    }
-
-    /// Add or update entry. Returns (index, evicted_name) if eviction occurred.
-    pub fn add(
-        &mut self,
-        sql_hash: u64,
-        stmt_name: [c_char; STMT_NAME_LEN],
-        param_count: i32,
-        now: i64,
-    ) -> (i32, Option<[c_char; STMT_NAME_LEN]>) {
-        if sql_hash == 0 {
-            return (-1, None);
-        }
-        let start = (sql_hash as usize) & (STMT_CACHE_SIZE - 1);
-
-        let mut oldest_idx: Option<usize> = None;
-        let mut oldest_time = i64::MAX;
-
-        // First pass: find existing or empty slot
-        for i in 0..STMT_CACHE_SIZE {
-            let idx = (start + i) & (STMT_CACHE_SIZE - 1);
-            match self.entries[idx].as_mut() {
-                Some(entry) => {
-                    if entry.last_used < oldest_time {
-                        oldest_time = entry.last_used;
-                        oldest_idx = Some(idx);
-                    }
-                    if entry.sql_hash == sql_hash {
-                        // Update existing
-                        entry.stmt_name = stmt_name;
-                        entry.param_count = param_count;
-                        entry.last_used = now;
-                        return (idx as i32, None);
-                    }
-                }
-                None => {
-                    // Empty slot, insert here
-                    self.entries[idx] = Some(StmtCacheEntry {
-                        sql_hash,
-                        stmt_name,
-                        param_count,
-                        last_used: now,
-                    });
-                    self.count += 1;
-                    return (idx as i32, None);
-                }
-            }
-        }
-
-        // Table is full, evict LRU entry
-        if let Some(lru_idx) = oldest_idx {
-            let evicted = self.entries[lru_idx].take().map(|e| e.stmt_name);
-            self.entries[lru_idx] = Some(StmtCacheEntry {
-                sql_hash,
-                stmt_name,
-                param_count,
-                last_used: now,
-            });
-            return (lru_idx as i32, evicted);
-        }
-
-        (-1, None)
-    }
-
-    /// Clear all entries. Returns names of all evicted statements (for DEALLOCATE).
-    pub fn clear(&mut self) -> Vec<[c_char; STMT_NAME_LEN]> {
-        let mut evicted = Vec::new();
-        for entry in &mut self.entries {
-            if let Some(e) = entry.take() {
-                evicted.push(e.stmt_name);
-            }
-        }
-        self.count = 0;
-        evicted
-    }
-
-    pub fn count(&self) -> usize {
-        self.count
-    }
-}
-
 // ─── Pool Manager ────────────────────────────────────────────────────────────
 
 /// Central pool manager holding all connection pool state.
@@ -659,203 +519,7 @@ pub(crate) fn pool() -> &'static PoolManager {
     POOL.get_or_init(|| PoolManager::new(POOL_SIZE_DEFAULT, POOL_SIZE_DEFAULT))
 }
 
-// ─── Per-connection StmtCache registry (keyed by conn ptr) ───────────────────
-
-/// Maps pg_connection_t* (as usize) → StmtCache.
-/// Each pool connection has its own prepared statement cache.
-static STMT_CACHES: OnceLock<Mutex<HashMap<usize, StmtCache>>> = OnceLock::new();
-
-fn stmt_caches() -> &'static Mutex<HashMap<usize, StmtCache>> {
-    STMT_CACHES.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
-fn stmt_name_from_c(ptr: *const c_char) -> Option<[c_char; STMT_NAME_LEN]> {
-    if ptr.is_null() {
-        return None;
-    }
-    let bytes = unsafe { CStr::from_ptr(ptr) }.to_bytes();
-    let mut buf = [0 as c_char; STMT_NAME_LEN];
-    let len = bytes.len().min(STMT_NAME_LEN.saturating_sub(1));
-    for (i, b) in bytes[..len].iter().enumerate() {
-        buf[i] = *b as c_char;
-    }
-    buf[len] = 0;
-    Some(buf)
-}
-
-fn stmt_name_to_string(name: &[c_char; STMT_NAME_LEN]) -> String {
-    unsafe { CStr::from_ptr(name.as_ptr()) }
-        .to_string_lossy()
-        .into_owned()
-}
-
-fn deallocate_stmt(conn: *mut c_void, stmt_name: &[c_char; STMT_NAME_LEN]) {
-    if conn.is_null() {
-        return;
-    }
-    let pg_conn = unsafe { (*(conn as *mut PgConnection)).conn };
-    if pg_conn.is_null() {
-        return;
-    }
-    let name = stmt_name_to_string(stmt_name);
-    if name.is_empty() {
-        return;
-    }
-    let sql = format!("DEALLOCATE {}", name);
-    if let Ok(cs) = CString::new(sql) {
-        let res = rust_pq_exec(pg_conn, cs.as_ptr());
-        if !res.is_null() {
-            rust_pq_clear(res);
-        }
-    }
-}
-
-/// Lookup statement in cache by hash.
-/// Returns 1 on hit, 0 on miss. Writes stmt_name_out to cached name on hit.
-#[no_mangle]
-pub extern "C" fn rust_stmt_cache_lookup(
-    conn: *mut c_void,
-    sql_hash: u64,
-    stmt_name_out: *mut *const c_char,
-) -> i32 {
-    if stmt_name_out.is_null() {
-        return 0;
-    }
-    unsafe {
-        *stmt_name_out = std::ptr::null();
-    }
-    if conn.is_null() || sql_hash == 0 {
-        return 0;
-    }
-
-    let mut caches = stmt_caches().lock().unwrap();
-    let cache = match caches.get_mut(&(conn as usize)) {
-        Some(c) => c,
-        None => return 0,
-    };
-
-    if let Some(entry) = cache.lookup_mut(sql_hash) {
-        entry.last_used = now_secs();
-        unsafe {
-            *stmt_name_out = entry.stmt_name.as_ptr();
-        }
-        return 1;
-    }
-    0
-}
-
-/// Add statement to cache. Returns index on success, -1 on failure.
-#[no_mangle]
-pub extern "C" fn rust_stmt_cache_add(
-    conn: *mut c_void,
-    sql_hash: u64,
-    stmt_name: *const c_char,
-    param_count: i32,
-) -> i32 {
-    if conn.is_null() || sql_hash == 0 {
-        return -1;
-    }
-    let name = match stmt_name_from_c(stmt_name) {
-        Some(n) => n,
-        None => return -1,
-    };
-
-    let now = now_secs();
-    let (idx, evicted) = {
-        let mut caches = stmt_caches().lock().unwrap();
-        let cache = caches.entry(conn as usize).or_insert_with(StmtCache::new);
-        cache.add(sql_hash, name, param_count, now)
-    };
-
-    if let Some(evicted_name) = evicted {
-        deallocate_stmt(conn, &evicted_name);
-        log_debug(&format!(
-            "Evicted prepared statement from cache: {}",
-            stmt_name_to_string(&evicted_name)
-        ));
-    }
-
-    idx
-}
-
-/// Clear local prepared statement cache without sending DEALLOCATE to server.
-#[no_mangle]
-pub extern "C" fn rust_stmt_cache_clear_local(conn: *mut c_void) {
-    if conn.is_null() {
-        return;
-    }
-    let mut caches = stmt_caches().lock().unwrap();
-    if let Some(cache) = caches.get_mut(&(conn as usize)) {
-        cache.clear();
-    }
-    log_info(&format!(
-        "Cleared prepared statement cache (local only) for connection {:p}",
-        conn
-    ));
-}
-
-/// Clear all cached statements for a connection (includes DEALLOCATE).
-#[no_mangle]
-pub extern "C" fn rust_stmt_cache_clear(conn: *mut c_void) {
-    if conn.is_null() {
-        return;
-    }
-
-    let evicted = {
-        let mut caches = stmt_caches().lock().unwrap();
-        if let Some(cache) = caches.get_mut(&(conn as usize)) {
-            cache.clear()
-        } else {
-            Vec::new()
-        }
-    };
-
-    for name in &evicted {
-        deallocate_stmt(conn, name);
-    }
-
-    log_debug(&format!(
-        "Cleared prepared statement cache for connection {:p}",
-        conn
-    ));
-}
-
-/// Drop cache entry for a connection (no DEALLOCATE).
-#[no_mangle]
-pub extern "C" fn rust_stmt_cache_drop(conn: *mut c_void) {
-    if conn.is_null() {
-        return;
-    }
-    let mut caches = stmt_caches().lock().unwrap();
-    caches.remove(&(conn as usize));
-}
-
 // ─── Logging helpers ─────────────────────────────────────────────────────────
-
-fn log_info(msg: &str) {
-    if let Ok(cs) = CString::new(msg) {
-        crate::pg_logging::rust_logging_write(1, cs.as_ptr());
-    }
-}
-
-fn log_error(msg: &str) {
-    if let Ok(cs) = CString::new(msg) {
-        crate::pg_logging::rust_logging_write(0, cs.as_ptr());
-    }
-}
-
-fn log_debug(msg: &str) {
-    if let Ok(cs) = CString::new(msg) {
-        crate::pg_logging::rust_logging_write(2, cs.as_ptr());
-    }
-}
 
 // ─── Config Helpers ─────────────────────────────────────────────────────────
 
@@ -1294,12 +958,11 @@ fn reconnect_conn(conn: *mut c_void) -> bool {
         Err(_) => return false,
     };
     unsafe {
-        libc::pthread_mutex_lock(&mut (*conn).mutex as *mut _);
+        let _conn_guard = PthreadMutexGuard::lock(&mut (*conn).mutex as *mut _);
         if !(*conn).conn.is_null() {
             rust_pq_finish((*conn).conn);
             (*conn).conn = std::ptr::null_mut();
         }
-        libc::pthread_mutex_unlock(&mut (*conn).mutex as *mut _);
 
         let new_pg = rust_pq_connectdb(conninfo_c.as_ptr());
         if rust_pq_status(new_pg) == CONNECTION_OK {
@@ -1393,12 +1056,11 @@ fn close_handle_connection(conn: *mut PgConnection) {
     rust_stmt_cache_clear(conn as *mut c_void);
     rust_stmt_cache_drop(conn as *mut c_void);
     unsafe {
-        libc::pthread_mutex_lock(&mut (*conn).mutex as *mut _);
+        let _conn_guard = PthreadMutexGuard::lock(&mut (*conn).mutex as *mut _);
         if !(*conn).conn.is_null() {
             rust_pq_finish((*conn).conn);
             (*conn).conn = std::ptr::null_mut();
         }
-        libc::pthread_mutex_unlock(&mut (*conn).mutex as *mut _);
     }
     destroy_connection_struct(conn);
 }
@@ -2088,9 +1750,7 @@ pub extern "C" fn rust_pool_cleanup() {
     pm.registry.clear();
 
     // Clear stmt caches
-    if let Some(caches) = STMT_CACHES.get() {
-        caches.lock().unwrap().clear();
-    }
+    crate::pg_client_stmt_cache::clear_all_stmt_caches();
 }
 
 /// Get a pool connection for the given db_path.
@@ -2592,11 +2252,11 @@ pub extern "C" fn rust_pg_ensure_connection(conn: *mut PgConnection) -> i32 {
     }
 
     unsafe {
-        libc::pthread_mutex_lock(&mut (*conn).mutex as *mut _);
+        let mut conn_guard = PthreadMutexGuard::lock(&mut (*conn).mutex as *mut _);
 
         if !(*conn).conn.is_null() && rust_pq_status((*conn).conn) == CONNECTION_OK {
             if exec_tuples((*conn).conn, "SELECT 1") {
-                libc::pthread_mutex_unlock(&mut (*conn).mutex as *mut _);
+                conn_guard.unlock();
                 return 1;
             }
             log_info("Connection health check failed, will reconnect");
@@ -2613,7 +2273,7 @@ pub extern "C" fn rust_pg_ensure_connection(conn: *mut PgConnection) -> i32 {
             Ok(s) => s,
             Err(_) => {
                 (*conn).is_pg_active = 0;
-                libc::pthread_mutex_unlock(&mut (*conn).mutex as *mut _);
+                conn_guard.unlock();
                 return 0;
             }
         };
@@ -2636,7 +2296,7 @@ pub extern "C" fn rust_pg_ensure_connection(conn: *mut PgConnection) -> i32 {
             }
             (*conn).conn = std::ptr::null_mut();
             (*conn).is_pg_active = 0;
-            libc::pthread_mutex_unlock(&mut (*conn).mutex as *mut _);
+            conn_guard.unlock();
             return 0;
         }
 
@@ -2644,7 +2304,7 @@ pub extern "C" fn rust_pg_ensure_connection(conn: *mut PgConnection) -> i32 {
         pg_set_socket_timeout((*conn).conn);
         apply_session_settings((*conn).conn, &cfg.schema, false);
         (*conn).is_pg_active = 1;
-        libc::pthread_mutex_unlock(&mut (*conn).mutex as *mut _);
+        conn_guard.unlock();
         1
     }
 }
@@ -3496,129 +3156,4 @@ mod tests {
         assert!(pm.slots[2].conn.load(Ordering::Relaxed).is_null());
     }
 
-    // ═════════════════════════════════════════════════════════════════════════
-    // Prepared Statement Cache
-    // ═════════════════════════════════════════════════════════════════════════
-
-    fn stmt_name_array(s: &str) -> [c_char; STMT_NAME_LEN] {
-        let c = CString::new(s).unwrap();
-        stmt_name_from_c(c.as_ptr()).unwrap()
-    }
-
-    #[test]
-    fn stmt_cache_initial_empty() {
-        let cache = StmtCache::new();
-        assert_eq!(cache.count(), 0);
-        assert!(cache.lookup(12345).is_none());
-    }
-
-    #[test]
-    fn stmt_cache_add_and_lookup() {
-        let mut cache = StmtCache::new();
-        cache.add(12345, stmt_name_array("ps_12345"), 3, 1000);
-        let entry = cache.lookup(12345).unwrap();
-        assert_eq!(entry.sql_hash, 12345);
-        assert_eq!(stmt_name_to_string(&entry.stmt_name), "ps_12345");
-        assert_eq!(entry.param_count, 3);
-        assert_eq!(entry.last_used, 1000);
-    }
-
-    #[test]
-    fn stmt_cache_lookup_miss() {
-        let mut cache = StmtCache::new();
-        cache.add(12345, stmt_name_array("ps_12345"), 3, 1000);
-        assert!(cache.lookup(99999).is_none());
-    }
-
-    #[test]
-    fn stmt_cache_lookup_zero_hash_returns_none() {
-        let cache = StmtCache::new();
-        assert!(cache.lookup(0).is_none());
-    }
-
-    #[test]
-    fn stmt_cache_add_zero_hash_is_noop() {
-        let mut cache = StmtCache::new();
-        let (idx, evicted) = cache.add(0, stmt_name_array("ps_0"), 0, 0);
-        assert_eq!(idx, -1);
-        assert!(evicted.is_none());
-        assert_eq!(cache.count(), 0);
-    }
-
-    #[test]
-    fn stmt_cache_update_existing() {
-        let mut cache = StmtCache::new();
-        cache.add(12345, stmt_name_array("ps_12345"), 3, 1000);
-        cache.add(12345, stmt_name_array("ps_12345_v2"), 5, 2000);
-        let entry = cache.lookup(12345).unwrap();
-        assert_eq!(stmt_name_to_string(&entry.stmt_name), "ps_12345_v2");
-        assert_eq!(entry.param_count, 5);
-        assert_eq!(entry.last_used, 2000);
-        assert_eq!(cache.count(), 1); // count should not increase
-    }
-
-    #[test]
-    fn stmt_cache_multiple_entries() {
-        let mut cache = StmtCache::new();
-        for i in 1..=10u64 {
-            cache.add(i, stmt_name_array(&format!("ps_{}", i)), i as i32, i as i64);
-        }
-        assert_eq!(cache.count(), 10);
-        for i in 1..=10u64 {
-            let entry = cache.lookup(i).unwrap();
-            assert_eq!(entry.sql_hash, i);
-        }
-    }
-
-    #[test]
-    fn stmt_cache_clear_returns_names() {
-        let mut cache = StmtCache::new();
-        cache.add(1, stmt_name_array("ps_a"), 1, 100);
-        cache.add(2, stmt_name_array("ps_b"), 2, 200);
-        cache.add(3, stmt_name_array("ps_c"), 3, 300);
-
-        let evicted = cache.clear();
-        assert_eq!(evicted.len(), 3);
-        let names: Vec<String> = evicted.iter().map(stmt_name_to_string).collect();
-        assert!(names.contains(&"ps_a".to_string()));
-        assert!(names.contains(&"ps_b".to_string()));
-        assert!(names.contains(&"ps_c".to_string()));
-        assert_eq!(cache.count(), 0);
-    }
-
-    #[test]
-    fn stmt_cache_clear_empty_returns_empty() {
-        let mut cache = StmtCache::new();
-        let evicted = cache.clear();
-        assert!(evicted.is_empty());
-    }
-
-    #[test]
-    fn stmt_cache_eviction_when_full() {
-        let mut cache = StmtCache::new();
-        // Fill the cache with STMT_CACHE_SIZE entries
-        for i in 1..=STMT_CACHE_SIZE as u64 {
-            cache.add(i, stmt_name_array(&format!("ps_{}", i)), 1, i as i64);
-        }
-        assert_eq!(cache.count(), STMT_CACHE_SIZE);
-
-        // Adding one more should evict the LRU (smallest last_used)
-        let (_idx, evicted) = cache.add(99999, stmt_name_array("ps_new"), 1, 99999);
-        assert!(evicted.is_some());
-        // The evicted entry should be ps_1 (last_used=1, the oldest)
-        assert_eq!(stmt_name_to_string(&evicted.unwrap()), "ps_1");
-    }
-
-    #[test]
-    fn stmt_cache_linear_probing_handles_collision() {
-        let mut cache = StmtCache::new();
-        // Two hashes that map to the same bucket (same lower bits)
-        let h1 = 1u64;
-        let h2 = 1 + STMT_CACHE_SIZE as u64; // same bucket
-        cache.add(h1, stmt_name_array("ps_a"), 1, 100);
-        cache.add(h2, stmt_name_array("ps_b"), 2, 200);
-
-        assert_eq!(stmt_name_to_string(&cache.lookup(h1).unwrap().stmt_name), "ps_a");
-        assert_eq!(stmt_name_to_string(&cache.lookup(h2).unwrap().stmt_name), "ps_b");
-    }
 }

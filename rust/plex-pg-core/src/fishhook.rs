@@ -1,5 +1,3 @@
-#![cfg(target_os = "macos")]
-
 use std::mem::size_of;
 use std::os::raw::{c_char, c_int, c_uint, c_void};
 use std::ptr;

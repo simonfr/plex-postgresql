@@ -4,7 +4,11 @@ use std::os::raw::{c_char, c_int, c_void};
 use std::ptr;
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 
+use crate::db_interpose_conn_utils::{cstr_prefix, cstr_to_string_or, log_debug, log_error, log_info};
 use crate::db_interpose_common::{tls_in_interpose_call_ptr, tls_prepare_v2_depth_ptr};
+use crate::db_interpose_prepare_utils::{
+    contains_ascii_icase, contains_icase_ptr, starts_with_ascii_icase,
+};
 use crate::ffi_types::{sqlite3, sqlite3_stmt, PgConnection, PgStmt};
 
 const SQLITE_OK: c_int = 0;
@@ -126,59 +130,6 @@ impl Drop for PrepareDepthGuard {
             }
         }
     }
-}
-
-fn log_error(msg: &str) {
-    if let Ok(cs) = CString::new(msg) {
-        crate::pg_logging::rust_logging_write(0, cs.as_ptr());
-    }
-}
-
-fn log_info(msg: &str) {
-    if let Ok(cs) = CString::new(msg) {
-        crate::pg_logging::rust_logging_write(1, cs.as_ptr());
-    }
-}
-
-fn log_debug(msg: &str) {
-    if let Ok(cs) = CString::new(msg) {
-        crate::pg_logging::rust_logging_write(2, cs.as_ptr());
-    }
-}
-
-fn cstr_to_string_or(ptr: *const c_char, default: &str) -> String {
-    if ptr.is_null() {
-        return default.to_string();
-    }
-    unsafe { CStr::from_ptr(ptr).to_string_lossy().into_owned() }
-}
-
-fn cstr_prefix(ptr: *const c_char, max_len: usize, default: &str) -> String {
-    if ptr.is_null() {
-        return default.to_string();
-    }
-    let bytes = unsafe { CStr::from_ptr(ptr).to_bytes() };
-    let slice = &bytes[..bytes.len().min(max_len)];
-    String::from_utf8_lossy(slice).into_owned()
-}
-
-fn contains_ascii_icase(haystack: &[u8], needle: &[u8]) -> bool {
-    if needle.is_empty() || haystack.len() < needle.len() {
-        return false;
-    }
-    haystack.windows(needle.len()).any(|w| w.eq_ignore_ascii_case(needle))
-}
-
-fn starts_with_ascii_icase(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack.len() >= needle.len() && haystack[..needle.len()].eq_ignore_ascii_case(needle)
-}
-
-fn contains_icase_ptr(ptr: *const c_char, needle: &str) -> bool {
-    if ptr.is_null() {
-        return false;
-    }
-    let hay = unsafe { CStr::from_ptr(ptr).to_bytes() };
-    contains_ascii_icase(hay, needle.as_bytes())
 }
 
 fn trace_prepare_sql_ok(sql: *const c_char) -> bool {

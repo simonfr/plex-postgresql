@@ -2,6 +2,10 @@ use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
 use std::sync::atomic::{AtomicI32, Ordering};
 
+use crate::db_interpose_conn_utils::{
+    apply_pg_session_settings, connect_new, cstr_prefix, cstr_to_string_or, log_debug, log_error,
+    log_info, PthreadMutexGuard, PgConnConfig,
+};
 use crate::ffi_types::{sqlite3, sqlite3_stmt, PgConnection, PgStmt, STMT_NAME_LEN};
 use crate::libpq_helpers::PGresult;
 
@@ -17,16 +21,6 @@ const PG_DIAG_SQLSTATE: c_int = b'C' as c_int;
 
 static SKIP_STATS_RESOURCES_UPDATE: AtomicI32 = AtomicI32::new(-1);
 
-#[repr(C)]
-struct PgConnConfig {
-    host: [c_char; 256],
-    port: c_int,
-    database: [c_char; 128],
-    user: [c_char; 128],
-    password: [c_char; 256],
-    schema: [c_char; 64],
-}
-
 extern "C" {
     fn sqlite3_db_handle(stmt: *mut sqlite3_stmt) -> *mut sqlite3;
     fn log_sql_fallback(
@@ -37,24 +31,6 @@ extern "C" {
     );
     fn platform_print_backtrace(reason: *const c_char, skip_frames: c_int);
     fn pg_config_get() -> *mut PgConnConfig;
-}
-
-fn log_error(msg: &str) {
-    if let Ok(cs) = CString::new(msg) {
-        crate::pg_logging::rust_logging_write(0, cs.as_ptr());
-    }
-}
-
-fn log_info(msg: &str) {
-    if let Ok(cs) = CString::new(msg) {
-        crate::pg_logging::rust_logging_write(1, cs.as_ptr());
-    }
-}
-
-fn log_debug(msg: &str) {
-    if let Ok(cs) = CString::new(msg) {
-        crate::pg_logging::rust_logging_write(2, cs.as_ptr());
-    }
 }
 
 fn ascii_lower(b: u8) -> u8 {
@@ -98,29 +74,6 @@ unsafe fn cstr_bytes<'a>(ptr: *const c_char) -> &'a [u8] {
         return &[];
     }
     CStr::from_ptr(ptr).to_bytes()
-}
-
-fn cstr_to_string_or(ptr: *const c_char, default: &str) -> String {
-    if ptr.is_null() {
-        return default.to_string();
-    }
-    unsafe { CStr::from_ptr(ptr).to_string_lossy().into_owned() }
-}
-
-fn cbuf_to_str(buf: &[c_char]) -> &str {
-    if buf.is_empty() {
-        return "";
-    }
-    unsafe { CStr::from_ptr(buf.as_ptr()).to_str().unwrap_or("") }
-}
-
-fn cstr_prefix(ptr: *const c_char, max_len: usize, default: &str) -> String {
-    if ptr.is_null() {
-        return default.to_string();
-    }
-    let bytes = unsafe { CStr::from_ptr(ptr).to_bytes() };
-    let slice = &bytes[..bytes.len().min(max_len)];
-    String::from_utf8_lossy(slice).into_owned()
 }
 
 fn malloc_cstring(value: &str) -> *mut c_char {
@@ -326,7 +279,8 @@ pub extern "C" fn rust_step_write_should_skip_special_insert(
                 ));
 
                 if !exec_conn.is_null() && !(*exec_conn).conn.is_null() {
-                    libc::pthread_mutex_lock(&mut (*exec_conn).mutex as *mut _);
+                    let _conn_guard =
+                        PthreadMutexGuard::lock(&mut (*exec_conn).mutex as *mut _);
                     if (*exec_conn).conn.is_null() {
                         log_error("SKIP SEQ: conn became NULL after lock (TOCTOU race)");
                     } else if crate::libpq_helpers::rust_pq_status((*exec_conn).conn)
@@ -360,7 +314,6 @@ pub extern "C" fn rust_step_write_should_skip_special_insert(
                         }
                         crate::libpq_helpers::rust_pq_clear(seq_res);
                     }
-                    libc::pthread_mutex_unlock(&mut (*exec_conn).mutex as *mut _);
                 }
 
                 (*pg_stmt).write_executed = 1;
@@ -400,7 +353,8 @@ pub extern "C" fn rust_step_write_should_skip_special_insert(
                     ));
 
                     if !exec_conn.is_null() && !(*exec_conn).conn.is_null() {
-                        libc::pthread_mutex_lock(&mut (*exec_conn).mutex as *mut _);
+                        let _conn_guard =
+                            PthreadMutexGuard::lock(&mut (*exec_conn).mutex as *mut _);
                         if !(*exec_conn).conn.is_null()
                             && crate::libpq_helpers::rust_pq_status((*exec_conn).conn)
                                 == CONNECTION_OK
@@ -433,7 +387,6 @@ pub extern "C" fn rust_step_write_should_skip_special_insert(
                             }
                             crate::libpq_helpers::rust_pq_clear(seq_res);
                         }
-                        libc::pthread_mutex_unlock(&mut (*exec_conn).mutex as *mut _);
                     }
 
                     (*pg_stmt).write_executed = 1;
@@ -459,6 +412,7 @@ pub extern "C" fn rust_step_write_prepare_connection(
         if pg_stmt.is_null() || exec_conn_io.is_null() {
             return STEP_RESULT_ERROR;
         }
+        let mut stmt_guard = PthreadMutexGuard::lock(&mut (*pg_stmt).mutex as *mut _);
 
         let mut exec_conn = *exec_conn_io;
         if exec_conn.is_null() || (*exec_conn).conn.is_null() {
@@ -466,9 +420,9 @@ pub extern "C" fn rust_step_write_prepare_connection(
                 "STEP WRITE: NULL connection, retrying in 500ms (exec_conn={:p})",
                 exec_conn
             ));
-            libc::pthread_mutex_unlock(&mut (*pg_stmt).mutex as *mut _);
+            stmt_guard.unlock();
             libc::usleep(500_000);
-            libc::pthread_mutex_lock(&mut (*pg_stmt).mutex as *mut _);
+            stmt_guard = PthreadMutexGuard::lock(&mut (*pg_stmt).mutex as *mut _);
 
             let retry_db = sqlite3_db_handle((*pg_stmt).shadow_stmt);
             let retry_handle = crate::pg_client::rust_pg_find_connection(retry_db);
@@ -480,7 +434,7 @@ pub extern "C" fn rust_step_write_prepare_connection(
             if exec_conn.is_null() || (*exec_conn).conn.is_null() {
                 log_error("STEP WRITE: NULL connection after retry - giving up");
                 (*pg_stmt).write_executed = 1;
-                libc::pthread_mutex_unlock(&mut (*pg_stmt).mutex as *mut _);
+                stmt_guard.unlock();
                 if !pg_conn_error_out.is_null() {
                     *pg_conn_error_out = 1;
                 }
@@ -493,13 +447,13 @@ pub extern "C" fn rust_step_write_prepare_connection(
         }
 
         crate::pg_client::rust_pool_touch_connection(exec_conn as *const c_void);
-        libc::pthread_mutex_lock(&mut (*exec_conn).mutex as *mut _);
+        let mut conn_guard = PthreadMutexGuard::lock(&mut (*exec_conn).mutex as *mut _);
 
         if (*exec_conn).conn.is_null() {
             log_error("STEP WRITE: conn became NULL after lock (TOCTOU race)");
-            libc::pthread_mutex_unlock(&mut (*exec_conn).mutex as *mut _);
+            conn_guard.unlock();
             (*pg_stmt).write_executed = 1;
-            libc::pthread_mutex_unlock(&mut (*pg_stmt).mutex as *mut _);
+            stmt_guard.unlock();
             if !pg_conn_error_out.is_null() {
                 *pg_conn_error_out = 1;
             }
@@ -515,7 +469,7 @@ pub extern "C" fn rust_step_write_prepare_connection(
                 "STEP WRITE: conn {:p} became streaming_active after lock, getting new connection",
                 exec_conn
             ));
-            libc::pthread_mutex_unlock(&mut (*exec_conn).mutex as *mut _);
+            conn_guard.unlock();
             let db_path = if (*pg_stmt).conn.is_null() {
                 std::ptr::null()
             } else {
@@ -532,7 +486,7 @@ pub extern "C" fn rust_step_write_prepare_connection(
             {
                 exec_conn = alt_conn;
                 crate::pg_client::rust_pool_touch_connection(exec_conn as *const c_void);
-                libc::pthread_mutex_lock(&mut (*exec_conn).mutex as *mut _);
+                conn_guard = PthreadMutexGuard::lock(&mut (*exec_conn).mutex as *mut _);
                 if (*exec_conn).conn.is_null()
                     || (*exec_conn)
                         .streaming_active
@@ -540,9 +494,9 @@ pub extern "C" fn rust_step_write_prepare_connection(
                         != 0
                 {
                     log_error("STEP WRITE: alt conn also unavailable");
-                    libc::pthread_mutex_unlock(&mut (*exec_conn).mutex as *mut _);
+                    conn_guard.unlock();
                     (*pg_stmt).write_executed = 1;
-                    libc::pthread_mutex_unlock(&mut (*pg_stmt).mutex as *mut _);
+                    stmt_guard.unlock();
                     if !pg_conn_error_out.is_null() {
                         *pg_conn_error_out = 1;
                     }
@@ -551,7 +505,7 @@ pub extern "C" fn rust_step_write_prepare_connection(
             } else {
                 log_error("STEP WRITE: no non-streaming connection available");
                 (*pg_stmt).write_executed = 1;
-                libc::pthread_mutex_unlock(&mut (*pg_stmt).mutex as *mut _);
+                stmt_guard.unlock();
                 if !pg_conn_error_out.is_null() {
                     *pg_conn_error_out = 1;
                 }
@@ -597,32 +551,21 @@ pub extern "C" fn rust_step_write_prepare_connection(
                 if cfg.is_null() {
                     log_error("STEP WRITE: pg_config_get returned NULL");
                     (*exec_conn).is_pg_active = 0;
-                    libc::pthread_mutex_unlock(&mut (*exec_conn).mutex as *mut _);
+                    conn_guard.unlock();
                     (*pg_stmt).write_executed = 1;
-                    libc::pthread_mutex_unlock(&mut (*pg_stmt).mutex as *mut _);
+                    stmt_guard.unlock();
                     if !pg_conn_error_out.is_null() {
                         *pg_conn_error_out = 1;
                     }
                     return STEP_RESULT_ERROR;
                 }
 
-                let cfg_ref = &*cfg;
-                let conninfo = format!(
-                    "host={} port={} dbname={} user={} password={} \
-                    connect_timeout=5 keepalives=1 keepalives_idle=30 \
-                    keepalives_interval=10 keepalives_count=3",
-                    cbuf_to_str(&cfg_ref.host),
-                    cfg_ref.port,
-                    cbuf_to_str(&cfg_ref.database),
-                    cbuf_to_str(&cfg_ref.user),
-                    cbuf_to_str(&cfg_ref.password)
-                );
-                let conninfo_c = CString::new(conninfo).unwrap_or_else(|_| CString::new("").unwrap());
-                let new_write_conn = crate::libpq_helpers::rust_pq_connectdb(conninfo_c.as_ptr());
+                let new_write_conn = connect_new(&*cfg);
                 if crate::libpq_helpers::rust_pq_status(new_write_conn) == CONNECTION_OK {
                     (*exec_conn).conn = new_write_conn;
                     (*exec_conn).is_pg_active = 1;
                     log_info("STEP WRITE: fresh connection succeeded (reconnected)");
+                    apply_pg_session_settings((*exec_conn).conn, &*cfg);
                 } else {
                     let reset_err = crate::libpq_helpers::rust_pq_error_message(new_write_conn);
                     log_error(&format!(
@@ -631,9 +574,9 @@ pub extern "C" fn rust_step_write_prepare_connection(
                     ));
                     crate::libpq_helpers::rust_pq_finish(new_write_conn);
                     (*exec_conn).is_pg_active = 0;
-                    libc::pthread_mutex_unlock(&mut (*exec_conn).mutex as *mut _);
+                    conn_guard.unlock();
                     (*pg_stmt).write_executed = 1;
-                    libc::pthread_mutex_unlock(&mut (*pg_stmt).mutex as *mut _);
+                    stmt_guard.unlock();
                     if !pg_conn_error_out.is_null() {
                         *pg_conn_error_out = 1;
                     }
@@ -671,6 +614,7 @@ pub extern "C" fn rust_step_write_execute_and_finalize(
             }
             return STEP_RESULT_ERROR;
         }
+        let mut conn_guard = PthreadMutexGuard::lock(&mut (*exec_conn).mutex as *mut _);
 
         if skip_stats_resources_update()
             && !(*pg_stmt).pg_sql.is_null()
@@ -678,7 +622,7 @@ pub extern "C" fn rust_step_write_execute_and_finalize(
             && contains_icase_bytes(cstr_bytes((*pg_stmt).pg_sql), b"statistics_resources")
         {
             log_error("STEP WRITE: skipping statistics_resources UPDATE via PLEX_PG_SKIP_STATS_RESOURCES_UPDATE");
-            libc::pthread_mutex_unlock(&mut (*exec_conn).mutex as *mut _);
+            conn_guard.unlock();
             (*pg_stmt).write_executed = 1;
             return STEP_RESULT_DONE;
         }
@@ -765,7 +709,7 @@ pub extern "C" fn rust_step_write_execute_and_finalize(
             )
         };
 
-        libc::pthread_mutex_unlock(&mut (*exec_conn).mutex as *mut _);
+        conn_guard.unlock();
 
         let status = crate::libpq_helpers::rust_pq_result_status(res);
         if status == PGRES_COMMAND_OK || status == PGRES_TUPLES_OK {
@@ -887,11 +831,11 @@ pub extern "C" fn rust_step_cached_write_execute_and_finalize(
         }
 
         crate::pg_client::rust_pool_touch_connection(exec_conn as *const c_void);
-        libc::pthread_mutex_lock(&mut (*exec_conn).mutex as *mut _);
+        let mut conn_guard = PthreadMutexGuard::lock(&mut (*exec_conn).mutex as *mut _);
 
         if (*exec_conn).conn.is_null() {
             log_error("CACHED EXEC: conn became NULL after lock (TOCTOU race)");
-            libc::pthread_mutex_unlock(&mut (*exec_conn).mutex as *mut _);
+            conn_guard.unlock();
             if !pg_conn_error_out.is_null() {
                 *pg_conn_error_out = 1;
             }
@@ -981,7 +925,7 @@ pub extern "C" fn rust_step_cached_write_execute_and_finalize(
                 crate::libpq_helpers::rust_pq_exec((*exec_conn).conn, exec_sql)
             }
         };
-        libc::pthread_mutex_unlock(&mut (*exec_conn).mutex as *mut _);
+        conn_guard.unlock();
 
         let status = crate::libpq_helpers::rust_pq_result_status(res);
         if status == PGRES_COMMAND_OK || status == PGRES_TUPLES_OK {

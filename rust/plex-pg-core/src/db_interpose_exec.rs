@@ -1,6 +1,10 @@
 use std::cell::Cell;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
+use crate::db_interpose_conn_utils::{
+    apply_pg_session_settings, connect_new, cstr_prefix, cstr_to_string_or, log_error, log_info,
+    PthreadMutexGuard, PgConnConfig,
+};
 use crate::ffi_types::sqlite3;
 use crate::libpq_helpers::PGresult;
 
@@ -17,18 +21,8 @@ const PG_RETRY_MAX_DELAYS: usize = 10;
 type ExecCallback = Option<unsafe extern "C" fn(*mut c_void, c_int, *mut *mut c_char, *mut *mut c_char) -> c_int>;
 
 thread_local! {
-    static EXEC_RETRY_COUNT: Cell<i32> = Cell::new(0);
-    static EXEC_PG_CONN_ERROR: Cell<i32> = Cell::new(0);
-}
-
-#[repr(C)]
-struct PgConnConfig {
-    host: [c_char; 256],
-    port: c_int,
-    database: [c_char; 128],
-    user: [c_char; 128],
-    password: [c_char; 256],
-    schema: [c_char; 64],
+    static EXEC_RETRY_COUNT: Cell<i32> = const { Cell::new(0) };
+    static EXEC_PG_CONN_ERROR: Cell<i32> = const { Cell::new(0) };
 }
 
 #[repr(C)]
@@ -57,47 +51,8 @@ extern "C" {
     fn sql_translation_free(result: *mut SqlTranslation);
 }
 
-fn log_error(msg: &str) {
-    if let Ok(cs) = CString::new(msg) {
-        crate::pg_logging::rust_logging_write(0, cs.as_ptr());
-    }
-}
-
-fn log_info(msg: &str) {
-    if let Ok(cs) = CString::new(msg) {
-        crate::pg_logging::rust_logging_write(1, cs.as_ptr());
-    }
-}
-
-fn cstr_to_string_or(ptr: *const c_char, default: &str) -> String {
-    if ptr.is_null() {
-        return default.to_string();
-    }
-    unsafe { CStr::from_ptr(ptr).to_string_lossy().into_owned() }
-}
-
-fn cstr_prefix(ptr: *const c_char, max_len: usize, default: &str) -> String {
-    if ptr.is_null() {
-        return default.to_string();
-    }
-    let bytes = unsafe { CStr::from_ptr(ptr).to_bytes() };
-    let slice = &bytes[..bytes.len().min(max_len)];
-    String::from_utf8_lossy(slice).into_owned()
-}
-
-fn cbuf_to_str(buf: &[c_char]) -> &str {
-    if buf.is_empty() {
-        return "";
-    }
-    unsafe { CStr::from_ptr(buf.as_ptr()).to_str().unwrap_or("") }
-}
-
 fn ascii_lower(b: u8) -> u8 {
-    if (b'A'..=b'Z').contains(&b) {
-        b + 32
-    } else {
-        b
-    }
+    b.to_ascii_lowercase()
 }
 
 fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
@@ -253,7 +208,8 @@ fn rust_my_sqlite3_exec_impl(
                     "EXEC: CONNECTION_BAD pre-flight, attempting reconnect (thread {:p})",
                     libc::pthread_self() as *mut c_void
                 ));
-                libc::pthread_mutex_lock(&mut (*pg_conn).mutex as *mut _);
+                let mut conn_guard =
+                    PthreadMutexGuard::lock(&mut (*pg_conn).mutex as *mut _);
                 if !(*pg_conn).conn.is_null() {
                     crate::libpq_helpers::rust_pq_reset((*pg_conn).conn);
                     if crate::libpq_helpers::rust_pq_status((*pg_conn).conn) != CONNECTION_OK {
@@ -265,27 +221,17 @@ fn rust_my_sqlite3_exec_impl(
                         let rcfg = pg_config_get();
                         if rcfg.is_null() {
                             (*pg_conn).is_pg_active = 0;
-                            libc::pthread_mutex_unlock(&mut (*pg_conn).mutex as *mut _);
+                            conn_guard.unlock();
                             EXEC_PG_CONN_ERROR.with(|c| c.set(1));
                             return SQLITE_ERROR;
                         }
                         let cfg = &*rcfg;
-                        let conninfo = format!(
-                            "host={} port={} dbname={} user={} password={} \
-                             connect_timeout=5 keepalives=1 keepalives_idle=30 \
-                             keepalives_interval=10 keepalives_count=3",
-                            cbuf_to_str(&cfg.host),
-                            cfg.port,
-                            cbuf_to_str(&cfg.database),
-                            cbuf_to_str(&cfg.user),
-                            cbuf_to_str(&cfg.password)
-                        );
-                        let conninfo_c = CString::new(conninfo).unwrap_or_else(|_| CString::new("").unwrap());
-                        let new_conn = crate::libpq_helpers::rust_pq_connectdb(conninfo_c.as_ptr());
+                        let new_conn = connect_new(cfg);
                         if crate::libpq_helpers::rust_pq_status(new_conn) == CONNECTION_OK {
                             (*pg_conn).conn = new_conn;
                             (*pg_conn).is_pg_active = 1;
                             log_info("EXEC: fresh connection succeeded (reconnected)");
+                            apply_pg_session_settings((*pg_conn).conn, cfg);
                         } else {
                             log_error(&format!(
                                 "EXEC: fresh connection also failed: {}",
@@ -296,7 +242,7 @@ fn rust_my_sqlite3_exec_impl(
                             ));
                             crate::libpq_helpers::rust_pq_finish(new_conn);
                             (*pg_conn).is_pg_active = 0;
-                            libc::pthread_mutex_unlock(&mut (*pg_conn).mutex as *mut _);
+                            conn_guard.unlock();
                             EXEC_PG_CONN_ERROR.with(|c| c.set(1));
                             return SQLITE_ERROR;
                         }
@@ -305,57 +251,25 @@ fn rust_my_sqlite3_exec_impl(
                     }
                     let cfg = pg_config_get();
                     if !cfg.is_null() {
-                        let schema_cmd = format!("SET search_path TO {}, public", cbuf_to_str(&(*cfg).schema));
-                        if let Ok(cs) = CString::new(schema_cmd) {
-                            let r = crate::libpq_helpers::rust_pq_exec((*pg_conn).conn, cs.as_ptr());
-                            crate::libpq_helpers::rust_pq_clear(r);
-                        }
-                        let r = crate::libpq_helpers::rust_pq_exec(
-                            (*pg_conn).conn,
-                            b"SET statement_timeout = '5min'\0".as_ptr() as *const c_char,
-                        );
-                        crate::libpq_helpers::rust_pq_clear(r);
+                        apply_pg_session_settings((*pg_conn).conn, &*cfg);
                     }
                 } else {
                     let rcfg = pg_config_get();
                     if rcfg.is_null() {
                         (*pg_conn).is_pg_active = 0;
-                        libc::pthread_mutex_unlock(&mut (*pg_conn).mutex as *mut _);
+                        conn_guard.unlock();
                         EXEC_PG_CONN_ERROR.with(|c| c.set(1));
                         return SQLITE_ERROR;
                     }
                     let cfg = &*rcfg;
-                    let conninfo = format!(
-                        "host={} port={} dbname={} user={} password={} \
-                         connect_timeout=5 keepalives=1 keepalives_idle=30 \
-                         keepalives_interval=10 keepalives_count=3",
-                        cbuf_to_str(&cfg.host),
-                        cfg.port,
-                        cbuf_to_str(&cfg.database),
-                        cbuf_to_str(&cfg.user),
-                        cbuf_to_str(&cfg.password)
-                    );
-                    let conninfo_c = CString::new(conninfo).unwrap_or_else(|_| CString::new("").unwrap());
-                    let new_conn = crate::libpq_helpers::rust_pq_connectdb(conninfo_c.as_ptr());
+                    let new_conn = connect_new(cfg);
                     if crate::libpq_helpers::rust_pq_status(new_conn) == CONNECTION_OK {
                         (*pg_conn).conn = new_conn;
                         (*pg_conn).is_pg_active = 1;
                         log_error("EXEC: fresh connection from NULL succeeded");
                         let cfg2 = pg_config_get();
                         if !cfg2.is_null() {
-                            let schema_cmd = format!(
-                                "SET search_path TO {}, public",
-                                cbuf_to_str(&(*cfg2).schema)
-                            );
-                            if let Ok(cs) = CString::new(schema_cmd) {
-                                let r = crate::libpq_helpers::rust_pq_exec((*pg_conn).conn, cs.as_ptr());
-                                crate::libpq_helpers::rust_pq_clear(r);
-                            }
-                            let r = crate::libpq_helpers::rust_pq_exec(
-                                (*pg_conn).conn,
-                                b"SET statement_timeout = '5min'\0".as_ptr() as *const c_char,
-                            );
-                            crate::libpq_helpers::rust_pq_clear(r);
+                            apply_pg_session_settings((*pg_conn).conn, &*cfg2);
                         }
                     } else {
                         log_error(&format!(
@@ -367,12 +281,12 @@ fn rust_my_sqlite3_exec_impl(
                         ));
                         crate::libpq_helpers::rust_pq_finish(new_conn);
                         (*pg_conn).is_pg_active = 0;
-                        libc::pthread_mutex_unlock(&mut (*pg_conn).mutex as *mut _);
+                        conn_guard.unlock();
                         EXEC_PG_CONN_ERROR.with(|c| c.set(1));
                         return SQLITE_ERROR;
                     }
                 }
-                libc::pthread_mutex_unlock(&mut (*pg_conn).mutex as *mut _);
+                conn_guard.unlock();
             }
         }
 
@@ -416,9 +330,9 @@ fn rust_my_sqlite3_exec_impl(
                     }
                 }
 
-                unsafe {
-                    libc::pthread_mutex_lock(&mut (*pg_conn).mutex as *mut _);
-                }
+                let mut conn_guard = unsafe {
+                    PthreadMutexGuard::lock(&mut (*pg_conn).mutex as *mut _)
+                };
 
                 let normalized = crate::db_interpose_helpers::rust_normalize_sql_literals(exec_pg_sql);
                 let res: *mut PGresult = if !normalized.is_null() {
@@ -507,7 +421,7 @@ fn rust_my_sqlite3_exec_impl(
                 if status == PGRES_COMMAND_OK || status == PGRES_TUPLES_OK {
                     let cmd_tuples = crate::libpq_helpers::rust_pq_cmd_tuples(res);
                     let tuples_ptr = if cmd_tuples.is_null() {
-                        b"1\0".as_ptr() as *const c_char
+                        c"1".as_ptr()
                     } else {
                         cmd_tuples
                     };
@@ -550,7 +464,7 @@ fn rust_my_sqlite3_exec_impl(
                     }
                 } else {
                     let err = if unsafe { (*pg_conn).conn }.is_null() {
-                        b"NULL connection\0".as_ptr() as *const c_char
+                        c"NULL connection".as_ptr()
                     } else {
                         crate::libpq_helpers::rust_pq_error_message(unsafe { (*pg_conn).conn })
                     };
@@ -572,7 +486,7 @@ fn rust_my_sqlite3_exec_impl(
                         }
                         crate::libpq_helpers::rust_pq_clear(res);
                         unsafe {
-                            libc::pthread_mutex_unlock(&mut (*pg_conn).mutex as *mut _);
+                            conn_guard.unlock();
                         }
                         unsafe { sql_translation_free(&mut trans as *mut SqlTranslation) };
                         if !blobs_rewrite.is_null() {
@@ -588,7 +502,7 @@ fn rust_my_sqlite3_exec_impl(
                 }
                 crate::libpq_helpers::rust_pq_clear(res);
                 unsafe {
-                    libc::pthread_mutex_unlock(&mut (*pg_conn).mutex as *mut _);
+                    conn_guard.unlock();
                 }
             }
             unsafe { sql_translation_free(&mut trans as *mut SqlTranslation) };

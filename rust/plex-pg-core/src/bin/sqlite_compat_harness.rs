@@ -1,3 +1,6 @@
+
+#![allow(clippy::enum_variant_names)]
+
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};

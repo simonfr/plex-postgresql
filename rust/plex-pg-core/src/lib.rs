@@ -1,3 +1,39 @@
+#![allow(
+    clippy::bind_instead_of_map,
+    clippy::cmp_null,
+    clippy::collapsible_match,
+    clippy::collapsible_else_if,
+    clippy::collapsible_if,
+    clippy::collapsible_str_replace,
+    clippy::doc_lazy_continuation,
+    clippy::doc_overindented_list_items,
+    clippy::explicit_counter_loop,
+    clippy::if_same_then_else,
+    clippy::let_and_return,
+    clippy::manual_c_str_literals,
+    clippy::manual_contains,
+    clippy::manual_div_ceil,
+    clippy::manual_is_ascii_check,
+    clippy::manual_is_multiple_of,
+    clippy::manual_pattern_char_comparison,
+    clippy::manual_strip,
+    clippy::manual_unwrap_or,
+    clippy::missing_const_for_thread_local,
+    clippy::missing_safety_doc,
+    clippy::missing_transmute_annotations,
+    clippy::needless_return,
+    clippy::needless_range_loop,
+    clippy::not_unsafe_ptr_arg_deref,
+    clippy::ptr_eq,
+    clippy::redundant_closure,
+    clippy::single_match,
+    clippy::too_many_arguments,
+    clippy::transmutes_expressible_as_ptr_casts,
+    clippy::type_complexity,
+    clippy::unnecessary_cast,
+    clippy::wildcard_in_or_patterns,
+)]
+
 pub mod dedup;
 pub mod db_interpose_exec;
 pub mod c_abi;
@@ -8,6 +44,7 @@ pub mod exception_what;
 pub mod db_interpose_open;
 pub mod db_interpose_prepare;
 pub mod db_interpose_stmt_lifecycle;
+pub mod db_interpose_prepare_utils;
 pub mod db_interpose_value;
 pub mod db_interpose_helpers;
 pub mod db_interpose_metadata;
@@ -20,6 +57,7 @@ pub mod db_interpose_step;
 pub mod db_interpose_step_write_utils;
 pub mod db_interpose_txn_utils;
 pub mod db_interpose_value_helpers;
+pub mod env_utils;
 pub mod emit;
 pub mod ffi_types;
 pub mod ffi;
@@ -28,6 +66,7 @@ pub mod groupby;
 pub mod keywords;
 pub mod libpq_helpers;
 pub mod pg_client;
+pub mod pg_client_stmt_cache;
 pub mod pg_config;
 pub mod pg_logging;
 pub mod pg_mem_telemetry;
@@ -60,6 +99,8 @@ pub mod quotes;
 pub mod shim_alloc;
 pub mod types;
 pub mod upsert;
+#[cfg(test)]
+pub mod test_utils;
 
 use sqlparser::dialect::{MySqlDialect, PostgreSqlDialect, SQLiteDialect};
 use sqlparser::parser::Parser;
@@ -186,7 +227,7 @@ pub fn translate(sqlite_sql: &str) -> Result<Translation, String> {
 
     let sql = stmts
         .iter()
-        .map(|s| emit::emit(s))
+        .map(emit::emit)
         .collect::<Vec<_>>()
         .join("; ");
 

@@ -1,3 +1,10 @@
+
+#![allow(
+    clippy::manual_c_str_literals,
+    clippy::single_match,
+    clippy::while_let_on_iterator
+)]
+
 #[cfg(target_os = "macos")]
 mod macos_impl {
     use std::ffi::{CStr, CString};

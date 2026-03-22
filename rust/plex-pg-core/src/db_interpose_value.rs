@@ -1,9 +1,10 @@
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 use std::os::raw::{c_char, c_int, c_long, c_uchar, c_void};
 use std::ptr;
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 
 use crate::db_interpose_common::{tls_last_query_ptr, tls_value_type_calls_ptr};
+use crate::db_interpose_conn_utils::{cstr_prefix, cstr_to_string_or, log_debug, log_error, log_info, PthreadMutexGuard};
 use crate::db_interpose_helpers::PGresult as PgResultHelpers;
 use crate::ffi_types::{sqlite3, sqlite3_stmt, sqlite3_value, PgStmt};
 use crate::libpq_helpers::PGresult as PgResultLibpq;
@@ -42,23 +43,6 @@ struct PgFakeValue {
     owner_thread: libc::pthread_t,
 }
 
-struct PthreadMutexGuard(*mut libc::pthread_mutex_t);
-
-impl PthreadMutexGuard {
-    unsafe fn lock(mutex: *mut libc::pthread_mutex_t) -> Self {
-        libc::pthread_mutex_lock(mutex);
-        Self(mutex)
-    }
-}
-
-impl Drop for PthreadMutexGuard {
-    fn drop(&mut self) {
-        unsafe {
-            libc::pthread_mutex_unlock(self.0);
-        }
-    }
-}
-
 extern "C" {
     static mut orig_sqlite3_value_type: Option<unsafe extern "C" fn(*mut sqlite3_value) -> c_int>;
     static mut orig_sqlite3_value_text: Option<unsafe extern "C" fn(*mut sqlite3_value) -> *const c_uchar>;
@@ -79,40 +63,6 @@ extern "C" {
         stmt: *mut sqlite3_stmt,
         db: *mut sqlite3,
     );
-}
-
-fn log_error(msg: &str) {
-    if let Ok(cs) = CString::new(msg) {
-        crate::pg_logging::rust_logging_write(0, cs.as_ptr());
-    }
-}
-
-fn log_info(msg: &str) {
-    if let Ok(cs) = CString::new(msg) {
-        crate::pg_logging::rust_logging_write(1, cs.as_ptr());
-    }
-}
-
-fn log_debug(msg: &str) {
-    if let Ok(cs) = CString::new(msg) {
-        crate::pg_logging::rust_logging_write(2, cs.as_ptr());
-    }
-}
-
-fn cstr_to_string_or(ptr: *const c_char, default: &str) -> String {
-    if ptr.is_null() {
-        return default.to_string();
-    }
-    unsafe { CStr::from_ptr(ptr).to_string_lossy().into_owned() }
-}
-
-fn cstr_prefix(ptr: *const c_char, max_len: usize, default: &str) -> String {
-    if ptr.is_null() {
-        return default.to_string();
-    }
-    let bytes = unsafe { CStr::from_ptr(ptr).to_bytes() };
-    let slice = &bytes[..bytes.len().min(max_len)];
-    String::from_utf8_lossy(slice).into_owned()
 }
 
 fn sqlite_type_name(t: c_int) -> &'static str {

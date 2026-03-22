@@ -61,6 +61,66 @@ jobs:
       - name: Run C unit tests
         run: make ci-test
 
+  unit-tests-macos:
+    name: Unit tests (macOS)
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install PostgreSQL headers/libs
+        run: |
+          set -eux
+          brew install postgresql@15
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/plex-pg-core/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('rust/plex-pg-core/Cargo.lock') }}
+
+      - name: Run Rust tests
+        run: |
+          set -eux
+          export PLEX_PG_LIBPQ_DIR="$(brew --prefix postgresql@15)/lib"
+          cd rust/plex-pg-core
+          cargo test --lib
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpq-dev libsqlite3-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/plex-pg-core/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('rust/plex-pg-core/Cargo.lock') }}
+
+      - name: Run Clippy
+        run: |
+          cd rust/plex-pg-core
+          cargo clippy -- -D warnings
+
   linux-build-amd64:
     name: Build Linux amd64 shim
     runs-on: ubuntu-latest

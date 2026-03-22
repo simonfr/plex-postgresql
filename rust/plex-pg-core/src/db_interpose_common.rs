@@ -1,10 +1,12 @@
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 use std::os::raw::{c_char, c_int, c_long, c_uint, c_uchar, c_void};
 use std::mem::size_of;
 use std::ptr;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Once;
 
+use crate::db_interpose_conn_utils::{log_debug, log_error, log_info, PthreadMutexGuard};
+use crate::env_utils;
 use crate::ffi_types::{sqlite3, sqlite3_stmt};
 
 const EXC_QUERY_RING_SIZE: usize = 24;
@@ -475,43 +477,8 @@ pub(crate) unsafe fn stderr_ptr() -> *mut libc::FILE {
     }
 }
 
-fn log_error(msg: &str) {
-    if let Ok(cs) = CString::new(msg) {
-        crate::pg_logging::rust_logging_write(0, cs.as_ptr());
-    }
-}
-
-fn log_info(msg: &str) {
-    if let Ok(cs) = CString::new(msg) {
-        crate::pg_logging::rust_logging_write(1, cs.as_ptr());
-    }
-}
-
-fn log_debug(msg: &str) {
-    if let Ok(cs) = CString::new(msg) {
-        crate::pg_logging::rust_logging_write(2, cs.as_ptr());
-    }
-}
-
-fn env_truthy(name: &[u8]) -> bool {
-    unsafe {
-        let val = libc::getenv(name.as_ptr() as *const c_char);
-        if val.is_null() || *val == 0 {
-            return false;
-        }
-        matches!(*val as u8, b'1' | b'y' | b'Y' | b't' | b'T')
-    }
-}
-
 fn env_usize(name: &[u8]) -> Option<usize> {
-    unsafe {
-        let val = libc::getenv(name.as_ptr() as *const c_char);
-        if val.is_null() || *val == 0 {
-            return None;
-        }
-        let s = CStr::from_ptr(val).to_string_lossy();
-        s.trim().parse::<usize>().ok()
-    }
+    env_utils::env_usize(name)
 }
 
 #[cfg(target_os = "linux")]
@@ -789,14 +756,17 @@ extern "C" fn worker_thread_func(_arg: *mut c_void) -> *mut c_void {
         ));
 
         loop {
-            libc::pthread_mutex_lock(ptr::addr_of_mut!(worker_mutex));
+            let mut worker_guard = PthreadMutexGuard::lock(ptr::addr_of_mut!(worker_mutex));
 
             while worker_request.work_ready == 0 && worker_running != 0 {
-                libc::pthread_cond_wait(ptr::addr_of_mut!(worker_cond_request), ptr::addr_of_mut!(worker_mutex));
+                libc::pthread_cond_wait(
+                    ptr::addr_of_mut!(worker_cond_request),
+                    worker_guard.mutex_ptr(),
+                );
             }
 
             if worker_running == 0 {
-                libc::pthread_mutex_unlock(ptr::addr_of_mut!(worker_mutex));
+                worker_guard.unlock();
                 break;
             }
 
@@ -805,7 +775,7 @@ extern "C" fn worker_thread_func(_arg: *mut c_void) -> *mut c_void {
             if worker_request.type_ == WORK_SHUTDOWN {
                 worker_request.work_done = 1;
                 libc::pthread_cond_signal(ptr::addr_of_mut!(worker_cond_response));
-                libc::pthread_mutex_unlock(ptr::addr_of_mut!(worker_mutex));
+                worker_guard.unlock();
                 break;
             }
 
@@ -828,7 +798,7 @@ extern "C" fn worker_thread_func(_arg: *mut c_void) -> *mut c_void {
 
             worker_request.work_done = 1;
             libc::pthread_cond_signal(ptr::addr_of_mut!(worker_cond_response));
-            libc::pthread_mutex_unlock(ptr::addr_of_mut!(worker_mutex));
+            worker_guard.unlock();
         }
 
         log_info("WORKER: Thread exiting");
@@ -837,7 +807,7 @@ extern "C" fn worker_thread_func(_arg: *mut c_void) -> *mut c_void {
 }
 
 unsafe fn get_exception_tracker_impl(type_name: *const c_char) -> *mut ExceptionTypeTracker {
-    libc::pthread_mutex_lock(ptr::addr_of_mut!(exception_tracker_mutex));
+    let mut exc_guard = PthreadMutexGuard::lock(ptr::addr_of_mut!(exception_tracker_mutex));
 
     for i in 0..EXCEPTION_TYPE_COUNT {
         let tracker = &mut EXCEPTION_TYPES[i as usize] as *mut ExceptionTypeTracker;
@@ -848,7 +818,7 @@ unsafe fn get_exception_tracker_impl(type_name: *const c_char) -> *mut Exception
                 && libc::strcmp(tracker_ref.type_name, type_name) == 0)
         {
             tracker_ref.count += 1;
-            libc::pthread_mutex_unlock(ptr::addr_of_mut!(exception_tracker_mutex));
+            exc_guard.unlock();
             return tracker;
         }
     }
@@ -859,11 +829,11 @@ unsafe fn get_exception_tracker_impl(type_name: *const c_char) -> *mut Exception
         (*tracker).count = 1;
         (*tracker).logged_with_trace = 0;
         EXCEPTION_TYPE_COUNT += 1;
-        libc::pthread_mutex_unlock(ptr::addr_of_mut!(exception_tracker_mutex));
+        exc_guard.unlock();
         return tracker;
     }
 
-    libc::pthread_mutex_unlock(ptr::addr_of_mut!(exception_tracker_mutex));
+    exc_guard.unlock();
     ptr::null_mut()
 }
 
@@ -1196,12 +1166,12 @@ pub extern "C" fn rust_worker_cleanup() {
             return;
         }
 
-        libc::pthread_mutex_lock(ptr::addr_of_mut!(worker_mutex));
+        let mut worker_guard = PthreadMutexGuard::lock(ptr::addr_of_mut!(worker_mutex));
         worker_request.type_ = WORK_SHUTDOWN;
         worker_request.work_ready = 1;
         worker_running = 0;
         libc::pthread_cond_signal(ptr::addr_of_mut!(worker_cond_request));
-        libc::pthread_mutex_unlock(ptr::addr_of_mut!(worker_mutex));
+        worker_guard.unlock();
 
         libc::pthread_join(worker_thread, ptr::null_mut());
     }
@@ -1232,7 +1202,7 @@ pub extern "C" fn rust_delegate_prepare_to_worker(
         };
         log_debug(&format!("WORKER: Delegating query ({})", preview));
 
-        libc::pthread_mutex_lock(ptr::addr_of_mut!(worker_mutex));
+        let mut worker_guard = PthreadMutexGuard::lock(ptr::addr_of_mut!(worker_mutex));
 
         worker_request.type_ = WORK_PREPARE_V2;
         worker_request.db = db;
@@ -1247,7 +1217,10 @@ pub extern "C" fn rust_delegate_prepare_to_worker(
         libc::pthread_cond_signal(ptr::addr_of_mut!(worker_cond_request));
 
         while worker_request.work_done == 0 {
-            libc::pthread_cond_wait(ptr::addr_of_mut!(worker_cond_response), ptr::addr_of_mut!(worker_mutex));
+            libc::pthread_cond_wait(
+                ptr::addr_of_mut!(worker_cond_response),
+                worker_guard.mutex_ptr(),
+            );
         }
 
         if !pp_stmt.is_null() {
@@ -1258,7 +1231,7 @@ pub extern "C" fn rust_delegate_prepare_to_worker(
         }
         let result = worker_request.result;
 
-        libc::pthread_mutex_unlock(ptr::addr_of_mut!(worker_mutex));
+        worker_guard.unlock();
 
         log_debug(&format!("WORKER: Delegation complete, rc={}", result));
         result
@@ -1657,8 +1630,8 @@ pub extern "C" fn rust_common_handle_exception(
     let type_name = rust_get_type_name(tinfo);
     let tracker = unsafe { get_exception_tracker_impl(type_name) };
 
-    let should_log_meta = env_truthy(EXC_LOG_META_ENV);
-    let should_dump_object = env_truthy(EXC_DUMP_OBJECT_ENV);
+    let should_log_meta = env_utils::env_truthy(EXC_LOG_META_ENV);
+    let should_dump_object = env_utils::env_truthy(EXC_DUMP_OBJECT_ENV);
 
     if should_log_meta {
         let type_addr = tinfo as usize;
@@ -1677,7 +1650,7 @@ pub extern "C" fn rust_common_handle_exception(
     if should_dump_object {
         let bytes = env_usize(EXC_DUMP_BYTES_ENV).unwrap_or(256);
         let pointers = log_exception_object_dump(thrown_exception, bytes);
-        let dump_pointers = env_truthy(EXC_DUMP_POINTERS_ENV);
+        let dump_pointers = env_utils::env_truthy(EXC_DUMP_POINTERS_ENV);
         if dump_pointers {
             let max_ptrs = env_usize(EXC_DUMP_POINTER_MAX_ENV).unwrap_or(6);
             let ptr_bytes = env_usize(EXC_DUMP_POINTER_BYTES_ENV).unwrap_or(512);
@@ -1693,12 +1666,12 @@ pub extern "C" fn rust_common_handle_exception(
                 let _ = log_exception_object_dump(ptr as *mut c_void, ptr_bytes);
             }
         }
-        let dump_tinfo = env_truthy(EXC_DUMP_TINFO_ENV);
+        let dump_tinfo = env_utils::env_truthy(EXC_DUMP_TINFO_ENV);
         if dump_tinfo {
             log_info(&format!("EXC_META_TINFO_DUMP: addr=0x{:x} bytes=256", tinfo as usize));
             let _ = log_exception_object_dump(tinfo as *mut c_void, 256);
         }
-        if env_truthy(EXC_DUMP_SCAN_STRINGS_ENV) {
+        if env_utils::env_truthy(EXC_DUMP_SCAN_STRINGS_ENV) {
             let scan_bytes = env_usize(EXC_DUMP_SCAN_STRINGS_BYTES_ENV).unwrap_or(2048);
             log_info(&format!(
                 "EXC_META_SCAN: addr=0x{:x} bytes={}",
@@ -1794,7 +1767,7 @@ pub extern "C" fn rust_pg_exception_note_query(sql: *const c_char) {
         if *sql == 0 {
             return;
         }
-        libc::pthread_mutex_lock(ptr::addr_of_mut!(EXC_QUERY_RING_MUTEX));
+        let mut ring_guard = PthreadMutexGuard::lock(ptr::addr_of_mut!(EXC_QUERY_RING_MUTEX));
         libc::snprintf(
             EXC_QUERY_RING[EXC_QUERY_RING_NEXT as usize].as_mut_ptr(),
             EXC_QUERY_MAX_LEN,
@@ -1802,14 +1775,14 @@ pub extern "C" fn rust_pg_exception_note_query(sql: *const c_char) {
             sql,
         );
         EXC_QUERY_RING_NEXT = (EXC_QUERY_RING_NEXT + 1) % (EXC_QUERY_RING_SIZE as c_int);
-        libc::pthread_mutex_unlock(ptr::addr_of_mut!(EXC_QUERY_RING_MUTEX));
+        ring_guard.unlock();
     }
 }
 
 #[no_mangle]
 pub extern "C" fn rust_pg_exception_dump_recent_queries() {
     unsafe {
-        libc::pthread_mutex_lock(ptr::addr_of_mut!(EXC_QUERY_RING_MUTEX));
+        let mut ring_guard = PthreadMutexGuard::lock(ptr::addr_of_mut!(EXC_QUERY_RING_MUTEX));
         libc::fprintf(
             stderr_ptr(),
             b"[EXC_CONTEXT] Recent SQL (oldest -> newest):\n\0".as_ptr() as *const c_char,
@@ -1827,7 +1800,7 @@ pub extern "C" fn rust_pg_exception_dump_recent_queries() {
             }
         }
         libc::fflush(stderr_ptr());
-        libc::pthread_mutex_unlock(ptr::addr_of_mut!(EXC_QUERY_RING_MUTEX));
+        ring_guard.unlock();
     }
 }
 
@@ -1839,7 +1812,7 @@ pub extern "C" fn rust_pg_exception_note_phase(
     db: *const c_void,
 ) {
     unsafe {
-        libc::pthread_mutex_lock(ptr::addr_of_mut!(EXC_PHASE_RING_MUTEX));
+        let mut phase_guard = PthreadMutexGuard::lock(ptr::addr_of_mut!(EXC_PHASE_RING_MUTEX));
 
         let slot = &mut EXC_PHASE_RING[EXC_PHASE_RING_NEXT as usize];
         libc::snprintf(
@@ -1864,7 +1837,7 @@ pub extern "C" fn rust_pg_exception_note_phase(
 
         EXC_PHASE_RING_NEXT = (EXC_PHASE_RING_NEXT + 1) % (EXC_PHASE_RING_SIZE as c_int);
 
-        libc::pthread_mutex_unlock(ptr::addr_of_mut!(EXC_PHASE_RING_MUTEX));
+        phase_guard.unlock();
 
         let qlen = if !sql.is_null() && *sql != 0 {
             let mut wrote = libc::snprintf(
@@ -1928,7 +1901,7 @@ pub extern "C" fn rust_pg_exception_note_phase(
 #[no_mangle]
 pub extern "C" fn rust_pg_exception_dump_recent_phases() {
     unsafe {
-        libc::pthread_mutex_lock(ptr::addr_of_mut!(EXC_PHASE_RING_MUTEX));
+        let mut phase_guard = PthreadMutexGuard::lock(ptr::addr_of_mut!(EXC_PHASE_RING_MUTEX));
 
         libc::fprintf(
             stderr_ptr(),
@@ -1966,7 +1939,7 @@ pub extern "C" fn rust_pg_exception_dump_recent_phases() {
         }
 
         libc::fflush(stderr_ptr());
-        libc::pthread_mutex_unlock(ptr::addr_of_mut!(EXC_PHASE_RING_MUTEX));
+        phase_guard.unlock();
     }
 }
 

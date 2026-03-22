@@ -1,9 +1,10 @@
 use std::cell::Cell;
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 use std::os::raw::{c_char, c_int, c_void};
 use std::sync::atomic::Ordering;
 
 use crate::db_interpose_common::tls_in_resolve_tables_ptr;
+use crate::db_interpose_conn_utils::{cstr_prefix, log_debug, log_error, PthreadMutexGuard};
 use crate::ffi_types::{sqlite3, sqlite3_stmt, PgConnection, PgStmt, MAX_PARAMS};
 
 const SQLITE_DONE: c_int = 101;
@@ -54,27 +55,6 @@ extern "C" {
 
     fn sql_translate(sql: *const c_char) -> SqlTranslation;
     fn sql_translation_free(result: *mut SqlTranslation);
-}
-
-fn log_error(msg: &str) {
-    if let Ok(cs) = CString::new(msg) {
-        crate::pg_logging::rust_logging_write(0, cs.as_ptr());
-    }
-}
-
-fn log_debug(msg: &str) {
-    if let Ok(cs) = CString::new(msg) {
-        crate::pg_logging::rust_logging_write(2, cs.as_ptr());
-    }
-}
-
-fn cstr_prefix(ptr: *const c_char, max_len: usize, default: &str) -> String {
-    if ptr.is_null() {
-        return default.to_string();
-    }
-    let bytes = unsafe { CStr::from_ptr(ptr).to_bytes() };
-    let slice = &bytes[..bytes.len().min(max_len)];
-    String::from_utf8_lossy(slice).into_owned()
 }
 
 unsafe fn orig_step(p_stmt: *mut sqlite3_stmt) -> c_int {
@@ -351,9 +331,8 @@ pub extern "C" fn rust_my_sqlite3_step(p_stmt: *mut sqlite3_stmt) -> c_int {
             ));
 
             unsafe {
-                libc::pthread_mutex_lock(&mut (*pg_stmt).mutex as *mut _);
+                let _stmt_guard = PthreadMutexGuard::lock(&mut (*pg_stmt).mutex as *mut _);
                 crate::pg_statement::rust_stmt_clear_result(pg_stmt);
-                libc::pthread_mutex_unlock(&mut (*pg_stmt).mutex as *mut _);
             }
 
             let delay_ms = if delay < 0 { 0 } else { delay as u32 };
@@ -447,21 +426,30 @@ unsafe fn my_sqlite3_step_impl(p_stmt: *mut sqlite3_stmt) -> c_int {
         && !exec_conn.is_null()
         && !(*exec_conn).conn.is_null()
     {
-        libc::pthread_mutex_lock(&mut (*pg_stmt).mutex as *mut _);
-
         let mut param_values: [*const c_char; MAX_PARAMS] = [std::ptr::null(); MAX_PARAMS];
-        let max_params = (*pg_stmt).param_count.min(MAX_PARAMS as c_int);
-        for i in 0..max_params {
-            param_values[i as usize] = (*pg_stmt).param_values[i as usize] as *const c_char;
-        }
+        let (stmt_is_pg, read_done, has_cached_result, streaming_mode, has_result, write_executed, pg_sql) = {
+            let _stmt_guard = PthreadMutexGuard::lock(&mut (*pg_stmt).mutex as *mut _);
+            let max_params = (*pg_stmt).param_count.min(MAX_PARAMS as c_int);
+            for i in 0..max_params {
+                param_values[i as usize] = (*pg_stmt).param_values[i as usize] as *const c_char;
+            }
+            (
+                (*pg_stmt).is_pg,
+                (*pg_stmt).read_done != 0,
+                !(*pg_stmt).cached_result.is_null(),
+                (*pg_stmt).streaming_mode != 0,
+                !(*pg_stmt).result.is_null(),
+                (*pg_stmt).write_executed != 0,
+                (*pg_stmt).pg_sql,
+            )
+        };
 
-        if (*pg_stmt).is_pg == 2 {
-            if (*pg_stmt).read_done != 0 {
-                libc::pthread_mutex_unlock(&mut (*pg_stmt).mutex as *mut _);
+        if stmt_is_pg == 2 {
+            if read_done {
                 return SQLITE_DONE;
             }
 
-            if !(*pg_stmt).cached_result.is_null() {
+            if has_cached_result {
                 return crate::db_interpose_step_read_utils::rust_step_read_advance_cached_result(
                     pg_stmt,
                 );
@@ -474,49 +462,46 @@ unsafe fn my_sqlite3_step_impl(p_stmt: *mut sqlite3_stmt) -> c_int {
                 pg_stmt, exec_conn,
             );
 
-            if (*pg_stmt).streaming_mode != 0 {
+            if streaming_mode {
                 return crate::db_interpose_step_read_utils::rust_step_read_streaming_next(
                     p_stmt, pg_stmt,
                 );
             }
 
-            if !(*pg_stmt).result.is_null() {
+            if has_result {
                 return crate::db_interpose_step_read_utils::rust_step_read_eager_next(pg_stmt);
             }
 
-            if (*pg_stmt).result.is_null() {
-                let mut conn_error = 0;
-                let first_rc = crate::db_interpose_step_read_utils::rust_step_read_first_execute(
-                    pg_stmt,
-                    &mut exec_conn,
-                    param_values.as_ptr(),
-                    &mut conn_error,
-                );
-                if first_rc == STEP_RESULT_ERROR && conn_error != 0 {
-                    STEP_PG_CONN_ERROR.with(|c| c.set(1));
-                }
-                return first_rc;
+            let mut conn_error = 0;
+            let first_rc = crate::db_interpose_step_read_utils::rust_step_read_first_execute(
+                pg_stmt,
+                &mut exec_conn,
+                param_values.as_ptr(),
+                &mut conn_error,
+            );
+            if first_rc == STEP_RESULT_ERROR && conn_error != 0 {
+                STEP_PG_CONN_ERROR.with(|c| c.set(1));
             }
-        } else if (*pg_stmt).is_pg == 1 {
-            if (*pg_stmt).write_executed != 0 {
-                libc::pthread_mutex_unlock(&mut (*pg_stmt).mutex as *mut _);
+            return first_rc;
+        } else if stmt_is_pg == 1 {
+            if write_executed {
                 return SQLITE_DONE;
             }
 
             let mut txn_state = PQTRANS_IDLE;
             if crate::db_interpose_step_write_utils::rust_step_pg_write_should_noop(
                 exec_conn,
-                (*pg_stmt).pg_sql,
+                pg_sql,
                 &mut txn_state,
             ) != 0
             {
                 log_debug(&format!(
                     "TXN_NOOP: skipping tx terminator in state={} sql={}",
                     txn_state,
-                    cstr_prefix((*pg_stmt).pg_sql, 120, "(null)")
+                    cstr_prefix(pg_sql, 120, "(null)")
                 ));
+                let _stmt_guard = PthreadMutexGuard::lock(&mut (*pg_stmt).mutex as *mut _);
                 (*pg_stmt).write_executed = 1;
-                libc::pthread_mutex_unlock(&mut (*pg_stmt).mutex as *mut _);
                 return SQLITE_DONE;
             }
 
@@ -532,7 +517,6 @@ unsafe fn my_sqlite3_step_impl(p_stmt: *mut sqlite3_stmt) -> c_int {
                 param_values.as_ptr(),
             ) != 0
             {
-                libc::pthread_mutex_unlock(&mut (*pg_stmt).mutex as *mut _);
                 return SQLITE_DONE;
             }
 
@@ -550,22 +534,20 @@ unsafe fn my_sqlite3_step_impl(p_stmt: *mut sqlite3_stmt) -> c_int {
             }
 
             let mut write_conn_error = 0;
-            let write_rc = crate::db_interpose_step_write_utils::rust_step_write_execute_and_finalize(
-                pg_stmt,
-                exec_conn,
-                param_values.as_ptr(),
-                &mut write_conn_error,
-            );
+            let write_rc =
+                crate::db_interpose_step_write_utils::rust_step_write_execute_and_finalize(
+                    pg_stmt,
+                    exec_conn,
+                    param_values.as_ptr(),
+                    &mut write_conn_error,
+                );
             if write_rc == STEP_RESULT_ERROR {
-                libc::pthread_mutex_unlock(&mut (*pg_stmt).mutex as *mut _);
                 if write_conn_error != 0 {
                     STEP_PG_CONN_ERROR.with(|c| c.set(1));
                 }
                 return SQLITE_ERROR;
             }
         }
-
-        libc::pthread_mutex_unlock(&mut (*pg_stmt).mutex as *mut _);
     }
 
     if !pg_stmt.is_null() && (*pg_stmt).is_pg != 0 {

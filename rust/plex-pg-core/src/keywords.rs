@@ -2699,12 +2699,7 @@ fn transform_expr(expr: &mut Expr) {
 mod tests {
     use super::{preprocess, Ordering, TEST_STRICT_PRAGMA_OVERRIDE};
     use crate::translate;
-    use std::sync::{Mutex, OnceLock};
-
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
+    use crate::test_utils::env_lock;
 
     #[test]
     fn keyword_begin_immediate() {

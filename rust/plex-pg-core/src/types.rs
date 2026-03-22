@@ -11,13 +11,10 @@ use sqlparser::ast::*;
 use sqlparser::tokenizer::Span;
 
 pub fn transform(stmt: &mut Statement) {
-    match stmt {
-        Statement::CreateTable(ct) => {
-            for col in &mut ct.columns {
-                transform_column(col);
-            }
+    if let Statement::CreateTable(ct) = stmt {
+        for col in &mut ct.columns {
+            transform_column(col);
         }
-        _ => {}
     }
 }
 
@@ -89,21 +86,18 @@ fn transform_column(col: &mut ColumnDef) {
 
 /// Rewrite boolean string defaults.
 fn rewrite_default_bool(expr: &mut Expr) {
-    match expr {
-        Expr::Value(ValueWithSpan { ref value, .. }) => {
-            let replacement = match value {
-                Value::SingleQuotedString(s) if s == "t" => Some(Value::Boolean(true)),
-                Value::SingleQuotedString(s) if s == "f" => Some(Value::Boolean(false)),
-                _ => None,
-            };
-            if let Some(new_val) = replacement {
-                *expr = Expr::Value(ValueWithSpan {
-                    value: new_val,
-                    span: Span::empty(),
-                });
-            }
+    if let Expr::Value(ValueWithSpan { ref value, .. }) = expr {
+        let replacement = match value {
+            Value::SingleQuotedString(s) if s == "t" => Some(Value::Boolean(true)),
+            Value::SingleQuotedString(s) if s == "f" => Some(Value::Boolean(false)),
+            _ => None,
+        };
+        if let Some(new_val) = replacement {
+            *expr = Expr::Value(ValueWithSpan {
+                value: new_val,
+                span: Span::empty(),
+            });
         }
-        _ => {}
     }
 }
 

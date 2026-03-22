@@ -1,7 +1,8 @@
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 use std::os::raw::{c_char, c_int, c_void};
 use std::ptr;
 
+use crate::db_interpose_conn_utils::{cstr_to_string_or, log_info};
 use crate::ffi_types::{sqlite3, PgConnection};
 
 const SQLITE_OK: c_int = 0;
@@ -17,19 +18,6 @@ extern "C" {
     static mut orig_sqlite3_close: Option<unsafe extern "C" fn(*mut sqlite3) -> c_int>;
     static mut orig_sqlite3_close_v2: Option<unsafe extern "C" fn(*mut sqlite3) -> c_int>;
     static mut shim_passthrough_only: c_int;
-}
-
-fn log_info(msg: &str) {
-    if let Ok(cs) = CString::new(msg) {
-        crate::pg_logging::rust_logging_write(1, cs.as_ptr());
-    }
-}
-
-fn cstr_to_string_or(ptr: *const c_char, default: &str) -> String {
-    if ptr.is_null() {
-        return default.to_string();
-    }
-    unsafe { CStr::from_ptr(ptr).to_string_lossy().into_owned() }
 }
 
 fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
