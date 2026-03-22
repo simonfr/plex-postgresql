@@ -11,6 +11,7 @@ use crate::db_interpose_common;
 use crate::db_interpose_common::stderr_ptr;
 use crate::exception_what::pg_exception_install_terminate_logger;
 use crate::ffi_types::{sqlite3, sqlite3_stmt, sqlite3_value};
+use crate::runtime_common::{env_truthy, log_info};
 
 type SigactionFn = unsafe extern "C" fn(c_int, *const libc::sigaction, *mut libc::sigaction) -> c_int;
 type CxaThrowFn =
@@ -26,16 +27,6 @@ static EXCEPTION_CATCHER_ENABLED_CACHED: AtomicI32 = AtomicI32::new(-1);
 
 thread_local! {
     static IN_EXCEPTION_HANDLER: UnsafeCell<c_int> = UnsafeCell::new(0);
-}
-
-fn env_truthy(name: &[u8]) -> bool {
-    unsafe {
-        let val = libc::getenv(name.as_ptr() as *const c_char);
-        if val.is_null() || *val == 0 {
-            return false;
-        }
-        matches!(*val as u8, b'1' | b'y' | b'Y' | b't' | b'T')
-    }
 }
 
 fn signal_log_enabled() -> bool {
@@ -56,12 +47,6 @@ fn exception_catcher_enabled() -> bool {
     let enabled = env_truthy(b"PLEX_PG_ENABLE_EXCEPTION_CATCHER\0");
     EXCEPTION_CATCHER_ENABLED_CACHED.store(if enabled { 1 } else { 0 }, Ordering::Release);
     enabled
-}
-
-fn log_info(msg: &str) {
-    if let Ok(cs) = CString::new(msg) {
-        crate::pg_logging::rust_logging_write(1, cs.as_ptr());
-    }
 }
 
 unsafe fn resolve_cxa_throw() -> Option<CxaThrowFn> {

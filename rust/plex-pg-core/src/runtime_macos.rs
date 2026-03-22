@@ -1,7 +1,6 @@
 #![cfg(target_os = "macos")]
 
 use std::cell::UnsafeCell;
-use std::ffi::CString;
 use std::os::raw::{c_char, c_int, c_void};
 use std::ptr;
 
@@ -10,6 +9,7 @@ use crate::db_interpose_common;
 use crate::db_interpose_common::stderr_ptr;
 use crate::exception_what::pg_exception_install_terminate_logger;
 use crate::fishhook::{self, Rebinding};
+use crate::runtime_common::{env_truthy, log_info};
 
 type CxaThrowFn =
     unsafe extern "C" fn(*mut c_void, *mut c_void, Option<unsafe extern "C" fn(*mut c_void)>) -> !;
@@ -56,22 +56,6 @@ unsafe fn opt_slot<T>(slot: *mut Option<T>) -> *mut *mut c_void {
 #[inline]
 unsafe fn read_option<T: Copy>(slot: *const Option<T>) -> Option<T> {
     std::ptr::read(slot)
-}
-
-fn env_truthy(name: &[u8]) -> bool {
-    unsafe {
-        let val = libc::getenv(name.as_ptr() as *const c_char);
-        if val.is_null() || *val == 0 {
-            return false;
-        }
-        matches!(*val as u8, b'1' | b'y' | b'Y' | b't' | b'T')
-    }
-}
-
-fn log_info(msg: &str) {
-    if let Ok(cs) = CString::new(msg) {
-        crate::pg_logging::rust_logging_write(1, cs.as_ptr());
-    }
 }
 
 fn setup_fishhook_rebindings() {

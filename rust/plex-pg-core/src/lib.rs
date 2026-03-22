@@ -34,6 +34,7 @@ pub mod pg_mem_telemetry;
 pub mod pg_query_cache;
 pub mod pg_statement;
 pub mod platform_backtrace;
+pub mod runtime_common;
 #[cfg(target_os = "macos")]
 pub mod fishhook;
 #[cfg(target_os = "macos")]
