@@ -2,6 +2,8 @@ use std::cell::UnsafeCell;
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int, c_void};
 
+use crate::db_interpose_common::stderr_ptr;
+
 pub(crate) fn env_truthy(name: &[u8]) -> bool {
     unsafe {
         let val = libc::getenv(name.as_ptr() as *const c_char);
@@ -18,6 +20,31 @@ pub(crate) fn log_info(msg: &str) {
     }
 }
 
+pub(crate) fn should_skip_shim_init() -> bool {
+    if cfg!(test) {
+        return true;
+    }
+    env_truthy(b"PLEX_PG_DISABLE_SHIM_INIT\0")
+}
+
+pub(crate) fn log_ctor_start(os_label: &str) {
+    log_stderr_line(&format!(
+        "[SHIM_INIT] Constructor starting ({})...",
+        os_label
+    ));
+}
+
+pub(crate) fn log_ctor_complete(os_label: &str, pid: i32) {
+    log_stderr_line(&format!(
+        "[SHIM_INIT] Constructor complete ({}, PID {})",
+        os_label, pid
+    ));
+}
+
+pub(crate) fn log_logging_initialized() {
+    log_stderr_line("[SHIM_INIT] Logging initialized");
+}
+
 pub(crate) fn log_shim_loaded(os_label: &str) {
     log_info(&format!(
         "=== Plex PostgreSQL Interpose Shim loaded ({}) ===",
@@ -30,6 +57,15 @@ pub(crate) fn log_shim_unloading(os_label: &str) {
         "=== Plex PostgreSQL Interpose Shim unloading ({}) ===",
         os_label
     ));
+}
+
+fn log_stderr_line(msg: &str) {
+    if let Ok(cs) = CString::new(msg) {
+        unsafe {
+            libc::fprintf(stderr_ptr(), b"%s\n\0".as_ptr() as *const c_char, cs.as_ptr());
+            libc::fflush(stderr_ptr());
+        }
+    }
 }
 
 thread_local! {

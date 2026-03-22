@@ -10,7 +10,10 @@ use crate::db_interpose_common;
 use crate::db_interpose_common::stderr_ptr;
 use crate::exception_what::pg_exception_install_terminate_logger;
 use crate::ffi_types::{sqlite3, sqlite3_stmt, sqlite3_value};
-use crate::runtime_common::{env_truthy, handle_exception_with_tls, log_shim_loaded, log_shim_unloading};
+use crate::runtime_common::{
+    env_truthy, handle_exception_with_tls, log_ctor_complete, log_ctor_start,
+    log_logging_initialized, log_shim_loaded, log_shim_unloading, should_skip_shim_init,
+};
 
 type SigactionFn = unsafe extern "C" fn(c_int, *const libc::sigaction, *mut libc::sigaction) -> c_int;
 type CxaThrowFn =
@@ -234,17 +237,10 @@ pub extern "C" fn ensure_real_sqlite_loaded() {
 }
 
 unsafe extern "C" fn shim_init() {
-    if cfg!(test) {
+    if should_skip_shim_init() {
         return;
     }
-    if env_truthy(b"PLEX_PG_DISABLE_SHIM_INIT\0") {
-        return;
-    }
-    let _ = libc::fprintf(
-        stderr_ptr(),
-        b"[SHIM_INIT] Constructor starting (Linux)...\n\0".as_ptr() as *const c_char,
-    );
-    let _ = libc::fflush(stderr_ptr());
+    log_ctor_start("Linux");
 
     // Process name filtering: skip non-server/scanner processes.
     if let Ok(cmdline) = std::fs::read("/proc/self/cmdline") {
@@ -310,11 +306,7 @@ unsafe extern "C" fn shim_init() {
 
     crate::pg_logging::pg_logging_init();
     log_shim_loaded("Linux");
-    let _ = libc::fprintf(
-        stderr_ptr(),
-        b"[SHIM_INIT] Logging initialized\n\0".as_ptr() as *const c_char,
-    );
-    let _ = libc::fflush(stderr_ptr());
+    log_logging_initialized();
 
     db_interpose_common::common_shim_init_modules();
     setup_exception_catcher_if_enabled();
@@ -416,12 +408,7 @@ unsafe extern "C" fn shim_init() {
         let _ = libc::fflush(stderr_ptr());
     }
 
-    let _ = libc::fprintf(
-        stderr_ptr(),
-        b"[SHIM_INIT] Constructor complete (Linux, PID %d)\n\0".as_ptr() as *const c_char,
-        libc::getpid(),
-    );
-    let _ = libc::fflush(stderr_ptr());
+    log_ctor_complete("Linux", libc::getpid());
 }
 
 unsafe extern "C" fn shim_cleanup() {

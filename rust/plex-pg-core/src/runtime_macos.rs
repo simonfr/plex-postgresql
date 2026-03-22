@@ -8,7 +8,10 @@ use crate::db_interpose_common;
 use crate::db_interpose_common::stderr_ptr;
 use crate::exception_what::pg_exception_install_terminate_logger;
 use crate::fishhook::{self, Rebinding};
-use crate::runtime_common::{env_truthy, handle_exception_with_tls, log_shim_loaded, log_shim_unloading};
+use crate::runtime_common::{
+    handle_exception_with_tls, log_ctor_complete, log_ctor_start, log_logging_initialized,
+    log_shim_loaded, log_shim_unloading, should_skip_shim_init,
+};
 
 type CxaThrowFn =
     unsafe extern "C" fn(*mut c_void, *mut c_void, Option<unsafe extern "C" fn(*mut c_void)>) -> !;
@@ -244,17 +247,10 @@ pub extern "C" fn ensure_real_sqlite_loaded() {
 }
 
 unsafe extern "C" fn shim_init() {
-    if cfg!(test) {
+    if should_skip_shim_init() {
         return;
     }
-    if env_truthy(b"PLEX_PG_DISABLE_SHIM_INIT\0") {
-        return;
-    }
-    let _ = libc::fprintf(
-        stderr_ptr(),
-        b"[SHIM_INIT] Constructor starting (macOS)...\n\0".as_ptr() as *const c_char,
-    );
-    let _ = libc::fflush(stderr_ptr());
+    log_ctor_start("macOS");
 
     db_interpose_common::common_check_fork();
 
@@ -282,11 +278,7 @@ unsafe extern "C" fn shim_init() {
     crate::pg_logging::pg_logging_init();
     log_shim_loaded("macOS");
 
-    let _ = libc::fprintf(
-        stderr_ptr(),
-        b"[SHIM_INIT] Logging initialized\n\0".as_ptr() as *const c_char,
-    );
-    let _ = libc::fflush(stderr_ptr());
+    log_logging_initialized();
 
     setup_fishhook_rebindings();
     setup_exception_rebinding_if_enabled();
@@ -295,12 +287,7 @@ unsafe extern "C" fn shim_init() {
 
     db_interpose_common::shim_initialized = 1;
 
-    let _ = libc::fprintf(
-        stderr_ptr(),
-        b"[SHIM_INIT] Constructor complete (macOS, PID %d)\n\0".as_ptr() as *const c_char,
-        libc::getpid(),
-    );
-    let _ = libc::fflush(stderr_ptr());
+    log_ctor_complete("macOS", libc::getpid());
 }
 
 unsafe extern "C" fn shim_cleanup() {
