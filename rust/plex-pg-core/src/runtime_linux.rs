@@ -1,6 +1,5 @@
 #![cfg(target_os = "linux")]
 
-use std::cell::UnsafeCell;
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int, c_void};
 use std::ptr;
@@ -11,7 +10,7 @@ use crate::db_interpose_common;
 use crate::db_interpose_common::stderr_ptr;
 use crate::exception_what::pg_exception_install_terminate_logger;
 use crate::ffi_types::{sqlite3, sqlite3_stmt, sqlite3_value};
-use crate::runtime_common::{env_truthy, log_info};
+use crate::runtime_common::{env_truthy, handle_exception_with_tls, log_info};
 
 type SigactionFn = unsafe extern "C" fn(c_int, *const libc::sigaction, *mut libc::sigaction) -> c_int;
 type CxaThrowFn =
@@ -24,10 +23,6 @@ static FORCE_IGNORE_SIGCHLD: AtomicI32 = AtomicI32::new(1);
 static INTERCEPT_SIGACTION: AtomicI32 = AtomicI32::new(1);
 static SIGNAL_LOG_ENABLED_CACHED: AtomicI32 = AtomicI32::new(-1);
 static EXCEPTION_CATCHER_ENABLED_CACHED: AtomicI32 = AtomicI32::new(-1);
-
-thread_local! {
-    static IN_EXCEPTION_HANDLER: UnsafeCell<c_int> = UnsafeCell::new(0);
-}
 
 fn signal_log_enabled() -> bool {
     let cached = SIGNAL_LOG_ENABLED_CACHED.load(Ordering::Acquire);
@@ -105,16 +100,7 @@ pub unsafe extern "C" fn __cxa_throw(
         orig(thrown_exception, tinfo, dest);
     }
 
-    let mut should_call_original: c_int = 1;
-    let handled = IN_EXCEPTION_HANDLER.with(|cell| {
-        let guard = cell.get();
-        db_interpose_common::common_handle_exception(
-            thrown_exception,
-            tinfo,
-            guard,
-            &mut should_call_original,
-        )
-    });
+    let (handled, _should_call_original) = handle_exception_with_tls(thrown_exception, tinfo);
 
     if handled == 0 {
         return orig(thrown_exception, tinfo, dest);

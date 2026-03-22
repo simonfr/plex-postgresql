@@ -1,6 +1,5 @@
 #![cfg(target_os = "macos")]
 
-use std::cell::UnsafeCell;
 use std::os::raw::{c_char, c_int, c_void};
 use std::ptr;
 
@@ -9,32 +8,19 @@ use crate::db_interpose_common;
 use crate::db_interpose_common::stderr_ptr;
 use crate::exception_what::pg_exception_install_terminate_logger;
 use crate::fishhook::{self, Rebinding};
-use crate::runtime_common::{env_truthy, log_info};
+use crate::runtime_common::{env_truthy, handle_exception_with_tls, log_info};
 
 type CxaThrowFn =
     unsafe extern "C" fn(*mut c_void, *mut c_void, Option<unsafe extern "C" fn(*mut c_void)>) -> !;
 
 static mut ORIG_CXA_THROW: Option<CxaThrowFn> = None;
 
-thread_local! {
-    static IN_EXCEPTION_HANDLER: UnsafeCell<c_int> = UnsafeCell::new(0);
-}
-
 unsafe extern "C" fn my_cxa_throw(
     thrown_exception: *mut c_void,
     tinfo: *mut c_void,
     dest: Option<unsafe extern "C" fn(*mut c_void)>,
 ) -> ! {
-    let mut should_call_original: c_int = 1;
-    let handled = IN_EXCEPTION_HANDLER.with(|cell| {
-        let guard = cell.get();
-        db_interpose_common::common_handle_exception(
-            thrown_exception,
-            tinfo,
-            guard,
-            &mut should_call_original,
-        )
-    });
+    let (handled, _should_call_original) = handle_exception_with_tls(thrown_exception, tinfo);
 
     if handled == 0 {
         if let Some(orig) = ORIG_CXA_THROW {
