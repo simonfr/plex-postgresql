@@ -44,6 +44,17 @@ fn log_info(msg: &str) {
     }
 }
 
+#[cfg(target_env = "musl")]
+unsafe fn install_signal_handler(signum: c_int) {
+    let handler = db_interpose_common::common_signal_handler as libc::sighandler_t;
+    libc::signal(signum, handler);
+}
+
+#[cfg(not(target_env = "musl"))]
+unsafe fn install_signal_handler(signum: c_int) {
+    libc::signal(signum, Some(db_interpose_common::common_signal_handler));
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn sigaction(
     signum: c_int,
@@ -109,7 +120,7 @@ pub unsafe extern "C" fn sigaction(
 static mut REAL_SQLITE_HANDLE: *mut c_void = ptr::null_mut();
 
 unsafe fn load_original_functions() {
-    let sqlite_paths = [
+    let sqlite_paths: [&[u8]; 3] = [
         b"/usr/local/lib/plex-postgresql/libsqlite3_real.so\0",
         b"/usr/lib/plexmediaserver/lib/libsqlite3.so.original\0",
         b"/usr/lib/plexmediaserver/lib/libsqlite3.so\0",
@@ -243,13 +254,13 @@ unsafe extern "C" fn shim_init() {
     db_interpose_common::common_shim_init_modules();
 
     if env_truthy(b"PLEX_PG_ENABLE_SIGNAL_LOG\0") {
-        libc::signal(libc::SIGSEGV, Some(db_interpose_common::common_signal_handler));
-        libc::signal(libc::SIGABRT, Some(db_interpose_common::common_signal_handler));
-        libc::signal(libc::SIGFPE, Some(db_interpose_common::common_signal_handler));
-        libc::signal(libc::SIGILL, Some(db_interpose_common::common_signal_handler));
+        install_signal_handler(libc::SIGSEGV);
+        install_signal_handler(libc::SIGABRT);
+        install_signal_handler(libc::SIGFPE);
+        install_signal_handler(libc::SIGILL);
         #[cfg(any(target_os = "linux"))]
         {
-            libc::signal(libc::SIGBUS, Some(db_interpose_common::common_signal_handler));
+            install_signal_handler(libc::SIGBUS);
         }
         let _ = libc::fprintf(
             stderr_ptr(),
@@ -355,13 +366,21 @@ unsafe extern "C" fn shim_cleanup() {
     db_interpose_common::common_shim_cleanup();
 }
 
+extern "C" fn shim_init_wrapper() {
+    unsafe { shim_init() }
+}
+
+extern "C" fn shim_cleanup_wrapper() {
+    unsafe { shim_cleanup() }
+}
+
 #[used]
 #[cfg_attr(target_os = "linux", link_section = ".init_array")]
-static INIT: extern "C" fn() = shim_init;
+static INIT: extern "C" fn() = shim_init_wrapper;
 
 #[used]
 #[cfg_attr(target_os = "linux", link_section = ".fini_array")]
-static FINI: extern "C" fn() = shim_cleanup;
+static FINI: extern "C" fn() = shim_cleanup_wrapper;
 
 // ────────────────────────────────────────────────────────────────────────────
 // LD_PRELOAD wrappers

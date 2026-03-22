@@ -40,7 +40,7 @@ pub extern "C" fn rust_step_conn_cancel_and_drain(
 
         let cancel: *mut PGcancel = crate::libpq_helpers::rust_pq_get_cancel((*conn).conn);
         if !cancel.is_null() {
-            let mut errbuf = [0i8; 256];
+            let mut errbuf = [0 as c_char; 256];
             crate::libpq_helpers::rust_pq_cancel(
                 cancel,
                 errbuf.as_mut_ptr(),

@@ -571,7 +571,7 @@ pub extern "C" fn rust_stmt_free(stmt_ptr: *mut PgStmt) {
                 if !(*sconn).conn.is_null() {
                     let cancel = crate::libpq_helpers::rust_pq_get_cancel((*sconn).conn);
                     if !cancel.is_null() {
-                        let mut errbuf = [0i8; 256];
+                        let mut errbuf = [0 as c_char; 256];
                         if crate::libpq_helpers::rust_pq_cancel(
                             cancel,
                             errbuf.as_mut_ptr(),
@@ -795,7 +795,7 @@ pub extern "C" fn rust_stmt_clear_result(stmt_ptr: *mut PgStmt) {
                 if !(*sconn).conn.is_null() {
                     let cancel = crate::libpq_helpers::rust_pq_get_cancel((*sconn).conn);
                     if !cancel.is_null() {
-                        let mut errbuf = [0i8; 256];
+                        let mut errbuf = [0 as c_char; 256];
                         if crate::libpq_helpers::rust_pq_cancel(
                             cancel,
                             errbuf.as_mut_ptr(),
