@@ -18,6 +18,20 @@ pub(crate) fn log_info(msg: &str) {
     }
 }
 
+pub(crate) fn log_shim_loaded(os_label: &str) {
+    log_info(&format!(
+        "=== Plex PostgreSQL Interpose Shim loaded ({}) ===",
+        os_label
+    ));
+}
+
+pub(crate) fn log_shim_unloading(os_label: &str) {
+    log_info(&format!(
+        "=== Plex PostgreSQL Interpose Shim unloading ({}) ===",
+        os_label
+    ));
+}
+
 thread_local! {
     static IN_EXCEPTION_HANDLER: UnsafeCell<c_int> = UnsafeCell::new(0);
 }

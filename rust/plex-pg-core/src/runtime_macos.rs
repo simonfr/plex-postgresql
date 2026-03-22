@@ -8,7 +8,7 @@ use crate::db_interpose_common;
 use crate::db_interpose_common::stderr_ptr;
 use crate::exception_what::pg_exception_install_terminate_logger;
 use crate::fishhook::{self, Rebinding};
-use crate::runtime_common::{env_truthy, handle_exception_with_tls, log_info};
+use crate::runtime_common::{env_truthy, handle_exception_with_tls, log_shim_loaded, log_shim_unloading};
 
 type CxaThrowFn =
     unsafe extern "C" fn(*mut c_void, *mut c_void, Option<unsafe extern "C" fn(*mut c_void)>) -> !;
@@ -280,7 +280,7 @@ unsafe extern "C" fn shim_init() {
     let _ = libc::fflush(stderr_ptr());
 
     crate::pg_logging::pg_logging_init();
-    log_info("=== Plex PostgreSQL Interpose Shim loaded (macOS) ===");
+    log_shim_loaded("macOS");
 
     let _ = libc::fprintf(
         stderr_ptr(),
@@ -308,7 +308,7 @@ unsafe extern "C" fn shim_cleanup() {
         return;
     }
 
-    log_info("=== Plex PostgreSQL Interpose Shim unloading (macOS) ===");
+    log_shim_unloading("macOS");
     db_interpose_common::common_shim_cleanup();
 }
 

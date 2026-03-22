@@ -10,7 +10,7 @@ use crate::db_interpose_common;
 use crate::db_interpose_common::stderr_ptr;
 use crate::exception_what::pg_exception_install_terminate_logger;
 use crate::ffi_types::{sqlite3, sqlite3_stmt, sqlite3_value};
-use crate::runtime_common::{env_truthy, handle_exception_with_tls, log_info};
+use crate::runtime_common::{env_truthy, handle_exception_with_tls, log_shim_loaded, log_shim_unloading};
 
 type SigactionFn = unsafe extern "C" fn(c_int, *const libc::sigaction, *mut libc::sigaction) -> c_int;
 type CxaThrowFn =
@@ -309,7 +309,7 @@ unsafe extern "C" fn shim_init() {
     }
 
     crate::pg_logging::pg_logging_init();
-    log_info("=== Plex PostgreSQL Interpose Shim loaded (Linux) ===");
+    log_shim_loaded("Linux");
     let _ = libc::fprintf(
         stderr_ptr(),
         b"[SHIM_INIT] Logging initialized\n\0".as_ptr() as *const c_char,
@@ -428,7 +428,7 @@ unsafe extern "C" fn shim_cleanup() {
     if db_interpose_common::shim_initialized == 0 {
         return;
     }
-    log_info("=== Plex PostgreSQL Interpose Shim unloading (Linux) ===");
+    log_shim_unloading("Linux");
     db_interpose_common::common_shim_cleanup();
 }
 
