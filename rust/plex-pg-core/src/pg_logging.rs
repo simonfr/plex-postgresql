@@ -122,9 +122,9 @@ pub fn parse_max_size(s: &str) -> u64 {
     if s.is_empty() {
         return DEFAULT_MAX_SIZE;
     }
-    let (digits, suffix) = if s.ends_with(|c: char| c == 'm' || c == 'M') {
+    let (digits, suffix) = if s.ends_with(['m', 'M']) {
         (&s[..s.len() - 1], 'm')
-    } else if s.ends_with(|c: char| c == 'k' || c == 'K') {
+    } else if s.ends_with(['k', 'K']) {
         (&s[..s.len() - 1], 'k')
     } else {
         (s, ' ')
@@ -423,10 +423,9 @@ pub extern "C" fn rust_logging_write(level: i32, message: *const c_char) {
         return;
     }
 
-    let msg = match unsafe { CStr::from_ptr(message) }.to_str() {
-        Ok(s) => s,
-        Err(_) => "<invalid utf-8>",
-    };
+    let msg = unsafe { CStr::from_ptr(message) }
+        .to_str()
+        .unwrap_or("<invalid utf-8>");
 
     // Throttle check (ERROR bypasses completely).
     if level != LEVEL_ERROR {
@@ -442,7 +441,7 @@ pub extern "C" fn rust_logging_write(level: i32, message: *const c_char) {
 
             if count > THROTTLE_THRESHOLD {
                 // Throttled: only emit 1-in-1000 samples.
-                if count % THROTTLE_SAMPLE_RATE != 0 {
+                if !count.is_multiple_of(THROTTLE_SAMPLE_RATE) {
                     return;
                 }
                 // Periodically emit a throttle summary.
@@ -468,7 +467,7 @@ pub extern "C" fn rust_logging_write(level: i32, message: *const c_char) {
 
     // Rotation check every N writes.
     let count = WRITE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-    if count % ROTATION_CHECK_INTERVAL == 0 {
+    if count.is_multiple_of(ROTATION_CHECK_INTERVAL) {
         let max_size = MAX_SIZE.load(Ordering::Relaxed);
         if should_rotate(&state, max_size) {
             rotate(&mut state);

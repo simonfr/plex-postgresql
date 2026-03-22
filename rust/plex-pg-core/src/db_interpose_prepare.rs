@@ -542,7 +542,7 @@ pub extern "C" fn rust_my_sqlite3_prepare_v2_internal(
         return rc;
     }
 
-    let is_ondeck_query = z_sql != ptr::null()
+    let is_ondeck_query = !z_sql.is_null()
         && ((contains_icase_ptr(z_sql, "metadata_item_settings") && contains_icase_ptr(z_sql, "metadata_items"))
             || (contains_icase_ptr(z_sql, "metadata_item_views") && contains_icase_ptr(z_sql, "grandparents"))
             || contains_icase_ptr(z_sql, "grandparentsSettings"));
@@ -756,7 +756,7 @@ pub extern "C" fn rust_my_sqlite3_prepare_v2_internal(
     }
 
     let bytes = unsafe { CStr::from_ptr(z_sql).to_bytes() };
-    if bytes.iter().any(|b| *b == b'`') {
+    if bytes.contains(&b'`') {
         log_debug(&format!(
             "BACKTICK_QUERY: skip_complex={} len={} sql={}",
             skip_complex_processing,
@@ -810,7 +810,7 @@ pub extern "C" fn rust_my_sqlite3_prepare_v2_internal(
             cstr_prefix(z_sql, 220, "NULL")
         ));
 
-        if total == 1 || total % 50 == 0 {
+        if total == 1 || total.is_multiple_of(50) {
             let skipped = TXN_ROUTE_SKIPPED.load(Ordering::Relaxed);
             let routed_pg = TXN_ROUTE_PG.load(Ordering::Relaxed);
             log_info(&format!(

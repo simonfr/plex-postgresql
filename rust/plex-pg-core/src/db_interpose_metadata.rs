@@ -1,6 +1,7 @@
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int, c_void};
 
+use crate::byte_utils::contains_icase_bytes;
 use crate::db_interpose_common::tls_in_interpose_call_ptr;
 use crate::db_interpose_conn_utils::{cstr_to_string_or, log_debug, PthreadMutexGuard};
 use crate::ffi_types::{sqlite3, sqlite3_stmt, PgStmt, MAX_PARAMS};
@@ -106,13 +107,6 @@ impl Drop for InterposeGuard {
             *tls_in_interpose_call_ptr() = 0;
         }
     }
-}
-
-fn contains_icase_bytes(haystack: &[u8], needle: &[u8]) -> bool {
-    if needle.is_empty() || haystack.len() < needle.len() {
-        return false;
-    }
-    haystack.windows(needle.len()).any(|w| w.eq_ignore_ascii_case(needle))
 }
 
 #[no_mangle]

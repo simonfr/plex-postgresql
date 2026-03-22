@@ -1,3 +1,5 @@
+#![allow(clippy::missing_transmute_annotations, clippy::type_complexity)]
+
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int, c_long, c_uint, c_uchar, c_void};
 use std::mem::size_of;

@@ -968,7 +968,7 @@ fn transform_expr(expr: &mut Expr) {
                 "unixepoch" => {
                     let args = extract_unnamed_args(func);
                     let mut iter = args.into_iter();
-                    let inner_expr = iter.next().unwrap_or_else(|| make_now_call());
+                    let inner_expr = iter.next().unwrap_or_else(make_now_call);
                     let mut source = if is_now_literal(&inner_expr) {
                         make_now_call()
                     } else {
@@ -993,7 +993,7 @@ fn transform_expr(expr: &mut Expr) {
                 // datetime('now') → NOW()
                 "datetime" => {
                     let args = extract_unnamed_args(func);
-                    let inner = args.into_iter().next().unwrap_or_else(|| make_now_call());
+                    let inner = args.into_iter().next().unwrap_or_else(make_now_call);
                     if is_now_literal(&inner) {
                         *expr = make_now_call();
                     } else {

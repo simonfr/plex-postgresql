@@ -2,6 +2,7 @@ use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
 use std::sync::atomic::{AtomicI32, Ordering};
 
+use crate::byte_utils::{cstr_bytes, contains_bytes, contains_icase_bytes, starts_with_icase_bytes};
 use crate::db_interpose_conn_utils::{
     apply_pg_session_settings, connect_new, cstr_prefix, cstr_to_string_or, log_debug, log_error,
     log_info, PthreadMutexGuard, PgConnConfig,
@@ -31,49 +32,6 @@ extern "C" {
     );
     fn platform_print_backtrace(reason: *const c_char, skip_frames: c_int);
     fn pg_config_get() -> *mut PgConnConfig;
-}
-
-fn ascii_lower(b: u8) -> u8 {
-    if (b'A'..=b'Z').contains(&b) {
-        b + 32
-    } else {
-        b
-    }
-}
-
-fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
-    if needle.is_empty() || haystack.len() < needle.len() {
-        return false;
-    }
-    haystack.windows(needle.len()).any(|w| w == needle)
-}
-
-fn contains_icase_bytes(haystack: &[u8], needle: &[u8]) -> bool {
-    if needle.is_empty() || haystack.len() < needle.len() {
-        return false;
-    }
-    haystack.windows(needle.len()).any(|w| {
-        w.iter()
-            .zip(needle.iter())
-            .all(|(a, b)| ascii_lower(*a) == ascii_lower(*b))
-    })
-}
-
-fn starts_with_icase_bytes(haystack: &[u8], prefix: &[u8]) -> bool {
-    if prefix.is_empty() || haystack.len() < prefix.len() {
-        return false;
-    }
-    haystack[..prefix.len()]
-        .iter()
-        .zip(prefix.iter())
-        .all(|(a, b)| ascii_lower(*a) == ascii_lower(*b))
-}
-
-unsafe fn cstr_bytes<'a>(ptr: *const c_char) -> &'a [u8] {
-    if ptr.is_null() {
-        return &[];
-    }
-    CStr::from_ptr(ptr).to_bytes()
 }
 
 fn malloc_cstring(value: &str) -> *mut c_char {

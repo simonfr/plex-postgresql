@@ -1,3 +1,5 @@
+#![allow(clippy::missing_transmute_annotations)]
+
 use std::os::raw::{c_char, c_int, c_void};
 
 use crate::db_interpose_common::{pg_exception_get_last_column, pg_exception_get_last_query, stderr_ptr};

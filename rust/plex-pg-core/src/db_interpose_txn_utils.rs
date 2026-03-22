@@ -1,5 +1,6 @@
 use std::os::raw::{c_char, c_int};
 
+use crate::byte_utils::{cstr_bytes, starts_with_icase_bytes};
 use crate::db_interpose_conn_utils::PthreadMutexGuard;
 use crate::ffi_types::PgConnection;
 
@@ -8,15 +9,6 @@ const PQTRANS_INTRANS: i32 = 2;
 const PQTRANS_INERROR: i32 = 3;
 
 static EMPTY: &[u8] = b"\0";
-
-#[inline]
-fn ascii_lower(b: u8) -> u8 {
-    if (b'A'..=b'Z').contains(&b) {
-        b + 32
-    } else {
-        b
-    }
-}
 
 unsafe fn skip_leading_sql_noise_ptr(sql: *const c_char) -> *const c_char {
     if sql.is_null() {
@@ -73,24 +65,6 @@ unsafe fn skip_leading_sql_noise_ptr(sql: *const c_char) -> *const c_char {
     p as *const c_char
 }
 
-unsafe fn starts_with_icase(ptr: *const c_char, pat: &[u8]) -> bool {
-    if ptr.is_null() {
-        return false;
-    }
-    let mut p = ptr as *const u8;
-    for &b in pat {
-        let c = *p;
-        if c == 0 {
-            return false;
-        }
-        if ascii_lower(c) != ascii_lower(b) {
-            return false;
-        }
-        p = p.add(1);
-    }
-    true
-}
-
 #[no_mangle]
 pub extern "C" fn rust_skip_leading_sql_noise(sql: *const c_char) -> *const c_char {
     unsafe { skip_leading_sql_noise_ptr(sql) }
@@ -99,11 +73,10 @@ pub extern "C" fn rust_skip_leading_sql_noise(sql: *const c_char) -> *const c_ch
 #[no_mangle]
 pub extern "C" fn rust_is_txn_terminator_sql(sql: *const c_char) -> c_int {
     let s = unsafe { skip_leading_sql_noise_ptr(sql) };
-    let is_term = unsafe {
-        starts_with_icase(s, b"commit")
-            || starts_with_icase(s, b"rollback")
-            || starts_with_icase(s, b"end")
-    };
+    let bytes = unsafe { cstr_bytes(s) };
+    let is_term = starts_with_icase_bytes(bytes, b"commit")
+        || starts_with_icase_bytes(bytes, b"rollback")
+        || starts_with_icase_bytes(bytes, b"end");
     if is_term { 1 } else { 0 }
 }
 

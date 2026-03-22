@@ -1,3 +1,8 @@
+#![allow(
+    clippy::missing_transmute_annotations,
+    clippy::transmutes_expressible_as_ptr_casts
+)]
+
 use std::os::raw::{c_char, c_int, c_void};
 use std::ptr;
 

@@ -963,11 +963,7 @@ pub extern "C" fn rust_stmt_unref(pg_stmt: *mut PgStmt) {
         if stmt.sql.is_null() {
             "NULL"
         } else {
-            if stmt.sql.is_null() {
-                "NULL"
-            } else {
-                cstr_to_str_or_empty(stmt.sql)
-            }
+            cstr_to_str_or_empty(stmt.sql)
         }
     };
     log_debug(&format!(

@@ -1,6 +1,7 @@
 use std::cell::Cell;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
+use crate::byte_utils::{contains_bytes, contains_icase_bytes, starts_with_icase_bytes};
 use crate::db_interpose_conn_utils::{
     apply_pg_session_settings, connect_new, cstr_prefix, cstr_to_string_or, log_error, log_info,
     PthreadMutexGuard, PgConnConfig,
@@ -49,38 +50,6 @@ extern "C" {
     fn pg_config_get() -> *mut PgConnConfig;
     fn sql_translate(sql: *const c_char) -> SqlTranslation;
     fn sql_translation_free(result: *mut SqlTranslation);
-}
-
-fn ascii_lower(b: u8) -> u8 {
-    b.to_ascii_lowercase()
-}
-
-fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
-    if needle.is_empty() || haystack.len() < needle.len() {
-        return false;
-    }
-    haystack.windows(needle.len()).any(|w| w == needle)
-}
-
-fn contains_icase_bytes(haystack: &[u8], needle: &[u8]) -> bool {
-    if needle.is_empty() || haystack.len() < needle.len() {
-        return false;
-    }
-    haystack.windows(needle.len()).any(|w| {
-        w.iter()
-            .zip(needle.iter())
-            .all(|(a, b)| ascii_lower(*a) == ascii_lower(*b))
-    })
-}
-
-fn starts_with_icase_bytes(haystack: &[u8], prefix: &[u8]) -> bool {
-    if prefix.is_empty() || haystack.len() < prefix.len() {
-        return false;
-    }
-    haystack[..prefix.len()]
-        .iter()
-        .zip(prefix.iter())
-        .all(|(a, b)| ascii_lower(*a) == ascii_lower(*b))
 }
 
 fn malloc_cstring(value: &str) -> *mut c_char {

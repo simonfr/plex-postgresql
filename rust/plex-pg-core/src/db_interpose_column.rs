@@ -225,7 +225,7 @@ fn trace_badcast_thread_ok() -> bool {
         if tname.is_empty() {
             return false;
         }
-        return tname.contains(substr.as_ref());
+        tname.contains(substr.as_ref())
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -473,7 +473,7 @@ fn preload_decltype_cache(pg_conn: *mut PgConnection) {
         crate::libpq_helpers::rust_pq_exec(
             (*cache_conn).conn,
             b"SELECT table_name, column_name, udt_name FROM information_schema.columns WHERE table_schema = 'plex' AND table_name NOT IN ('sqlite_column_types', 'sqlite_sequence') ORDER BY table_name, ordinal_position\0".as_ptr() as *const c_char,
-        ) as *mut PgResultLibpq
+        )
     };
 
     if res.is_null() || crate::libpq_helpers::rust_pq_result_status(res) != PGRES_TUPLES_OK {
@@ -749,7 +749,7 @@ pub extern "C" fn rust_resolve_column_tables(pg_stmt: *mut PgStmt, pg_conn: *mut
     };
 
     let _conn_guard = unsafe { PthreadMutexGuard::lock(&mut (*resolve_conn).mutex as *mut _) };
-    let res = unsafe { crate::libpq_helpers::rust_pq_exec((*resolve_conn).conn, query_cs.as_ptr()) } as *mut PgResultLibpq;
+    let res = unsafe { crate::libpq_helpers::rust_pq_exec((*resolve_conn).conn, query_cs.as_ptr()) };
 
     if res.is_null() || crate::libpq_helpers::rust_pq_result_status(res) != PGRES_TUPLES_OK {
         log_error(&format!(
@@ -1023,7 +1023,7 @@ fn ensure_pg_result_for_metadata(pg_stmt: *mut PgStmt) -> bool {
                     (*pg_stmt).pg_sql,
                     0,
                     ptr::null(),
-                ) as *mut PgResultLibpq;
+                );
                 if crate::libpq_helpers::rust_pq_result_status(prep) != PGRES_COMMAND_OK {
                     if pg_is_duplicate_prepared_stmt(prep) == 0 {
                         log_error(&format!(
@@ -1044,7 +1044,7 @@ fn ensure_pg_result_for_metadata(pg_stmt: *mut PgStmt) -> bool {
             let desc = crate::libpq_helpers::rust_pq_describe_prepared(
                 (*exec_conn).conn,
                 (*pg_stmt).stmt_name.as_ptr(),
-            ) as *mut PgResultLibpq;
+            );
 
             if crate::libpq_helpers::rust_pq_result_status(desc) == PGRES_COMMAND_OK {
                 (*pg_stmt).num_cols = crate::libpq_helpers::rust_pq_nfields(desc);
@@ -1112,7 +1112,7 @@ fn ensure_pg_result_for_metadata(pg_stmt: *mut PgStmt) -> bool {
             ptr::null(),
             ptr::null(),
             0,
-        ) as *mut PgResultLibpq;
+        );
     }
 
     let status = unsafe { crate::libpq_helpers::rust_pq_result_status((*pg_stmt).result) };
@@ -1194,7 +1194,7 @@ pub extern "C" fn rust_my_sqlite3_column_type(p_stmt: *mut sqlite3_stmt, idx: c_
     } else {
         ptr::null()
     };
-    let dbg_db = unsafe { orig_sqlite3_db_handle.and_then(|f| Some(f(p_stmt))).unwrap_or(ptr::null_mut()) };
+    let dbg_db = unsafe { orig_sqlite3_db_handle.map(|f| f(p_stmt)).unwrap_or(ptr::null_mut()) };
     unsafe {
         pg_exception_note_phase(
             b"column_type\0".as_ptr() as *const c_char,
@@ -1216,7 +1216,7 @@ pub extern "C" fn rust_my_sqlite3_column_type(p_stmt: *mut sqlite3_stmt, idx: c_
             let cached = unsafe { &*(*pg_stmt).cached_result };
             let row = unsafe { (*pg_stmt).current_row };
             if idx >= 0
-                && (idx as i32) < cached.num_cols
+                && idx < cached.num_cols
                 && row >= 0
                 && row < cached.num_rows
             {
@@ -1421,7 +1421,7 @@ pub extern "C" fn rust_my_sqlite3_column_int(p_stmt: *mut sqlite3_stmt, idx: c_i
             let cached = unsafe { &*(*pg_stmt).cached_result };
             let row = unsafe { (*pg_stmt).current_row };
             if idx >= 0
-                && (idx as i32) < cached.num_cols
+                && idx < cached.num_cols
                 && row >= 0
                 && row < cached.num_rows
             {
@@ -1564,7 +1564,7 @@ pub extern "C" fn rust_my_sqlite3_column_int64(p_stmt: *mut sqlite3_stmt, idx: c
             let cached = unsafe { &*(*pg_stmt).cached_result };
             let row = unsafe { (*pg_stmt).current_row };
             if idx >= 0
-                && (idx as i32) < cached.num_cols
+                && idx < cached.num_cols
                 && row >= 0
                 && row < cached.num_rows
             {
@@ -1695,7 +1695,7 @@ pub extern "C" fn rust_my_sqlite3_column_double(p_stmt: *mut sqlite3_stmt, idx: 
             let cached = unsafe { &*(*pg_stmt).cached_result };
             let row = unsafe { (*pg_stmt).current_row };
             if idx >= 0
-                && (idx as i32) < cached.num_cols
+                && idx < cached.num_cols
                 && row >= 0
                 && row < cached.num_rows
             {
@@ -1772,7 +1772,7 @@ pub extern "C" fn rust_my_sqlite3_column_text(p_stmt: *mut sqlite3_stmt, idx: c_
     } else {
         ptr::null()
     };
-    let dbg_db = unsafe { orig_sqlite3_db_handle.and_then(|f| Some(f(p_stmt))).unwrap_or(ptr::null_mut()) };
+    let dbg_db = unsafe { orig_sqlite3_db_handle.map(|f| f(p_stmt)).unwrap_or(ptr::null_mut()) };
     unsafe {
         pg_exception_note_phase(
             b"column_text\0".as_ptr() as *const c_char,
@@ -1822,7 +1822,7 @@ pub extern "C" fn rust_my_sqlite3_column_text(p_stmt: *mut sqlite3_stmt, idx: c_
                 cached.num_rows
             ));
             if idx >= 0
-                && (idx as i32) < cached.num_cols
+                && idx < cached.num_cols
                 && row >= 0
                 && row < cached.num_rows
             {
@@ -2100,7 +2100,7 @@ pub extern "C" fn rust_my_sqlite3_column_blob(p_stmt: *mut sqlite3_stmt, idx: c_
         let cached = unsafe { &*(*pg_stmt).cached_result };
         let row = unsafe { (*pg_stmt).current_row };
         if idx >= 0
-            && (idx as i32) < cached.num_cols
+            && idx < cached.num_cols
             && row >= 0
             && row < cached.num_rows
         {
@@ -2241,7 +2241,7 @@ pub extern "C" fn rust_my_sqlite3_column_bytes(p_stmt: *mut sqlite3_stmt, idx: c
         let cached = unsafe { &*(*pg_stmt).cached_result };
         let row = unsafe { (*pg_stmt).current_row };
         if idx >= 0
-            && (idx as i32) < cached.num_cols
+            && idx < cached.num_cols
             && row >= 0
             && row < cached.num_rows
         {
@@ -2642,7 +2642,7 @@ pub extern "C" fn rust_my_sqlite3_column_value(p_stmt: *mut sqlite3_stmt, idx: c
     } else {
         ptr::null()
     };
-    let dbg_db = unsafe { orig_sqlite3_db_handle.and_then(|f| Some(f(p_stmt))).unwrap_or(ptr::null_mut()) };
+    let dbg_db = unsafe { orig_sqlite3_db_handle.map(|f| f(p_stmt)).unwrap_or(ptr::null_mut()) };
     unsafe {
         pg_exception_note_phase(
             b"column_value\0".as_ptr() as *const c_char,

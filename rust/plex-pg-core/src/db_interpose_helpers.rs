@@ -742,7 +742,7 @@ pub extern "C" fn rust_oid_table_cache_insert(oid: c_uint, name: *const c_char) 
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
-    cache.entry(oid as u32).or_insert(cstr);
+    cache.entry(oid).or_insert(cstr);
     1
 }
 
@@ -753,7 +753,7 @@ pub extern "C" fn rust_oid_table_cache_lookup(oid: c_uint) -> *const c_char {
         Err(poisoned) => poisoned.into_inner(),
     };
     cache
-        .get(&(oid as u32))
+        .get(&oid)
         .map(|s| s.as_ptr())
         .unwrap_or(std::ptr::null())
 }
@@ -853,7 +853,7 @@ pub extern "C" fn rust_decode_hex_bytes(
     if hex.is_null() || out.is_null() {
         return 0;
     }
-    if hex_len == 0 || (hex_len % 2) != 0 {
+    if hex_len == 0 || !hex_len.is_multiple_of(2) {
         return 0;
     }
     let expected = hex_len / 2;
@@ -1571,7 +1571,7 @@ pub extern "C" fn rust_pg_create_column_value(
     num_rows: c_int,
     col_idx: c_int,
 ) -> c_int {
-    let sqlite_type = if result.is_null() || current_row < 0 || current_row >= num_rows {
+    if result.is_null() || current_row < 0 || current_row >= num_rows {
         SQLITE_NULL_CONST
     } else {
         let is_null = unsafe { PQgetisnull(result, current_row, col_idx) };
@@ -1581,9 +1581,7 @@ pub extern "C" fn rust_pg_create_column_value(
             let oid = unsafe { PQftype(result, col_idx) };
             pg_oid_to_sqlite_type_impl(oid as u32)
         }
-    };
-
-    sqlite_type
+    }
 }
 
 #[no_mangle]

@@ -449,10 +449,9 @@ pub extern "C" fn rust_query_cache_init() {
 /// Cleanup the query cache. No-op — cleanup happens via TLS Drop.
 #[no_mangle]
 pub extern "C" fn rust_query_cache_cleanup() {
-    if !query_cache_enabled() {
-        return;
+    if query_cache_enabled() {
+        // Thread-local cleanup happens automatically via Drop
     }
-    // Thread-local cleanup happens automatically via Drop
 }
 
 /// Compute cache key from SQL string and parameters.

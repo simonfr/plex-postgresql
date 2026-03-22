@@ -221,7 +221,7 @@ unsafe fn log_clear_bindings_anomaly(reason: &str, stmt: *mut sqlite3_stmt) {
         return;
     }
     let n = CLEAR_BINDINGS_COUNTER.fetch_add(1, Ordering::Relaxed);
-    if n >= 5 && (n % 1000) != 0 {
+    if n >= 5 && !n.is_multiple_of(1000) {
         return;
     }
 

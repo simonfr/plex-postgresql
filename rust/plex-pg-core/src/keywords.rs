@@ -79,8 +79,7 @@ pub fn preprocess(sql: &str) -> String {
     let sql = rewrite_indexed_by(&sql);
     let sql = rewrite_sqlite_collations(&sql);
     let sql = rewrite_distinct_orderby_projection(&sql);
-    let sql = rewrite_metadata_items_self_join(&sql);
-    sql
+    rewrite_metadata_items_self_join(&sql)
 }
 
 /// Normalize SQLite conflict-resolution statement prefixes that PostgreSQL
@@ -714,7 +713,7 @@ fn rewrite_raise_function_calls(sql: &str) -> String {
 /// Strip SQLite-only table options from CREATE TABLE statements:
 /// - WITHOUT ROWID
 /// - STRICT
-/// including combined forms like `... ) WITHOUT ROWID, STRICT`.
+///   including combined forms like `... ) WITHOUT ROWID, STRICT`.
 fn rewrite_sqlite_create_table_options(sql: &str) -> String {
     let mut out: Vec<String> = Vec::new();
     for stmt in split_sql_statements(sql) {
@@ -843,9 +842,10 @@ fn rewrite_transaction_control_statements(sql: &str) -> String {
             || lower == "begin"
         {
             "BEGIN".to_string()
-        } else if lower == "end" || lower.starts_with("end transaction") {
-            "COMMIT".to_string()
-        } else if lower.starts_with("commit transaction") {
+        } else if lower == "end"
+            || lower.starts_with("end transaction")
+            || lower.starts_with("commit transaction")
+        {
             "COMMIT".to_string()
         } else if let Some((_, rest)) = lower.split_once("rollback transaction to savepoint ") {
             format!(
@@ -893,7 +893,7 @@ fn rewrite_distinct_orderby_projection(sql: &str) -> String {
 /// This keeps more behavior stable than dropping all PRAGMAs:
 /// - assignment-like pragmas become `SELECT 1`
 /// - read-like pragmas become a single-row `SELECT ... AS <pragma_name>`
-/// Unknown pragmas are still stripped.
+///   Unknown pragmas are still stripped.
 fn rewrite_pragma_statements(sql: &str) -> String {
     let mut out: Vec<String> = Vec::new();
     for stmt in split_sql_statements(sql) {
@@ -1296,7 +1296,7 @@ fn pragma_trace_mapping(original_stmt: &str, pragma_name: &str, rewritten_sql: &
         }
     }
 
-    if pragma_metrics_enabled() && total % 50 == 0 {
+    if pragma_metrics_enabled() && total.is_multiple_of(50) {
         eprintln!(
             "[PRAGMA_MAP] stats total={} mapped_set={} mapped_read={} noop_set={} stripped={} strict_fail={}",
             total,
@@ -1619,8 +1619,8 @@ fn reorder_and_alias_self_join(sql: &str) -> String {
     for (idx, frag) in join_fragments.iter().enumerate() {
         let fl = frag.to_lowercase();
         let fl = fl.trim_start();
-        if fl.starts_with("metadata_items") {
-            let after = fl["metadata_items".len()..].trim_start();
+        if let Some(after) = fl.strip_prefix("metadata_items") {
+            let after = after.trim_start();
             if after.starts_with("as ") || after.starts_with("as\t") {
                 aliased_idxs.push(idx);
             } else {
@@ -2293,7 +2293,7 @@ fn transform_query(q: &mut Query) {
     // Detect GROUP BY NULL before transforming (need Query-level access for ORDER BY)
     let had_group_by_null = if let SetExpr::Select(sel) = q.body.as_ref() {
         if let GroupByExpr::Expressions(exprs, _) = &sel.group_by {
-            !exprs.is_empty() && exprs.iter().all(|e| is_null_expr(e))
+            !exprs.is_empty() && exprs.iter().all(is_null_expr)
         } else {
             false
         }

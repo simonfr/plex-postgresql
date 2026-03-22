@@ -2,6 +2,7 @@ use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
 use std::sync::atomic::{AtomicI32, Ordering};
 
+use crate::byte_utils::{cstr_bytes, contains_icase_bytes};
 use crate::db_interpose_conn_utils::{
     apply_pg_session_settings, connect_new, log_debug, log_error, log_info, PthreadMutexGuard,
     PgConnConfig, STATEMENT_TIMEOUT_SQL,
@@ -38,37 +39,11 @@ extern "C" {
     fn pg_config_get() -> *mut PgConnConfig;
 }
 
-fn ascii_lower(b: u8) -> u8 {
-    if (b'A'..=b'Z').contains(&b) {
-        b + 32
-    } else {
-        b
-    }
-}
-
-fn contains_icase_bytes(haystack: &[u8], needle: &[u8]) -> bool {
-    if needle.is_empty() || haystack.len() < needle.len() {
-        return false;
-    }
-    haystack.windows(needle.len()).any(|w| {
-        w.iter()
-            .zip(needle.iter())
-            .all(|(a, b)| ascii_lower(*a) == ascii_lower(*b))
-    })
-}
-
 fn cstr_to_str(ptr: *const c_char) -> &'static str {
     if ptr.is_null() {
         return "?";
     }
     unsafe { CStr::from_ptr(ptr).to_str().unwrap_or("?") }
-}
-
-fn cstr_bytes(ptr: *const c_char) -> &'static [u8] {
-    if ptr.is_null() {
-        return &[];
-    }
-    unsafe { CStr::from_ptr(ptr).to_bytes() }
 }
 
 fn trace_play_queue_enabled() -> bool {
@@ -631,16 +606,9 @@ pub extern "C" fn rust_step_read_first_execute(
                     (*pg_stmt).param_count,
                     std::ptr::null(),
                 );
-                if crate::libpq_helpers::rust_pq_result_status(prep_res) == PGRES_COMMAND_OK {
-                    crate::pg_client::rust_stmt_cache_add(
-                        exec_conn as *mut c_void,
-                        (*pg_stmt).sql_hash,
-                        (*pg_stmt).stmt_name.as_ptr(),
-                        (*pg_stmt).param_count,
-                    );
-                    cached_name = (*pg_stmt).stmt_name.as_ptr();
-                    cached = true;
-                } else if is_duplicate_prepared_stmt(prep_res) {
+                let ok = crate::libpq_helpers::rust_pq_result_status(prep_res) == PGRES_COMMAND_OK
+                    || is_duplicate_prepared_stmt(prep_res);
+                if ok {
                     crate::pg_client::rust_stmt_cache_add(
                         exec_conn as *mut c_void,
                         (*pg_stmt).sql_hash,

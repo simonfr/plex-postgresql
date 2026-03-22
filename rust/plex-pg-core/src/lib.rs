@@ -1,5 +1,4 @@
 #![allow(
-    clippy::bind_instead_of_map,
     clippy::cmp_null,
     clippy::collapsible_match,
     clippy::collapsible_else_if,
@@ -9,32 +8,25 @@
     clippy::doc_overindented_list_items,
     clippy::explicit_counter_loop,
     clippy::if_same_then_else,
-    clippy::let_and_return,
     clippy::manual_c_str_literals,
     clippy::manual_contains,
     clippy::manual_div_ceil,
     clippy::manual_is_ascii_check,
-    clippy::manual_is_multiple_of,
     clippy::manual_pattern_char_comparison,
     clippy::manual_strip,
     clippy::manual_unwrap_or,
     clippy::missing_const_for_thread_local,
     clippy::missing_safety_doc,
-    clippy::missing_transmute_annotations,
-    clippy::needless_return,
     clippy::needless_range_loop,
     clippy::not_unsafe_ptr_arg_deref,
     clippy::ptr_eq,
-    clippy::redundant_closure,
     clippy::single_match,
     clippy::too_many_arguments,
-    clippy::transmutes_expressible_as_ptr_casts,
-    clippy::type_complexity,
-    clippy::unnecessary_cast,
     clippy::wildcard_in_or_patterns,
 )]
 
 pub mod dedup;
+pub mod byte_utils;
 pub mod db_interpose_exec;
 pub mod c_abi;
 pub mod db_interpose_bind;
