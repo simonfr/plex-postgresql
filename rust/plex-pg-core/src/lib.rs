@@ -9,12 +9,8 @@
     clippy::explicit_counter_loop,
     clippy::if_same_then_else,
     clippy::manual_c_str_literals,
-    clippy::manual_contains,
-    clippy::manual_div_ceil,
     clippy::manual_is_ascii_check,
     clippy::manual_pattern_char_comparison,
-    clippy::manual_strip,
-    clippy::manual_unwrap_or,
     clippy::missing_const_for_thread_local,
     clippy::needless_range_loop,
     clippy::not_unsafe_ptr_arg_deref,
@@ -88,6 +84,7 @@ pub mod query;
 pub mod rewriter;
 pub mod quotes;
 pub mod shim_alloc;
+mod sync_utils;
 pub mod types;
 pub mod upsert;
 #[cfg(test)]

@@ -18,7 +18,7 @@ A small shim library that catches Plex SQLite calls and sends them to PostgreSQL
 [📥 Download v1.0.0](https://github.com/cgnl/plex-postgresql/releases/tag/v1.0.0) | [📋 Full Release Notes](https://github.com/cgnl/plex-postgresql/releases/tag/v1.0.0)
 
 Linux and macOS release zips are built by GitHub Actions on tag push via `.github/workflows/release-linux-artifacts.yml` and `.github/workflows/release-macos-artifacts.yml`.
-Pull requests and `main` pushes run `.github/workflows/ci.yml` (script validation + Linux amd64 build check + full test suite).
+Pull requests and `main`/`develop` pushes run `.github/workflows/ci.yml` (script validation + Linux amd64 build check + full test suite + FFI header verification).
 Docker images are published to GHCR on release tags via `.github/workflows/docker-publish.yml`:
 - `ghcr.io/cgnl/plex-postgresql-linuxserver`
 - `ghcr.io/cgnl/plex-postgresql-plexinc`
@@ -359,14 +359,21 @@ Layer 1:   Rust SQL translator (sqlparser-rs)   — full AST-based SQLite → Po
 
 More technical details are in **[wiki/How It Works](https://github.com/cgnl/plex-postgresql/wiki/How-It-Works)**.
 
+Translator scope, coverage, and known gaps are tracked in `docs/translator/README.md`.
+
 ## Testing
 
 ```bash
 make unit-test       # All C unit tests (25 suites, ~550 tests)
 make ci-test         # CI-safe subset (no LD_PRELOAD)
 cargo test           # Rust tests (525 tests) — in rust/plex-pg-core/
+make ffi-header      # Regenerate include/plex_pg_core_ffi.h from rust/plex-pg-abi/
+make ffi-header-check  # Verify generated header is up to date
 make benchmark       # Shim micro-benchmarks
 ```
+
+`include/plex_pg_core_ffi.h` is generated from the small ABI contract crate in `rust/plex-pg-abi/`.  
+`include/sql_translator.h` is the compatibility wrapper used by the C side of the shim.
 
 ### Exception Parity (macOS)
 

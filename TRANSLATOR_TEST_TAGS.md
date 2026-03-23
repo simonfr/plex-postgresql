@@ -1,5 +1,7 @@
 # Translator Test Tagging (Local Draft)
 
+Entry point: `docs/translator/README.md`
+
 ## Tag Set
 - `subset/core`
 - `subset/json`

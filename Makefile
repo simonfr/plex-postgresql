@@ -51,13 +51,26 @@ else
     WHOLE_ARCHIVE = -Wl,--whole-archive $(RUST_TRANSLATOR_LIB) -Wl,--no-whole-archive
 endif
 
-.PHONY: all clean install test macos linux run stop unit-test ci-test interpose-build-check test-recursion test-crash test-params test-logging test-soci test-fork test-fts test-buffer test-reaper test-upsert test-parity test-uri test-stmt-free test-bind-mismatch
+.PHONY: all clean install test macos linux run stop unit-test ci-test interpose-build-check ffi-header ffi-header-check test-recursion test-crash test-params test-logging test-soci test-fork test-fts test-buffer test-reaper test-upsert test-parity test-uri test-stmt-free test-bind-mismatch
 
 all: $(TARGET)
 
 # Fast compile-only check for interpose C modules (useful in CI/refactors).
 interpose-build-check: $(INTERPOSE_ONLY_OBJS)
 	@echo "Interpose modules compile check passed"
+
+ffi-header:
+	./scripts/generate-ffi-header.sh
+
+ffi-header-check:
+	@set -e; \
+	tmp_header="$$(mktemp /tmp/plex_pg_core_ffi.XXXXXX)"; \
+	./scripts/generate-ffi-header.sh "$$tmp_header"; \
+	test -s "$$tmp_header"; \
+	if [ -f include/plex_pg_core_ffi.h ]; then \
+		diff -u include/plex_pg_core_ffi.h "$$tmp_header"; \
+	fi; \
+	rm -f "$$tmp_header"
 
 # Build Rust plex-pg-core static library
 $(RUST_TRANSLATOR_LIB):

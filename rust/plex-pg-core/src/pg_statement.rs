@@ -52,6 +52,7 @@ use std::sync::{Once, RwLock};
 use crate::db_interpose_conn_utils::{log_debug, log_error, log_info, PthreadMutexGuard};
 use crate::db_interpose_helpers::cstr_to_str_or_empty;
 use crate::ffi_types::{sqlite3_stmt, sqlite3_value, PgConnection, PgStmt, MAX_PARAMS, PARAM_BUF_LEN};
+use crate::sync_utils::{mutex_lock, rwlock_read, rwlock_write};
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -1009,7 +1010,7 @@ pub extern "C" fn rust_stmt_unref(pg_stmt: *mut PgStmt) {
 pub extern "C" fn rust_stmt_registry_init() {
     STMT_INIT.call_once(|| {
         // Force LazyLock initialization
-        let _reg = REGISTRY.read().unwrap();
+        let _reg = rwlock_read(&REGISTRY);
         log_debug("pg_statement registry initialized (Rust HashMap)");
     });
 }
@@ -1018,7 +1019,7 @@ pub extern "C" fn rust_stmt_registry_init() {
 /// Each pg_stmt_t gets unref'd.
 #[no_mangle]
 pub extern "C" fn rust_stmt_registry_cleanup() {
-    let mut reg = REGISTRY.write().unwrap();
+    let mut reg = rwlock_write(&REGISTRY);
     // Collect all pg_stmt pointers before clearing
     let pg_stmts: Vec<usize> = reg.forward.values().copied().collect();
     reg.clear();
@@ -1038,7 +1039,7 @@ pub extern "C" fn rust_stmt_register(sqlite_stmt: usize, pg_stmt: usize) {
     if sqlite_stmt == 0 || pg_stmt == 0 {
         return;
     }
-    let mut reg = REGISTRY.write().unwrap();
+    let mut reg = rwlock_write(&REGISTRY);
     reg.register(sqlite_stmt, pg_stmt);
 }
 
@@ -1048,7 +1049,7 @@ pub extern "C" fn rust_stmt_unregister(sqlite_stmt: usize) {
     if sqlite_stmt == 0 {
         return;
     }
-    let mut reg = REGISTRY.write().unwrap();
+    let mut reg = rwlock_write(&REGISTRY);
     reg.unregister(sqlite_stmt);
 }
 
@@ -1059,7 +1060,7 @@ pub extern "C" fn rust_stmt_find(sqlite_stmt: usize) -> usize {
     if sqlite_stmt == 0 {
         return 0;
     }
-    let reg = REGISTRY.read().unwrap();
+    let reg = rwlock_read(&REGISTRY);
     reg.find(sqlite_stmt).unwrap_or(0)
 }
 
@@ -1073,7 +1074,7 @@ pub extern "C" fn rust_stmt_find_any(sqlite_stmt: usize) -> usize {
 
     // Fast path: registry lookup
     {
-        let reg = REGISTRY.read().unwrap();
+        let reg = rwlock_read(&REGISTRY);
         if let Some(pg_stmt) = reg.find(sqlite_stmt) {
             return pg_stmt;
         }
@@ -1092,7 +1093,7 @@ pub extern "C" fn rust_stmt_is_ours(pg_stmt: usize) -> i32 {
     if pg_stmt == 0 {
         return 0;
     }
-    let reg = REGISTRY.read().unwrap();
+    let reg = rwlock_read(&REGISTRY);
     if reg.is_ours(pg_stmt) {
         1
     } else {
@@ -1103,7 +1104,7 @@ pub extern "C" fn rust_stmt_is_ours(pg_stmt: usize) -> i32 {
 /// Get the current number of registered statements.
 #[no_mangle]
 pub extern "C" fn rust_stmt_registry_count() -> usize {
-    let reg = REGISTRY.read().unwrap();
+    let reg = rwlock_read(&REGISTRY);
     reg.len()
 }
 
@@ -1226,7 +1227,7 @@ pub extern "C" fn rust_create_column_value(
 ) -> *mut PgValue {
     let slot = PG_VALUE_IDX.fetch_add(1, Ordering::Relaxed) as usize % MAX_PG_VALUES;
     let pool = &PG_VALUES[slot];
-    let mut pv = pool.lock().unwrap();
+    let mut pv = mutex_lock(pool);
     pv.magic = PG_VALUE_MAGIC;
     pv.stmt = stmt;
     pv.col_idx = col_idx;

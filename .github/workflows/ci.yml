@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - main
+      - develop
 
 jobs:
   scripts:
@@ -120,6 +121,25 @@ jobs:
         run: |
           cd rust/plex-pg-core
           cargo clippy -- -D warnings
+
+  ffi-header:
+    name: FFI header
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cbindgen
+        run: |
+          if ! command -v cbindgen >/dev/null 2>&1; then
+            cargo install cbindgen --locked
+          fi
+
+      - name: Verify FFI header generation
+        run: make ffi-header-check
 
   linux-build-amd64:
     name: Build Linux amd64 shim

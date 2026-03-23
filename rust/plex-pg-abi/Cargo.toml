@@ -1,0 +1,8 @@
+[package]
+name = "plex-pg-abi"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "plex_pg_abi"
+crate-type = ["lib"]

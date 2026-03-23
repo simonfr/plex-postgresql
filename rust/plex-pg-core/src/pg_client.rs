@@ -11,6 +11,11 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
 
+#[path = "pg_client_config.rs"]
+mod config;
+#[path = "pg_client_registry.rs"]
+mod registry;
+
 use crate::db_interpose_conn_utils::{log_debug, log_error, log_info, PthreadMutexGuard};
 use crate::db_interpose_helpers::cstr_to_str_or_empty;
 use crate::env_utils;
@@ -26,6 +31,9 @@ pub use crate::pg_client_stmt_cache::{
     rust_stmt_cache_drop, rust_stmt_cache_lookup,
 };
 use crate::pg_config::PgEnvConfig;
+use crate::sync_utils::mutex_lock;
+use config::{env_nonzero, load_conn_config, parse_positive_env_or_default};
+use registry::{ConnectionRegistry, DbToPool};
 
 const PG_DIAG_SQLSTATE: c_int = b'C' as c_int;
 
@@ -120,7 +128,6 @@ pub(crate) const POOL_SIZE_DEFAULT: usize = 50;
 
 // ─── Pool Slot ───────────────────────────────────────────────────────────────
 
-use std::collections::HashMap;
 use std::sync::atomic::{
     AtomicI64, AtomicPtr, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering,
 };
@@ -271,97 +278,6 @@ pub(crate) fn tls_pool_cache_get(db_handle: usize) -> Option<(u32, u32)> {
 /// Invalidate the TLS pool cache.
 pub(crate) fn tls_pool_cache_clear() {
     let _ = TLS_POOL_CACHE.try_with(|c| c.set(TlsPoolCache::EMPTY));
-}
-
-// ─── Connection Registry ─────────────────────────────────────────────────────
-
-/// Maps sqlite3* handle (as usize) → opaque pg_connection_t* (as usize).
-/// For non-pooled connections registered via pg_register_connection().
-pub(crate) struct ConnectionRegistry {
-    map: Mutex<HashMap<usize, usize>>,
-}
-
-impl ConnectionRegistry {
-    pub fn new() -> Self {
-        Self {
-            map: Mutex::new(HashMap::new()),
-        }
-    }
-
-    pub fn register(&self, db_handle: usize, conn_ptr: usize) {
-        self.map.lock().unwrap().insert(db_handle, conn_ptr);
-    }
-
-    pub fn unregister(&self, db_handle: usize) -> Option<usize> {
-        self.map.lock().unwrap().remove(&db_handle)
-    }
-
-    pub fn find(&self, db_handle: usize) -> Option<usize> {
-        self.map.lock().unwrap().get(&db_handle).copied()
-    }
-
-    pub fn find_any_library(&self, is_library: impl Fn(usize) -> bool) -> Option<usize> {
-        self.map
-            .lock()
-            .unwrap()
-            .values()
-            .copied()
-            .find(|&conn| is_library(conn))
-    }
-
-    pub fn clear(&self) {
-        self.map.lock().unwrap().clear();
-    }
-
-    pub fn drain_all(&self) -> Vec<usize> {
-        let mut map = self.map.lock().unwrap();
-        let conns: Vec<usize> = map.values().copied().collect();
-        map.clear();
-        conns
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn len(&self) -> usize {
-        self.map.lock().unwrap().len()
-    }
-}
-
-// ─── Db-to-Pool Mapping ─────────────────────────────────────────────────────
-
-/// Maps sqlite3* handle (as usize) → pool slot index.
-/// Tracks which open database handles are using which pool slots.
-pub(crate) struct DbToPool {
-    map: Mutex<HashMap<usize, usize>>,
-}
-
-impl DbToPool {
-    pub fn new() -> Self {
-        Self {
-            map: Mutex::new(HashMap::new()),
-        }
-    }
-
-    pub fn assign(&self, db_handle: usize, slot_index: usize) {
-        self.map.lock().unwrap().insert(db_handle, slot_index);
-    }
-
-    pub fn release(&self, db_handle: usize) -> Option<usize> {
-        self.map.lock().unwrap().remove(&db_handle)
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn find(&self, db_handle: usize) -> Option<usize> {
-        self.map.lock().unwrap().get(&db_handle).copied()
-    }
-
-    pub fn clear(&self) {
-        self.map.lock().unwrap().clear();
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn len(&self) -> usize {
-        self.map.lock().unwrap().len()
-    }
 }
 
 // ─── Pool Manager ────────────────────────────────────────────────────────────
@@ -530,25 +446,8 @@ type ConnConfig = PgEnvConfig;
 static CONN_CONFIG: OnceLock<ConnConfig> = OnceLock::new();
 static CLIENT_INIT: Once = Once::new();
 
-fn load_conn_config() -> ConnConfig {
-    PgEnvConfig::from_env()
-}
-
 fn conn_config() -> &'static ConnConfig {
     CONN_CONFIG.get_or_init(load_conn_config)
-}
-
-fn parse_positive_env_or_default(name: &str, default_value: i32) -> i32 {
-    env_utils::env_string(name)
-        .and_then(|v| v.trim().parse::<i32>().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(default_value)
-}
-
-fn env_nonzero(name: &str) -> bool {
-    env_utils::env_string(name)
-        .map(|v| !v.is_empty() && v != "0")
-        .unwrap_or(false)
 }
 
 fn write_str_to_cbuf(buf: &mut [c_char], src: &str) {
@@ -1095,7 +994,7 @@ fn pool_get_connection_inner(db_path: *const c_char) -> *mut c_void {
 
     // Save library_db_path (first time only)
     {
-        let mut lib_path = pm.library_db_path.lock().unwrap();
+        let mut lib_path = mutex_lock(&pm.library_db_path);
         if lib_path.is_none() && !path_str.is_empty() {
             *lib_path = Some(path_str.to_string());
         }
@@ -1841,7 +1740,7 @@ pub extern "C" fn rust_find_any_library_connection() -> *mut c_void {
     let pm = pool();
 
     // First try pool
-    let lib_path = pm.library_db_path.lock().unwrap().clone();
+    let lib_path = mutex_lock(&pm.library_db_path).clone();
     if let Some(path) = lib_path {
         if let Ok(cs) = std::ffi::CString::new(path) {
             let conn = pool_get_connection_inner(cs.as_ptr());

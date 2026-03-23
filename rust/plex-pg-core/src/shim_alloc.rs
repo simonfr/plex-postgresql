@@ -527,7 +527,7 @@ unsafe fn shim_guard_malloc(size: usize) -> *mut libc::c_void {
     let size = if size == 0 { 1 } else { size };
     let page = shim_guard_page_size();
     let data_len = SHIM_GUARD_HEADER_SIZE + size;
-    let data_pages = (data_len + page - 1) / page;
+    let data_pages = data_len.div_ceil(page);
     let total = (data_pages + 2) * page;
 
     let base = libc::mmap(

@@ -1,34 +1,14 @@
-/*
- * SQL Translator - SQLite to PostgreSQL
- *
- * Translates SQLite-specific SQL syntax to PostgreSQL using the Rust
- * sqlparser-rs based translator. Part of the Plex PostgreSQL Adapter.
- */
-
 #ifndef SQL_TRANSLATOR_H
 #define SQL_TRANSLATOR_H
 
-#include <stddef.h>
+/*
+ * Compatibility wrapper around the generated translator ABI header.
+ * The generated header owns the function declarations; this file preserves the
+ * historical `sql_translation_t` alias used from C.
+ */
 
-// Translation result
-typedef struct {
-    char *sql;              // Translated SQL (caller must free)
-    char **param_names;     // Original named parameter names (for :name params)
-    int param_count;        // Number of parameters
-    int success;            // 1 if translation succeeded
-    char error[256];        // Error message if failed
-} sql_translation_t;
+#include "plex_pg_core_ffi.h"
 
-// Initialize translator (call once at startup)
-void sql_translator_init(void);
-
-// Cleanup translator
-void sql_translator_cleanup(void);
-
-// Main translation function
-sql_translation_t sql_translate(const char *sqlite_sql);
-
-// Free translation result
-void sql_translation_free(sql_translation_t *result);
+typedef struct SqlTranslation sql_translation_t;
 
 #endif /* SQL_TRANSLATOR_H */

@@ -142,7 +142,9 @@ pub unsafe extern "C" fn sigaction(
         }
     }
 
-    let orig = ORIG_SIGACTION.unwrap();
+    let Some(orig) = ORIG_SIGACTION else {
+        return -1;
+    };
 
     if INTERCEPT_SIGACTION.load(Ordering::Relaxed) == 0 {
         return orig(signum, act, oldact);

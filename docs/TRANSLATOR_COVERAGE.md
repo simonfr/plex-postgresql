@@ -1,5 +1,7 @@
 # Translator Coverage Ledger (Draft)
 
+Entry point: `docs/translator/README.md`
+
 ## Purpose
 A living map of SQLite surface area vs. translator support, with direct pointers to the tests that cover each behavior.
 
@@ -7,7 +9,7 @@ A living map of SQLite surface area vs. translator support, with direct pointers
 - Supported: intended to work for Plex workloads; tests exist.
 - Partial: some patterns supported; gaps exist or behavior is heuristic.
 - Skipped/No-op: explicitly ignored by the translator/runtime.
-- Gap: known unsupported behavior; tracked in `KNOWN_GAPS.md`.
+- Gap: known unsupported behavior; tracked in `docs/translator/KNOWN_GAPS.md`.
 
 ## Coverage Matrix
 | Area | Status | Tag | Tests | Notes |
@@ -29,6 +31,6 @@ A living map of SQLite surface area vs. translator support, with direct pointers
 | Output validation (PG parser check) | Supported | `validation/output` | `rust/plex-pg-core/src/lib.rs` tests | Optional validation gate. |
 
 ## Notes
-- Known gaps are tracked in `KNOWN_GAPS.md` and the overall intended surface is summarized in `SUPPORTED_SQLITE_SUBSET.md`.
+- Known gaps are tracked in `docs/translator/KNOWN_GAPS.md` and the overall intended surface is summarized in `docs/translator/SUPPORTED_SQLITE_SUBSET.md`.
 - Test tagging conventions live in `TRANSLATOR_TEST_TAGS.md`; new tests should include tags that map to the matrix above.
 - This document is not a guarantee of full SQLite compatibility; it is a practical ledger for the Plex translator.

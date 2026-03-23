@@ -215,7 +215,10 @@ mod tests {
 
     #[test]
     fn subset_pragma__keyword_pragma_unknown_is_removed() {
+        let _guard = env_lock().lock().unwrap();
+        TEST_STRICT_PRAGMA_OVERRIDE.store(-1, Ordering::Relaxed);
         let r = translate("PRAGMA this_is_unknown").unwrap();
+        TEST_STRICT_PRAGMA_OVERRIDE.store(-1, Ordering::Relaxed);
         assert!(r.sql.trim().is_empty(), "{}", r.sql);
     }
 
