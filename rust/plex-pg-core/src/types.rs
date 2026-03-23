@@ -137,44 +137,45 @@ fn rewrite_data_type(dt: DataType) -> DataType {
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use crate::translate;
 
     #[test]
-    fn type_blob_to_bytea() {
+    fn subset_core__type_blob_to_bytea() {
         let r = translate("CREATE TABLE t (data BLOB)").unwrap();
         assert!(r.sql.to_uppercase().contains("BYTEA"));
         assert!(!r.sql.to_uppercase().contains("BLOB"));
     }
 
     #[test]
-    fn type_datetime_to_timestamp() {
+    fn subset_core__type_datetime_to_timestamp() {
         let r = translate("CREATE TABLE t (created_at datetime)").unwrap();
         assert!(r.sql.to_uppercase().contains("TIMESTAMP"));
         assert!(!r.sql.to_lowercase().contains("datetime"));
     }
 
     #[test]
-    fn type_text_preserved() {
+    fn subset_core__type_text_preserved() {
         let r = translate("CREATE TABLE t (name TEXT)").unwrap();
         assert!(r.sql.to_uppercase().contains("TEXT"));
     }
 
     #[test]
-    fn type_no_match_unchanged() {
+    fn subset_core__type_no_match_unchanged() {
         let r = translate("SELECT id, name FROM metadata_items").unwrap();
         assert!(r.sql.contains("metadata_items"));
     }
 
     #[test]
-    fn type_default_t_to_true() {
+    fn subset_core__type_default_t_to_true() {
         let r = translate("CREATE TABLE t (active INTEGER DEFAULT 't')").unwrap();
         assert!(r.sql.to_uppercase().contains("TRUE"));
         assert!(!r.sql.contains("'t'"));
     }
 
     #[test]
-    fn type_default_f_to_false() {
+    fn subset_core__type_default_f_to_false() {
         let r = translate("CREATE TABLE t (deleted INTEGER DEFAULT 'f')").unwrap();
         assert!(r.sql.to_uppercase().contains("FALSE"));
         assert!(!r.sql.contains("'f'"));

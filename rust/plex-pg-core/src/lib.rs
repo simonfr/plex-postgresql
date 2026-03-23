@@ -232,11 +232,12 @@ pub fn translate(sqlite_sql: &str) -> Result<Translation, String> {
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use super::*;
 
     #[test]
-    fn output_validation_mode_defaults_to_off() {
+    fn validation_output__output_validation_mode_defaults_to_off() {
         assert_eq!(parse_output_validation_mode(None), OutputValidationMode::Off);
         assert_eq!(
             parse_output_validation_mode(Some("")),
@@ -249,7 +250,7 @@ mod tests {
     }
 
     #[test]
-    fn output_validation_mode_parses_values() {
+    fn validation_output__output_validation_mode_parses_values() {
         assert_eq!(
             parse_output_validation_mode(Some("off")),
             OutputValidationMode::Off
@@ -269,7 +270,7 @@ mod tests {
     }
 
     #[test]
-    fn output_validation_sample_pct_defaults_and_bounds() {
+    fn validation_output__output_validation_sample_pct_defaults_and_bounds() {
         assert_eq!(parse_sample_pct(None), DEFAULT_VALIDATE_SAMPLE_PCT);
         assert_eq!(parse_sample_pct(Some("")), DEFAULT_VALIDATE_SAMPLE_PCT);
         assert_eq!(parse_sample_pct(Some("7")), 7);
@@ -278,7 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn output_validation_sampling_decision_respects_mode() {
+    fn validation_output__output_validation_sampling_decision_respects_mode() {
         let sql = "SELECT 1";
         assert!(!should_validate_output(OutputValidationMode::Off, sql, 100));
         assert!(should_validate_output(OutputValidationMode::All, sql, 0));
@@ -287,7 +288,7 @@ mod tests {
     }
 
     #[test]
-    fn output_validation_postgres_parser_accepts_valid_sql() {
+    fn validation_output__output_validation_postgres_parser_accepts_valid_sql() {
         assert!(validate_postgres_output("SELECT 1").is_ok());
     }
 }

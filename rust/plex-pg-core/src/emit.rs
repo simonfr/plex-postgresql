@@ -14,11 +14,12 @@ pub fn emit(stmt: &Statement) -> String {
 // ─── Integration tests ────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use crate::translate;
 
     #[test]
-    fn emit_select_with_placeholder() {
+    fn subset_core__emit_select_with_placeholder() {
         let r = translate("SELECT id, title FROM metadata_items WHERE id = ?").unwrap();
         assert!(r.sql.contains("$1"));
         assert!(!r.sql.contains('?'));
@@ -26,27 +27,27 @@ mod tests {
     }
 
     #[test]
-    fn emit_insert_or_replace_full_pipeline() {
+    fn subset_core__emit_insert_or_replace_full_pipeline() {
         let r = translate("INSERT OR REPLACE INTO settings(id, value) VALUES(?, ?)").unwrap();
         assert!(r.sql.to_uppercase().contains("ON CONFLICT"));
         assert!(r.sql.contains("$1") && r.sql.contains("$2"));
     }
 
     #[test]
-    fn emit_backticks_become_doublequotes() {
+    fn compat_backticks__emit_backticks_become_doublequotes() {
         let r = translate("SELECT `id`, `name` FROM `metadata_items`").unwrap();
         assert!(!r.sql.contains('`'));
         assert!(r.sql.contains('"'));
     }
 
     #[test]
-    fn emit_create_table_if_not_exists() {
+    fn subset_ddl_lite__emit_create_table_if_not_exists() {
         let r = translate("CREATE TABLE foo (id INTEGER, name TEXT)").unwrap();
         assert!(r.sql.to_uppercase().contains("IF NOT EXISTS"));
     }
 
     #[test]
-    fn emit_ifnull_to_coalesce_pipeline() {
+    fn subset_core__emit_ifnull_to_coalesce_pipeline() {
         let r = translate(
             "SELECT m.id, IFNULL(m.rating, 0) as rating FROM metadata_items m \
              WHERE m.library_section_id = :lib_id AND m.metadata_type = :type",

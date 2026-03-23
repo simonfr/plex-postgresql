@@ -29,11 +29,12 @@ impl Default for RewritePipeline {
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use super::RewritePipeline;
 
     #[test]
-    fn default_pipeline_rule_order_is_stable() {
+    fn rewrite_idempotence__default_pipeline_rule_order_is_stable() {
         let pipeline = RewritePipeline::default();
         assert_eq!(
             pipeline.rule_names(),

@@ -360,11 +360,12 @@ fn _make_null() -> Expr {
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use crate::translate;
 
     #[test]
-    fn groupby_adds_missing_column() {
+    fn rewrite_groupby__groupby_adds_missing_column() {
         let r = translate("SELECT id, name, title FROM t GROUP BY id").unwrap();
         let sql = r.sql.to_uppercase();
         assert!(sql.contains("GROUP BY"));
@@ -377,7 +378,7 @@ mod tests {
     }
 
     #[test]
-    fn groupby_skips_aggregate() {
+    fn rewrite_groupby__groupby_skips_aggregate() {
         let r = translate("SELECT id, count(*) as cnt FROM t GROUP BY id").unwrap();
         let sql = r.sql.to_uppercase();
         // count(*) should NOT appear in GROUP BY
@@ -391,7 +392,7 @@ mod tests {
     }
 
     #[test]
-    fn groupby_already_complete() {
+    fn rewrite_groupby__groupby_already_complete() {
         let r = translate("SELECT id, name FROM t GROUP BY id, name").unwrap();
         // name should NOT be doubled
         let count = r.sql.to_lowercase().matches("name").count();
@@ -404,7 +405,7 @@ mod tests {
     }
 
     #[test]
-    fn groupby_distinct_removes_groupby() {
+    fn rewrite_groupby__groupby_distinct_removes_groupby() {
         let r = translate(
             "SELECT DISTINCT metadata_item_clusterings.id, title \
              FROM metadata_item_clusterings GROUP BY title ORDER BY title",
@@ -419,7 +420,7 @@ mod tests {
     }
 
     #[test]
-    fn groupby_plex_external_metadata() {
+    fn rewrite_groupby__groupby_plex_external_metadata() {
         // Real Plex query: GROUP BY title, needs id,uri,etc. added
         let r = translate(
             "SELECT external_metadata_items.id,uri,user_title,library_section_id,\
@@ -440,7 +441,7 @@ mod tests {
     }
 
     #[test]
-    fn groupby_plex_viewed_at_order_by() {
+    fn rewrite_groupby__groupby_plex_viewed_at_order_by() {
         // When GROUP BY is present and ORDER BY uses non-aggregated col that has max() in SELECT
         let r = translate(
             "SELECT metadata_item_id, max(viewed_at) FROM metadata_item_views \
@@ -457,7 +458,7 @@ mod tests {
     }
 
     #[test]
-    fn groupby_table_dot_column() {
+    fn rewrite_groupby__groupby_table_dot_column() {
         let r = translate("SELECT t.id, t.name, count(*) FROM t GROUP BY t.id").unwrap();
         let sql = r.sql.to_lowercase();
         let gb_pos = sql.find("group by").unwrap();
@@ -470,7 +471,7 @@ mod tests {
     }
 
     #[test]
-    fn groupby_preserves_having() {
+    fn rewrite_groupby__groupby_preserves_having() {
         let r =
             translate("SELECT id, name, count(*) as cnt FROM t GROUP BY id HAVING count(*) > 1")
                 .unwrap();
@@ -482,7 +483,7 @@ mod tests {
     }
 
     #[test]
-    fn groupby_no_groupby_unchanged() {
+    fn rewrite_groupby__groupby_no_groupby_unchanged() {
         let r = translate("SELECT id, name FROM t").unwrap();
         assert!(
             !r.sql.to_uppercase().contains("GROUP BY"),

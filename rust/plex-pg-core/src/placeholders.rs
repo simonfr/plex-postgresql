@@ -381,11 +381,12 @@ pub fn transform_expr(
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use crate::translate;
 
     #[test]
-    fn placeholder_question_mark() {
+    fn rewrite_placeholders__placeholder_question_mark() {
         let r = translate("SELECT * FROM t WHERE a = ? AND b = ?").unwrap();
         assert!(r.sql.contains("$1") && r.sql.contains("$2"));
         assert_eq!(r.param_names.len(), 2, "sql={}", r.sql);
@@ -394,21 +395,21 @@ mod tests {
     }
 
     #[test]
-    fn placeholder_named() {
+    fn rewrite_placeholders__placeholder_named() {
         let r = translate("SELECT * FROM t WHERE id = :id").unwrap();
         assert!(r.sql.contains("$1"));
         assert_eq!(r.param_names[0], Some("id".to_string()));
     }
 
     #[test]
-    fn placeholder_named_multiple() {
+    fn rewrite_placeholders__placeholder_named_multiple() {
         let r = translate("SELECT * FROM t WHERE a = :foo AND b = :bar AND c = :baz").unwrap();
         assert!(r.sql.contains("$1") && r.sql.contains("$2") && r.sql.contains("$3"));
         assert_eq!(r.param_names.len(), 3);
     }
 
     #[test]
-    fn placeholder_named_reuse() {
+    fn rewrite_placeholders__placeholder_named_reuse() {
         let r = translate("SELECT * FROM t WHERE a = :id OR b = :id").unwrap();
         // same :id reuses same $N
         assert_eq!(r.param_names.len(), 1);
@@ -416,21 +417,21 @@ mod tests {
     }
 
     #[test]
-    fn placeholder_in_string_literal_ignored() {
+    fn rewrite_placeholders__placeholder_in_string_literal_ignored() {
         let r = translate("SELECT * FROM t WHERE a = ':not_a_param'").unwrap();
         assert_eq!(r.param_names.len(), 0);
         assert!(r.sql.contains(":not_a_param"));
     }
 
     #[test]
-    fn placeholder_mixed_question_and_named() {
+    fn rewrite_placeholders__placeholder_mixed_question_and_named() {
         let r = translate("SELECT * FROM t WHERE a = ? AND b = :foo AND c = ?").unwrap();
         assert_eq!(r.param_names.len(), 3);
         assert!(r.sql.contains("$1") && r.sql.contains("$2") && r.sql.contains("$3"));
     }
 
     #[test]
-    fn placeholder_in_join_on_clause() {
+    fn rewrite_placeholders__placeholder_in_join_on_clause() {
         let r = translate("select metadata_items.id from metadata_item_settings join metadata_items on metadata_items.guid=metadata_item_settings.guid and metadata_item_settings.account_id=? where metadata_items.library_section_id=? order by metadata_item_settings.updated_at desc limit ?").unwrap();
         assert_eq!(r.param_names.len(), 3);
         assert!(r.sql.contains("account_id = $1"), "sql={}", r.sql);
@@ -440,7 +441,7 @@ mod tests {
     }
 
     #[test]
-    fn placeholder_in_nested_join_on_clause() {
+    fn rewrite_placeholders__placeholder_in_nested_join_on_clause() {
         let r = translate(
             "SELECT * FROM (a JOIN b ON a.id = b.a_id AND b.account_id = ?) LEFT JOIN c ON c.id = b.c_id AND c.library_id = ?",
         )

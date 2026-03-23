@@ -1458,11 +1458,12 @@ fn wrap_lower(expr: Expr) -> Expr {
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use crate::translate;
 
     #[test]
-    fn query_subquery_gets_alias() {
+    fn compat_aliases__query_subquery_gets_alias() {
         let r = translate("SELECT * FROM (SELECT id FROM t) WHERE id > 0").unwrap();
         let sql_up = r.sql.to_uppercase();
         assert!(
@@ -1473,7 +1474,7 @@ mod tests {
     }
 
     #[test]
-    fn query_nulls_last_from_is_null_pattern() {
+    fn subset_core__query_nulls_last_from_is_null_pattern() {
         let r =
             translate(r#"SELECT * FROM t ORDER BY parents."index" IS NULL, parents."index" asc"#)
                 .unwrap();
@@ -1491,7 +1492,7 @@ mod tests {
     }
 
     #[test]
-    fn query_case_then_1_else_0_to_booleans() {
+    fn subset_core__query_case_then_1_else_0_to_booleans() {
         let r = translate("SELECT (CASE WHEN a THEN 1 ELSE 0 END) FROM t").unwrap();
         let sql = r.sql.to_lowercase();
         assert!(
@@ -1502,44 +1503,44 @@ mod tests {
     }
 
     #[test]
-    fn query_where_0_to_false() {
+    fn subset_core__query_where_0_to_false() {
         let r = translate("SELECT * FROM t WHERE 0").unwrap();
         assert!(r.sql.to_uppercase().contains("FALSE"), "Got: {}", r.sql);
     }
 
     #[test]
-    fn query_where_1_to_true() {
+    fn subset_core__query_where_1_to_true() {
         let r = translate("SELECT * FROM t WHERE 1").unwrap();
         assert!(r.sql.to_uppercase().contains("TRUE"), "Got: {}", r.sql);
     }
 
     #[test]
-    fn query_max_two_args_to_greatest() {
+    fn subset_core__query_max_two_args_to_greatest() {
         let r = translate("SELECT max(x, y) FROM t").unwrap();
         assert!(r.sql.to_uppercase().contains("GREATEST"), "Got: {}", r.sql);
     }
 
     #[test]
-    fn query_max_one_arg_preserved() {
+    fn subset_core__query_max_one_arg_preserved() {
         let r = translate("SELECT max(x) FROM t").unwrap();
         assert!(!r.sql.to_uppercase().contains("GREATEST"), "Got: {}", r.sql);
         assert!(r.sql.to_lowercase().contains("max("), "Got: {}", r.sql);
     }
 
     #[test]
-    fn query_min_two_args_to_least() {
+    fn subset_core__query_min_two_args_to_least() {
         let r = translate("SELECT min(x, y) FROM t").unwrap();
         assert!(r.sql.to_uppercase().contains("LEAST"), "Got: {}", r.sql);
     }
 
     #[test]
-    fn query_strip_icu_collation() {
+    fn subset_core__query_strip_icu_collation() {
         let r = translate("SELECT * FROM t ORDER BY name COLLATE icu_root").unwrap();
         assert!(!r.sql.to_lowercase().contains("icu_root"), "Got: {}", r.sql);
     }
 
     #[test]
-    fn query_collate_nocase_to_lower() {
+    fn subset_core__query_collate_nocase_to_lower() {
         let r = translate("SELECT * FROM t WHERE name COLLATE NOCASE = 'Test'").unwrap();
         let sql = r.sql.to_lowercase();
         assert!(sql.contains("lower("), "Expected LOWER(), got: {}", r.sql);
@@ -1551,7 +1552,7 @@ mod tests {
     }
 
     #[test]
-    fn query_orderby_unchanged_without_isnull() {
+    fn subset_core__query_orderby_unchanged_without_isnull() {
         let r = translate("SELECT * FROM t ORDER BY id").unwrap();
         assert!(
             !r.sql.to_uppercase().contains("NULLS LAST"),
@@ -1561,7 +1562,7 @@ mod tests {
     }
 
     #[test]
-    fn query_json_op_uses_safe_jsonb_cast() {
+    fn subset_json__query_json_op_uses_safe_jsonb_cast() {
         let r = translate("SELECT * FROM media_streams st WHERE st.extra_data ->> '$.pv:version' < '1'")
             .unwrap();
         let sql = r.sql.to_lowercase();
@@ -1575,7 +1576,7 @@ mod tests {
     }
 
     #[test]
-    fn query_json_op_uses_safe_cast_on_unrelated_column_too() {
+    fn subset_json__query_json_op_uses_safe_cast_on_unrelated_column_too() {
         let r = translate("SELECT * FROM t WHERE t.title ->> '$.key' = 'x'").unwrap();
         let sql = r.sql.to_lowercase();
         assert!(
@@ -1586,7 +1587,7 @@ mod tests {
     }
 
     #[test]
-    fn query_json_op_sqlite_path_literal_rewrites_to_extract_path_text() {
+    fn subset_json__query_json_op_sqlite_path_literal_rewrites_to_extract_path_text() {
         let r = translate("SELECT extra_data ->> '$.status' FROM t").unwrap();
         let sql = r.sql.to_lowercase();
         assert!(
@@ -1598,10 +1599,11 @@ mod tests {
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod distinct_fix_test {
     use crate::translate;
     #[test]
-    fn distinct_orderby_col_added_to_select() {
+    fn rewrite_distinct_orderby__col_added_to_select() {
         let sql = "SELECT DISTINCT (metadata_items.id) FROM metadata_items LEFT JOIN media_items ON media_items.metadata_item_id = metadata_items.id WHERE metadata_items.id = ? ORDER BY metadata_items.title_sort ASC";
         let r = translate(sql).expect("translate ok");
         eprintln!("OUT: {}", r.sql);

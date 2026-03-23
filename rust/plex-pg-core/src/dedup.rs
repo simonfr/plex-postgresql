@@ -46,11 +46,12 @@ fn assignment_column_key(assignment: &Assignment) -> String {
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use crate::translate;
 
     #[test]
-    fn update_duplicate_set_column_keeps_last_and_renumbers_placeholders() {
+    fn subset_core__update_duplicate_set_column_keeps_last_and_renumbers_placeholders() {
         let r = translate("UPDATE directories SET `updated_at`=:U1,`updated_at`=:U2 WHERE `id`=:C1")
             .unwrap();
         let sql = r.sql.to_lowercase();

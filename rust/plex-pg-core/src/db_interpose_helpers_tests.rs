@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+
 use super::*;
 use std::ffi::{CStr, CString};
 
@@ -236,7 +238,7 @@ fn prepare_simple_hash_is_deterministic() {
 }
 
 #[test]
-fn alias_collection_sync_aggregates_rewrites_select_list() {
+fn compat_aliases__alias_collection_sync_aggregates_rewrites_select_list() {
     let sqlite = "select count(*), min(year), max(year) from tags join taggings on 1=1 group by tags.id";
     let pg = "SELECT count(*), min(year), max(year) FROM tags JOIN taggings ON true GROUP BY tags.id";
     let out = alias_collection_sync_aggregates(sqlite, pg).expect("should rewrite");
@@ -246,7 +248,7 @@ fn alias_collection_sync_aggregates_rewrites_select_list() {
 }
 
 #[test]
-fn alias_collection_sync_aggregates_noop_for_other_queries() {
+fn compat_aliases__alias_collection_sync_aggregates_noop_for_other_queries() {
     let sqlite = "select id from tags";
     let pg = "SELECT id FROM tags";
     assert!(alias_collection_sync_aggregates(sqlite, pg).is_none());
@@ -304,7 +306,7 @@ fn trace_list_any_token_in_haystack_matches_token() {
 }
 
 #[test]
-fn simplify_fts_for_sqlite_rewrites_match_and_join() {
+fn subset_fts__simplify_fts_for_sqlite_rewrites_match_and_join() {
     let sql = "SELECT * FROM a JOIN fts4_metadata_titles t ON t.rowid=a.id WHERE fts4_metadata_titles.title MATCH 'foo''bar'";
     let out = simplify_fts_for_sqlite(sql).expect("should simplify");
     assert!(!out.to_ascii_lowercase().contains("join fts4_metadata_titles"));
@@ -312,26 +314,26 @@ fn simplify_fts_for_sqlite_rewrites_match_and_join() {
 }
 
 #[test]
-fn simplify_fts_for_sqlite_noop_without_fts() {
+fn subset_fts__simplify_fts_for_sqlite_noop_without_fts() {
     assert!(simplify_fts_for_sqlite("SELECT * FROM t").is_none());
 }
 
 #[test]
-fn add_if_not_exists_for_sqlite_ddl_rewrites_create_table() {
+fn subset_ddl_lite__add_if_not_exists_for_sqlite_ddl_rewrites_create_table() {
     let sql = "CREATE TABLE tags (id INTEGER)";
     let out = add_if_not_exists_for_sqlite_ddl(sql).expect("should rewrite");
     assert!(out.contains("CREATE TABLE IF NOT EXISTS tags"));
 }
 
 #[test]
-fn add_if_not_exists_for_sqlite_ddl_rewrites_create_unique_index() {
+fn subset_ddl_lite__add_if_not_exists_for_sqlite_ddl_rewrites_create_unique_index() {
     let sql = "CREATE UNIQUE INDEX idx_tags ON tags(id)";
     let out = add_if_not_exists_for_sqlite_ddl(sql).expect("should rewrite");
     assert!(out.contains("CREATE UNIQUE INDEX IF NOT EXISTS idx_tags"));
 }
 
 #[test]
-fn add_if_not_exists_for_sqlite_ddl_noop_if_already_present() {
+fn subset_ddl_lite__add_if_not_exists_for_sqlite_ddl_noop_if_already_present() {
     let sql = "CREATE INDEX IF NOT EXISTS idx_tags ON tags(id)";
     assert!(add_if_not_exists_for_sqlite_ddl(sql).is_none());
 }
@@ -566,7 +568,7 @@ fn type_normalization_decltype_hash_differs_for_different_strings() {
 }
 
 #[test]
-fn fts_quotes_simple_query_rewrites() {
+fn subset_fts__fts_quotes_simple_query_rewrites() {
     let sql = "SELECT * FROM metadata_items \
                JOIN fts4_metadata_titles ON metadata_items.id = fts4_metadata_titles.id \
                WHERE fts4_metadata_titles.title match 'test'";
@@ -576,7 +578,7 @@ fn fts_quotes_simple_query_rewrites() {
 }
 
 #[test]
-fn fts_quotes_handles_apostrophes() {
+fn subset_fts__fts_quotes_handles_apostrophes() {
     let sql = "SELECT * FROM metadata_items \
                JOIN fts4_metadata_titles ON metadata_items.id = fts4_metadata_titles.id \
                WHERE fts4_metadata_titles.title match 'it''s a test'";
@@ -587,7 +589,7 @@ fn fts_quotes_handles_apostrophes() {
 }
 
 #[test]
-fn fts_quotes_handles_escaped_quote_pairs() {
+fn subset_fts__fts_quotes_handles_escaped_quote_pairs() {
     let sql = "SELECT * FROM items \
                JOIN fts4_metadata_titles ON items.id = fts4_metadata_titles.id \
                WHERE fts4_metadata_titles.title match 'can''t stop'";

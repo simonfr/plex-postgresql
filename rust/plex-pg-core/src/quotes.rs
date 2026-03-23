@@ -426,43 +426,44 @@ fn fix_expr(expr: &mut Expr) {
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use crate::translate;
 
     #[test]
-    fn quotes_backtick_to_double_quote() {
+    fn compat_backticks__quotes_backtick_to_double_quote() {
         let r = translate("SELECT `id`, `title` FROM `metadata_items`").unwrap();
         assert!(!r.sql.contains('`'));
         assert!(r.sql.contains('"'));
     }
 
     #[test]
-    fn quotes_double_quotes_preserved() {
+    fn compat_backticks__quotes_double_quotes_preserved() {
         let r = translate(r#"SELECT "id" FROM "table""#).unwrap();
         assert!(r.sql.contains('"'));
     }
 
     #[test]
-    fn quotes_create_table_if_not_exists_added() {
+    fn subset_ddl_lite__quotes_create_table_if_not_exists_added() {
         let r = translate("CREATE TABLE foo (id INTEGER)").unwrap();
         assert!(r.sql.to_uppercase().contains("IF NOT EXISTS"));
     }
 
     #[test]
-    fn quotes_create_table_if_not_exists_not_doubled() {
+    fn subset_ddl_lite__quotes_create_table_if_not_exists_not_doubled() {
         let r = translate("CREATE TABLE IF NOT EXISTS foo (id INTEGER PRIMARY KEY)").unwrap();
         let count = r.sql.to_uppercase().matches("IF NOT EXISTS").count();
         assert_eq!(count, 1);
     }
 
     #[test]
-    fn quotes_create_index_if_not_exists_added() {
+    fn subset_ddl_lite__quotes_create_index_if_not_exists_added() {
         let r = translate("CREATE INDEX idx_foo ON t(id)").unwrap();
         assert!(r.sql.to_uppercase().contains("IF NOT EXISTS"));
     }
 
     #[test]
-    fn quotes_create_index_backticks_are_converted() {
+    fn subset_ddl_lite__quotes_create_index_backticks_are_converted() {
         let r = translate("CREATE INDEX `idx_mixed_title` ON `mixedCaseTable`(`itemTitle`)")
             .unwrap();
         assert!(
@@ -474,7 +475,7 @@ mod tests {
     }
 
     #[test]
-    fn quotes_join_on_mixed_case() {
+    fn compat_backticks__quotes_join_on_mixed_case() {
         let r = translate("select taggings.id as blankKeyTaggingId, otherTags.id as nonblankKeyId from tags join tags as otherTags on otherTags.tag = tags.tag where tags.tag_value = ?").unwrap();
         assert!(
             r.sql.contains("\"otherTags\".tag"),
@@ -484,7 +485,7 @@ mod tests {
     }
 
     #[test]
-    fn quotes_backtick_in_where_is_null() {
+    fn compat_backticks__quotes_backtick_in_where_is_null() {
         let r = translate(
             "UPDATE activities SET `finished_at`=`started_at` WHERE `finished_at` IS NULL",
         )
@@ -497,7 +498,7 @@ mod tests {
     }
 
     #[test]
-    fn quotes_backtick_in_where_is_not_null() {
+    fn compat_backticks__quotes_backtick_in_where_is_not_null() {
         let r = translate("SELECT * FROM t WHERE `col` IS NOT NULL").unwrap();
         assert!(
             !r.sql.contains('`'),
@@ -507,7 +508,7 @@ mod tests {
     }
 
     #[test]
-    fn quotes_backtick_in_join_on_inner() {
+    fn compat_backticks__quotes_backtick_in_join_on_inner() {
         // Regression: backtick identifiers in JOIN ON must not reach PostgreSQL
         let r =
             translate("SELECT * FROM `tag_items` ti INNER JOIN `tags` tg ON ti.`tag_id` = tg.`id`")
@@ -525,7 +526,7 @@ mod tests {
     }
 
     #[test]
-    fn quotes_backtick_in_join_on_left() {
+    fn compat_backticks__quotes_backtick_in_join_on_left() {
         let r =
             translate("SELECT * FROM `items` i LEFT JOIN `tags` t ON i.`tag_id` = t.`id`").unwrap();
         assert!(
@@ -536,7 +537,7 @@ mod tests {
     }
 
     #[test]
-    fn quotes_backtick_in_join_on_right() {
+    fn compat_backticks__quotes_backtick_in_join_on_right() {
         let r = translate("SELECT * FROM `items` i RIGHT JOIN `tags` t ON i.`tag_id` = t.`id`")
             .unwrap();
         assert!(
@@ -547,7 +548,7 @@ mod tests {
     }
 
     #[test]
-    fn quotes_backtick_in_join_on_left_outer() {
+    fn compat_backticks__quotes_backtick_in_join_on_left_outer() {
         let r =
             translate("SELECT * FROM `items` i LEFT OUTER JOIN `tags` t ON i.`tag_id` = t.`id`")
                 .unwrap();
@@ -559,7 +560,7 @@ mod tests {
     }
 
     #[test]
-    fn quotes_backtick_in_join_on_full_outer() {
+    fn compat_backticks__quotes_backtick_in_join_on_full_outer() {
         let r =
             translate("SELECT * FROM `items` i FULL OUTER JOIN `tags` t ON i.`tag_id` = t.`id`")
                 .unwrap();

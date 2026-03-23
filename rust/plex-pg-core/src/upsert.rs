@@ -202,6 +202,7 @@ fn make_do_update(
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use crate::translate;
 
@@ -210,7 +211,7 @@ mod tests {
     }
 
     #[test]
-    fn upsert_insert_or_replace() {
+    fn subset_core__upsert_insert_or_replace() {
         let r = translate("INSERT OR REPLACE INTO settings(id, value) VALUES(?, ?)").unwrap();
         assert!(r.sql.to_uppercase().contains("ON CONFLICT"));
         assert!(r.sql.to_uppercase().contains("DO UPDATE"));
@@ -218,7 +219,7 @@ mod tests {
     }
 
     #[test]
-    fn upsert_insert_or_ignore() {
+    fn subset_core__upsert_insert_or_ignore() {
         let r = translate("INSERT OR IGNORE INTO tags(tag) VALUES(?)").unwrap();
         assert!(r.sql.to_uppercase().contains("ON CONFLICT"));
         assert!(r.sql.to_uppercase().contains("DO NOTHING"));
@@ -226,7 +227,7 @@ mod tests {
     }
 
     #[test]
-    fn upsert_replace_into() {
+    fn subset_core__upsert_replace_into() {
         let r = translate("REPLACE INTO settings(id, value) VALUES(?, ?)").unwrap();
         assert!(r.sql.to_uppercase().contains("ON CONFLICT"));
         assert!(r.sql.to_uppercase().contains("DO UPDATE"));
@@ -234,13 +235,13 @@ mod tests {
     }
 
     #[test]
-    fn upsert_normal_insert_unchanged() {
+    fn subset_core__upsert_normal_insert_unchanged() {
         let r = translate("INSERT INTO t (a, b) VALUES (1, 2)").unwrap();
         assert!(!r.sql.to_uppercase().contains("ON CONFLICT"));
     }
 
     #[test]
-    fn upsert_on_conflict_already_present_unchanged() {
+    fn subset_core__upsert_on_conflict_already_present_unchanged() {
         let r = translate(
             "INSERT INTO settings(id, value) VALUES(?, ?) ON CONFLICT(id) DO UPDATE SET value = excluded.value",
         )
@@ -251,7 +252,7 @@ mod tests {
     }
 
     #[test]
-    fn upsert_preferences_conflict_name_no_returning() {
+    fn subset_core__upsert_preferences_conflict_name_no_returning() {
         let out = sql("INSERT OR REPLACE INTO preferences (id, name, value) VALUES (1, 'k', 'v')");
         let low = out.to_lowercase();
         assert!(
@@ -266,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn upsert_schema_migrations_conflict_version_no_returning() {
+    fn subset_core__upsert_schema_migrations_conflict_version_no_returning() {
         let out = sql("INSERT OR REPLACE INTO schema_migrations (version) VALUES ('20240101')");
         let low = out.to_lowercase();
         assert!(
@@ -278,7 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn upsert_statistics_bandwidth_conflict_and_set_exclusions() {
+    fn subset_core__upsert_statistics_bandwidth_conflict_and_set_exclusions() {
         let out = sql(
             "INSERT OR REPLACE INTO statistics_bandwidth \
              (id, account_id, device_id, timespan, at, lan, bytes) \
@@ -302,7 +303,7 @@ mod tests {
     }
 
     #[test]
-    fn upsert_metadata_item_settings_conflict_and_returning() {
+    fn subset_core__upsert_metadata_item_settings_conflict_and_returning() {
         let out = sql(
             "INSERT OR REPLACE INTO metadata_item_settings \
              (id, account_id, guid, rating, view_count) \
@@ -324,7 +325,7 @@ mod tests {
     }
 
     #[test]
-    fn upsert_locatables_conflict_target() {
+    fn subset_core__upsert_locatables_conflict_target() {
         let out = sql(
             "INSERT OR REPLACE INTO locatables \
              (id, location_id, locatable_id, locatable_type, created_at) \
@@ -342,7 +343,7 @@ mod tests {
     }
 
     #[test]
-    fn upsert_location_places_conflict_target() {
+    fn subset_core__upsert_location_places_conflict_target() {
         let out = sql(
             "INSERT OR REPLACE INTO location_places (id, location_id, guid, name) VALUES (1, 10, 'abc', 'Home')",
         );
@@ -358,7 +359,7 @@ mod tests {
     }
 
     #[test]
-    fn upsert_media_stream_settings_conflict_target() {
+    fn subset_core__upsert_media_stream_settings_conflict_target() {
         let out = sql(
             "INSERT OR REPLACE INTO media_stream_settings \
              (id, media_stream_id, account_id, selected) \
@@ -376,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn upsert_schema_prefix_table_resolution() {
+    fn subset_core__upsert_schema_prefix_table_resolution() {
         let tags = sql("INSERT OR REPLACE INTO plex.tags (id, tag, tag_type) VALUES (1, 'Action', 0)");
         let low_tags = tags.to_lowercase();
         assert!(
@@ -396,7 +397,7 @@ mod tests {
     }
 
     #[test]
-    fn upsert_unknown_table_fallback_no_returning() {
+    fn subset_core__upsert_unknown_table_fallback_no_returning() {
         let out = sql("INSERT OR REPLACE INTO some_unknown_table (id, data, value) VALUES (1, 'test', 42)");
         let low = out.to_lowercase();
         assert!(
@@ -411,7 +412,7 @@ mod tests {
     }
 
     #[test]
-    fn upsert_unknown_table_with_id_uses_on_conflict_id_target() {
+    fn subset_core__upsert_unknown_table_with_id_uses_on_conflict_id_target() {
         let out = sql("INSERT OR REPLACE INTO ur (id, name, v) VALUES (1, 'a2', 99)");
         let low = out.to_lowercase();
         assert!(
@@ -424,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    fn upsert_unknown_table_ignore_uses_do_nothing() {
+    fn subset_core__upsert_unknown_table_ignore_uses_do_nothing() {
         let out = sql("INSERT OR IGNORE INTO unknown_tbl (id, data) VALUES (1, 'test')");
         let low = out.to_lowercase();
         assert!(low.contains("on conflict"));
@@ -433,7 +434,7 @@ mod tests {
     }
 
     #[test]
-    fn upsert_quoted_columns_and_trailing_semicolon() {
+    fn subset_core__upsert_quoted_columns_and_trailing_semicolon() {
         let out = sql(
             "INSERT OR REPLACE INTO tags (\"id\", tag, \"tag_type\") VALUES (1, 'Action', 0);",
         );
@@ -448,7 +449,7 @@ mod tests {
     }
 
     #[test]
-    fn upsert_trailing_whitespace() {
+    fn subset_core__upsert_trailing_whitespace() {
         let out = sql("INSERT OR REPLACE INTO tags (id, tag) VALUES (1, 'Action')   ");
         let low = out.to_lowercase();
         assert!(
@@ -460,7 +461,7 @@ mod tests {
     }
 
     #[test]
-    fn upsert_no_column_list_generates_conflict_clause() {
+    fn subset_core__upsert_no_column_list_generates_conflict_clause() {
         let out = sql("INSERT OR REPLACE INTO tags VALUES (1, 'test', 0)");
         let low = out.to_lowercase();
         assert!(low.contains("on conflict"));
@@ -468,7 +469,7 @@ mod tests {
     }
 
     #[test]
-    fn upsert_case_insensitive_keyword_and_table() {
+    fn subset_core__upsert_case_insensitive_keyword_and_table() {
         let mixed = sql("insert or replace INTO METADATA_ITEMS (id, title) VALUES (1, 'Test')");
         let low = mixed.to_lowercase();
         assert!(
@@ -481,7 +482,7 @@ mod tests {
     }
 
     #[test]
-    fn upsert_ignore_unknown_table_do_nothing() {
+    fn subset_core__upsert_ignore_unknown_table_do_nothing() {
         let out = sql("INSERT OR IGNORE INTO unknown_tbl (id, data) VALUES (1, 'x')");
         let low = out.to_lowercase();
         assert!(low.contains("on conflict"));
@@ -490,7 +491,7 @@ mod tests {
     }
 
     #[test]
-    fn upsert_regular_columns_included_and_id_excluded_in_set() {
+    fn subset_core__upsert_regular_columns_included_and_id_excluded_in_set() {
         let out = sql("INSERT OR REPLACE INTO tags (id, tag, tag_type) VALUES (1, 'Action', 0)");
         let low = out.to_lowercase();
         assert!(low.contains("tag = excluded.tag"));
@@ -500,7 +501,7 @@ mod tests {
     }
 
     #[test]
-    fn upsert_or_replace_or_ignore_and_replace_tokens_removed() {
+    fn subset_core__upsert_or_replace_or_ignore_and_replace_tokens_removed() {
         let r1 = sql("INSERT OR REPLACE INTO tags (id, tag) VALUES (1, 'test')");
         let r2 = sql("INSERT OR IGNORE INTO tags (id, tag) VALUES (1, 'test')");
         let r3 = sql("REPLACE INTO tags (id, tag) VALUES (1, 'test')");

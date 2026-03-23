@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+
 mod self_join_tests {
     use super::super::preprocess;
 
@@ -7,7 +9,7 @@ mod self_join_tests {
     /// + UNALIASED metadata_items join.  The unaliased join must get AS mi and all
     /// metadata_items.<col> refs must become mi.<col>.
     #[test]
-    fn preprocess_rewrites_metadata_items_self_join_alias_refs() {
+    fn compat_aliases__preprocess_rewrites_metadata_items_self_join_alias_refs() {
         // Shape A: unaliased second join that needs AS mi
         let input = concat!(
             "SELECT metadata_items.id, metadata_items.title ",
@@ -46,7 +48,7 @@ mod self_join_tests {
 
     /// Legacy test: all joins already aliased — nothing should change (no unaliased join).
     #[test]
-    fn preprocess_no_rewrite_when_all_joins_aliased() {
+    fn compat_aliases__preprocess_no_rewrite_when_all_joins_aliased() {
         let input = concat!(
             "select metadata_items.id from metadata_item_settings ",
             "join metadata_items as parents on parents.id=metadata_items.parent_id ",
@@ -79,7 +81,7 @@ mod self_join_tests {
     /// Shape B (from-metadata_items root): no rewrite should happen — base table
     /// IS metadata_items so bare refs are valid in PostgreSQL.
     #[test]
-    fn preprocess_no_rewrite_for_shape_b_metadata_items_root() {
+    fn compat_aliases__preprocess_no_rewrite_for_shape_b_metadata_items_root() {
         let input = concat!(
             "select metadata_items.id from metadata_items ",
             "join metadata_items as parents on parents.id=metadata_items.parent_id ",
@@ -101,7 +103,7 @@ mod tests {
     use crate::test_utils::env_lock;
 
     #[test]
-    fn keyword_begin_immediate() {
+    fn subset_txn__keyword_begin_immediate() {
         let r = translate("BEGIN IMMEDIATE").unwrap();
         assert!(!r.sql.to_uppercase().contains("IMMEDIATE"));
         assert!(!r.sql.to_uppercase().contains("DEFERRED"));
@@ -109,46 +111,46 @@ mod tests {
     }
 
     #[test]
-    fn keyword_begin_deferred() {
+    fn subset_txn__keyword_begin_deferred() {
         let r = translate("BEGIN DEFERRED").unwrap();
         assert!(!r.sql.to_uppercase().contains("DEFERRED"));
     }
 
     #[test]
-    fn keyword_begin_exclusive() {
+    fn subset_txn__keyword_begin_exclusive() {
         let r = translate("BEGIN EXCLUSIVE").unwrap();
         assert!(!r.sql.to_uppercase().contains("EXCLUSIVE"));
     }
 
     #[test]
-    fn keyword_end_to_commit() {
+    fn subset_txn__keyword_end_to_commit() {
         let r = translate("END").unwrap();
         assert!(r.sql.to_uppercase().contains("COMMIT"));
     }
 
     #[test]
-    fn keyword_release_without_savepoint_keyword() {
+    fn subset_txn__keyword_release_without_savepoint_keyword() {
         let r = translate("RELEASE sp1").unwrap();
         let up = r.sql.to_uppercase();
         assert!(up.contains("RELEASE SAVEPOINT SP1"), "{}", r.sql);
     }
 
     #[test]
-    fn keyword_rollback_transaction_to() {
+    fn subset_txn__keyword_rollback_transaction_to() {
         let r = translate("ROLLBACK TRANSACTION TO sp1").unwrap();
         let up = r.sql.to_uppercase();
         assert!(up.contains("ROLLBACK TO SAVEPOINT SP1"), "{}", r.sql);
     }
 
     #[test]
-    fn keyword_glob_wildcard() {
+    fn subset_core__keyword_glob_wildcard() {
         let r = translate("SELECT * FROM t WHERE name GLOB '*test*'").unwrap();
         assert!(r.sql.to_uppercase().contains("ILIKE") || r.sql.to_uppercase().contains("LIKE"));
         assert!(!r.sql.to_uppercase().contains(" GLOB "));
     }
 
     #[test]
-    fn keyword_indexed_by_removed() {
+    fn subset_core__keyword_indexed_by_removed() {
         let r = translate("SELECT * FROM metadata_items INDEXED BY idx_title WHERE title = 'test'")
             .unwrap();
         assert!(!r.sql.to_uppercase().contains("INDEXED BY"));
@@ -156,7 +158,7 @@ mod tests {
     }
 
     #[test]
-    fn keyword_not_indexed_removed() {
+    fn subset_core__keyword_not_indexed_removed() {
         let r = translate("SELECT * FROM metadata_items NOT INDEXED WHERE id = 1").unwrap();
         let up = r.sql.to_uppercase();
         assert!(!up.contains("NOT INDEXED"), "{}", r.sql);
@@ -164,7 +166,7 @@ mod tests {
     }
 
     #[test]
-    fn keyword_sqlite_master_replaced() {
+    fn subset_core__keyword_sqlite_master_replaced() {
         let r = translate("SELECT name FROM sqlite_master WHERE type='table'").unwrap();
         assert!(
             r.sql.to_lowercase().contains("information_schema")
@@ -174,27 +176,27 @@ mod tests {
     }
 
     #[test]
-    fn keyword_empty_in_list() {
+    fn subset_core__keyword_empty_in_list() {
         let r = translate("SELECT * FROM tags WHERE id IN ()").unwrap();
         assert!(!r.sql.contains("IN ()"));
         assert!(r.sql.to_uppercase().contains("IN") && r.sql.to_uppercase().contains("SELECT"));
     }
 
     #[test]
-    fn keyword_group_by_null_removed() {
+    fn subset_core__keyword_group_by_null_removed() {
         let r = translate("SELECT count(*) FROM metadata_items GROUP BY NULL").unwrap();
         assert!(!r.sql.to_uppercase().contains("GROUP BY NULL"));
     }
 
     #[test]
-    fn keyword_pragma_read_is_mapped_to_select() {
+    fn subset_pragma__keyword_pragma_read_is_mapped_to_select() {
         let r = translate("PRAGMA foreign_keys").unwrap();
         let up = r.sql.to_uppercase();
         assert!(up.contains("SELECT 1 AS FOREIGN_KEYS"), "{}", r.sql);
     }
 
     #[test]
-    fn keyword_pragma_set_is_mapped_to_select_one() {
+    fn subset_pragma__keyword_pragma_set_is_mapped_to_select_one() {
         let r = translate("PRAGMA journal_mode=WAL").unwrap();
         let up = r.sql.to_uppercase();
         assert!(up.contains("SET_CONFIG"), "{}", r.sql);
@@ -203,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn keyword_pragma_schema_prefix_is_supported() {
+    fn subset_pragma__keyword_pragma_schema_prefix_is_supported() {
         let r = translate("PRAGMA main.busy_timeout = 5000").unwrap();
         let up = r.sql.to_uppercase();
         assert!(up.contains("SET_CONFIG"), "{}", r.sql);
@@ -212,13 +214,13 @@ mod tests {
     }
 
     #[test]
-    fn keyword_pragma_unknown_is_removed() {
+    fn subset_pragma__keyword_pragma_unknown_is_removed() {
         let r = translate("PRAGMA this_is_unknown").unwrap();
         assert!(r.sql.trim().is_empty(), "{}", r.sql);
     }
 
     #[test]
-    fn keyword_pragma_busy_timeout_read_uses_current_setting() {
+    fn subset_pragma__keyword_pragma_busy_timeout_read_uses_current_setting() {
         let r = translate("PRAGMA busy_timeout").unwrap();
         let up = r.sql.to_uppercase();
         assert!(up.contains("CURRENT_SETTING"), "{}", r.sql);
@@ -226,7 +228,7 @@ mod tests {
     }
 
     #[test]
-    fn keyword_pragma_synchronous_set_uses_set_config() {
+    fn subset_pragma__keyword_pragma_synchronous_set_uses_set_config() {
         let r = translate("PRAGMA synchronous = FULL").unwrap();
         let up = r.sql.to_uppercase();
         assert!(up.contains("SET_CONFIG"), "{}", r.sql);
@@ -234,7 +236,7 @@ mod tests {
     }
 
     #[test]
-    fn keyword_pragma_temp_store_set_uses_session_setting() {
+    fn subset_pragma__keyword_pragma_temp_store_set_uses_session_setting() {
         let r = translate("PRAGMA temp_store=MEMORY").unwrap();
         let up = r.sql.to_uppercase();
         assert!(up.contains("SET_CONFIG"), "{}", r.sql);
@@ -242,7 +244,7 @@ mod tests {
     }
 
     #[test]
-    fn keyword_pragma_temp_store_read_uses_current_setting() {
+    fn subset_pragma__keyword_pragma_temp_store_read_uses_current_setting() {
         let r = translate("PRAGMA temp_store").unwrap();
         let up = r.sql.to_uppercase();
         assert!(up.contains("CURRENT_SETTING"), "{}", r.sql);
@@ -250,7 +252,7 @@ mod tests {
     }
 
     #[test]
-    fn keyword_pragma_cache_size_set_uses_session_setting() {
+    fn subset_pragma__keyword_pragma_cache_size_set_uses_session_setting() {
         let r = translate("PRAGMA cache_size=-4000").unwrap();
         let up = r.sql.to_uppercase();
         assert!(up.contains("SET_CONFIG"), "{}", r.sql);
@@ -258,7 +260,7 @@ mod tests {
     }
 
     #[test]
-    fn keyword_pragma_cache_size_read_uses_current_setting() {
+    fn subset_pragma__keyword_pragma_cache_size_read_uses_current_setting() {
         let r = translate("PRAGMA cache_size").unwrap();
         let up = r.sql.to_uppercase();
         assert!(up.contains("CURRENT_SETTING"), "{}", r.sql);
@@ -266,7 +268,7 @@ mod tests {
     }
 
     #[test]
-    fn keyword_pragma_locking_mode_set_uses_session_setting() {
+    fn subset_pragma__keyword_pragma_locking_mode_set_uses_session_setting() {
         let r = translate("PRAGMA locking_mode=EXCLUSIVE").unwrap();
         let up = r.sql.to_uppercase();
         assert!(up.contains("SET_CONFIG"), "{}", r.sql);
@@ -274,7 +276,7 @@ mod tests {
     }
 
     #[test]
-    fn keyword_pragma_locking_mode_read_uses_current_setting() {
+    fn subset_pragma__keyword_pragma_locking_mode_read_uses_current_setting() {
         let r = translate("PRAGMA locking_mode").unwrap();
         let up = r.sql.to_uppercase();
         assert!(up.contains("CURRENT_SETTING"), "{}", r.sql);
@@ -282,7 +284,7 @@ mod tests {
     }
 
     #[test]
-    fn keyword_pragma_wal_autocheckpoint_set_uses_session_setting() {
+    fn subset_pragma__keyword_pragma_wal_autocheckpoint_set_uses_session_setting() {
         let r = translate("PRAGMA wal_autocheckpoint=200").unwrap();
         let up = r.sql.to_uppercase();
         assert!(up.contains("SET_CONFIG"), "{}", r.sql);
@@ -290,7 +292,7 @@ mod tests {
     }
 
     #[test]
-    fn keyword_pragma_wal_autocheckpoint_read_uses_current_setting() {
+    fn subset_pragma__keyword_pragma_wal_autocheckpoint_read_uses_current_setting() {
         let r = translate("PRAGMA wal_autocheckpoint").unwrap();
         let up = r.sql.to_uppercase();
         assert!(up.contains("CURRENT_SETTING"), "{}", r.sql);
@@ -298,7 +300,7 @@ mod tests {
     }
 
     #[test]
-    fn keyword_pragma_mmap_size_set_uses_session_setting() {
+    fn subset_pragma__keyword_pragma_mmap_size_set_uses_session_setting() {
         let r = translate("PRAGMA mmap_size=1048576").unwrap();
         let up = r.sql.to_uppercase();
         assert!(up.contains("SET_CONFIG"), "{}", r.sql);
@@ -306,7 +308,7 @@ mod tests {
     }
 
     #[test]
-    fn keyword_pragma_mmap_size_read_uses_current_setting() {
+    fn subset_pragma__keyword_pragma_mmap_size_read_uses_current_setting() {
         let r = translate("PRAGMA mmap_size").unwrap();
         let up = r.sql.to_uppercase();
         assert!(up.contains("CURRENT_SETTING"), "{}", r.sql);
@@ -314,7 +316,7 @@ mod tests {
     }
 
     #[test]
-    fn keyword_pragma_page_size_set_uses_session_setting() {
+    fn subset_pragma__keyword_pragma_page_size_set_uses_session_setting() {
         let r = translate("PRAGMA page_size=8192").unwrap();
         let up = r.sql.to_uppercase();
         assert!(up.contains("SET_CONFIG"), "{}", r.sql);
@@ -322,7 +324,7 @@ mod tests {
     }
 
     #[test]
-    fn keyword_pragma_page_size_read_uses_current_setting() {
+    fn subset_pragma__keyword_pragma_page_size_read_uses_current_setting() {
         let r = translate("PRAGMA page_size").unwrap();
         let up = r.sql.to_uppercase();
         assert!(up.contains("CURRENT_SETTING"), "{}", r.sql);
@@ -330,7 +332,7 @@ mod tests {
     }
 
     #[test]
-    fn keyword_pragma_auto_vacuum_set_uses_session_setting() {
+    fn subset_pragma__keyword_pragma_auto_vacuum_set_uses_session_setting() {
         let r = translate("PRAGMA auto_vacuum=INCREMENTAL").unwrap();
         let up = r.sql.to_uppercase();
         assert!(up.contains("SET_CONFIG"), "{}", r.sql);
@@ -338,7 +340,7 @@ mod tests {
     }
 
     #[test]
-    fn keyword_pragma_auto_vacuum_read_uses_current_setting() {
+    fn subset_pragma__keyword_pragma_auto_vacuum_read_uses_current_setting() {
         let r = translate("PRAGMA auto_vacuum").unwrap();
         let up = r.sql.to_uppercase();
         assert!(up.contains("CURRENT_SETTING"), "{}", r.sql);
@@ -346,7 +348,7 @@ mod tests {
     }
 
     #[test]
-    fn keyword_pragma_strict_mode_causes_translation_failure_for_unknown() {
+    fn subset_pragma__keyword_pragma_strict_mode_causes_translation_failure_for_unknown() {
         let _guard = env_lock().lock().unwrap();
         TEST_STRICT_PRAGMA_OVERRIDE.store(1, Ordering::Relaxed);
         let result = translate("PRAGMA totally_unknown_pragma");
@@ -355,7 +357,7 @@ mod tests {
     }
 
     #[test]
-    fn keyword_explain_query_plan_rewritten_to_explain() {
+    fn subset_core__keyword_explain_query_plan_rewritten_to_explain() {
         let r = translate("EXPLAIN QUERY PLAN SELECT * FROM t").unwrap();
         let up = r.sql.to_uppercase();
         assert!(up.starts_with("EXPLAIN "), "{}", r.sql);
@@ -363,37 +365,37 @@ mod tests {
     }
 
     #[test]
-    fn keyword_vacuum_rewritten_to_select_one() {
+    fn subset_core__keyword_vacuum_rewritten_to_select_one() {
         let r = translate("VACUUM").unwrap();
         assert_eq!(r.sql.trim().to_uppercase(), "SELECT 1");
     }
 
     #[test]
-    fn keyword_reindex_rewritten_to_select_one() {
+    fn subset_core__keyword_reindex_rewritten_to_select_one() {
         let r = translate("REINDEX").unwrap();
         assert_eq!(r.sql.trim().to_uppercase(), "SELECT 1");
     }
 
     #[test]
-    fn keyword_attach_database_rewritten_to_select_one() {
+    fn subset_core__keyword_attach_database_rewritten_to_select_one() {
         let r = translate("ATTACH DATABASE 'x.db' AS aux").unwrap();
         assert_eq!(r.sql.trim().to_uppercase(), "SELECT 1");
     }
 
     #[test]
-    fn keyword_detach_database_rewritten_to_select_one() {
+    fn subset_core__keyword_detach_database_rewritten_to_select_one() {
         let r = translate("DETACH DATABASE aux").unwrap();
         assert_eq!(r.sql.trim().to_uppercase(), "SELECT 1");
     }
 
     #[test]
-    fn keyword_analyze_sqlite_internal_rewritten_to_select_one() {
+    fn subset_core__keyword_analyze_sqlite_internal_rewritten_to_select_one() {
         let r = translate("ANALYZE sqlite_master").unwrap();
         assert_eq!(r.sql.trim().to_uppercase(), "SELECT 1");
     }
 
     #[test]
-    fn keyword_create_table_without_rowid_strict_stripped() {
+    fn subset_core__keyword_create_table_without_rowid_strict_stripped() {
         let r = translate("CREATE TABLE t(id INTEGER PRIMARY KEY) WITHOUT ROWID, STRICT").unwrap();
         let up = r.sql.to_uppercase();
         assert!(!up.contains("WITHOUT ROWID"), "{}", r.sql);
@@ -401,7 +403,7 @@ mod tests {
     }
 
     #[test]
-    fn keyword_regexp_operator_rewritten() {
+    fn subset_core__keyword_regexp_operator_rewritten() {
         let r = translate("SELECT * FROM t WHERE name REGEXP 'ab.*'").unwrap();
         let up = r.sql.to_uppercase();
         assert!(!up.contains("REGEXP"), "{}", r.sql);
@@ -409,7 +411,7 @@ mod tests {
     }
 
     #[test]
-    fn keyword_not_regexp_operator_rewritten() {
+    fn subset_core__keyword_not_regexp_operator_rewritten() {
         let r = translate("SELECT * FROM t WHERE name NOT REGEXP 'ab.*'").unwrap();
         let up = r.sql.to_uppercase();
         assert!(!up.contains("REGEXP"), "{}", r.sql);
@@ -417,7 +419,7 @@ mod tests {
     }
 
     #[test]
-    fn keyword_raise_function_rewritten_to_null() {
+    fn subset_core__keyword_raise_function_rewritten_to_null() {
         let r = translate(
             "CREATE TRIGGER tr_bi BEFORE INSERT ON t BEGIN SELECT RAISE(ABORT, 'boom'); END",
         )
@@ -430,7 +432,7 @@ mod tests {
     // ── COLLATE stripping tests ──────────────────────────────────────────────
 
     #[test]
-    fn preprocess_strips_icu_root_in_order_by() {
+    fn compat_aliases__preprocess_strips_icu_root_in_order_by() {
         // This is the exact pattern that was causing parse failures in production
         let sql = "select metadata_items.id from metadata_items where metadata_items.library_section_id in (1) order by metadata_items.added_at desc, metadata_items.title_sort collate icu_root asc, metadata_items.id asc";
         let r = translate(sql).unwrap();
@@ -448,7 +450,7 @@ mod tests {
     }
 
     #[test]
-    fn preprocess_strips_icu_root_multiple_order_by_cols() {
+    fn compat_aliases__preprocess_strips_icu_root_multiple_order_by_cols() {
         // Multiple COLLATE icu_root in same ORDER BY (from production query)
         let sql = "select id from metadata_items order by added_at desc, grandparents.title_sort collate icu_root asc, metadata_items.title_sort collate icu_root asc, metadata_items.id asc";
         let r = translate(sql).unwrap();
@@ -461,7 +463,7 @@ mod tests {
     }
 
     #[test]
-    fn preprocess_nocase_handled_at_ast_level() {
+    fn compat_aliases__preprocess_nocase_handled_at_ast_level() {
         // COLLATE NOCASE is left by pre-parse stripping; the AST-level handler in
         // query.rs converts standalone NOCASE in ORDER BY to LOWER(expr).
         let sql = "SELECT * FROM t ORDER BY name COLLATE NOCASE ASC";
@@ -476,7 +478,7 @@ mod tests {
     }
 
     #[test]
-    fn preprocess_strips_rtrim_collation() {
+    fn compat_aliases__preprocess_strips_rtrim_collation() {
         let sql = "SELECT * FROM t ORDER BY name COLLATE RTRIM";
         let r = translate(sql).unwrap();
         assert!(
@@ -487,7 +489,7 @@ mod tests {
     }
 
     #[test]
-    fn preprocess_strips_binary_collation() {
+    fn compat_aliases__preprocess_strips_binary_collation() {
         let sql = "SELECT * FROM t ORDER BY name COLLATE BINARY";
         let r = translate(sql).unwrap();
         assert!(
@@ -498,7 +500,7 @@ mod tests {
     }
 
     #[test]
-    fn preprocess_strips_unicode_collation() {
+    fn compat_aliases__preprocess_strips_unicode_collation() {
         let sql = "SELECT * FROM t ORDER BY name COLLATE UNICODE";
         let r = translate(sql).unwrap();
         assert!(
@@ -509,7 +511,7 @@ mod tests {
     }
 
     #[test]
-    fn preprocess_collate_not_stripped_inside_string() {
+    fn compat_aliases__preprocess_collate_not_stripped_inside_string() {
         // A string literal containing 'COLLATE icu_root' must not be touched
         let sql = "SELECT 'COLLATE icu_root' FROM t";
         let r = translate(sql).unwrap();
@@ -521,7 +523,7 @@ mod tests {
     }
 
     #[test]
-    fn preprocess_long_query_collate_icu_parse_succeeds() {
+    fn compat_aliases__preprocess_long_query_collate_icu_parse_succeeds() {
         // Regression test: long query with COLLATE icu_root used to fail at parse time
         let sql = concat!(
             "select metadata_items.id from metadata_items ",
@@ -551,7 +553,7 @@ mod tests {
     }
 
     #[test]
-    fn preprocess_does_not_treat_backtick_limit_identifier_as_limit_clause() {
+    fn compat_aliases__preprocess_does_not_treat_backtick_limit_identifier_as_limit_clause() {
         let sql = "SELECT pqg.`id`,pqg.`limit`,pqg.`continuous` FROM play_queue_generators pqg WHERE pqg.`type`!=:C1";
         let out = preprocess(sql);
         let low = out.to_ascii_lowercase();

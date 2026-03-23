@@ -1388,18 +1388,19 @@ fn make_to_char(source: Expr, pg_fmt: &str) -> Expr {
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use crate::translate;
 
     #[test]
-    fn function_ifnull_to_coalesce() {
+    fn subset_core__function_ifnull_to_coalesce() {
         let r = translate("SELECT IFNULL(a, 0) FROM t").unwrap();
         assert!(r.sql.to_uppercase().contains("COALESCE"));
         assert!(!r.sql.to_uppercase().contains("IFNULL"));
     }
 
     #[test]
-    fn function_iif_to_case() {
+    fn subset_core__function_iif_to_case() {
         let r = translate("SELECT iif(a > 0, 'yes', 'no') FROM t").unwrap();
         assert!(r.sql.to_uppercase().contains("CASE WHEN"));
         assert!(r.sql.to_uppercase().contains("THEN"));
@@ -1408,53 +1409,53 @@ mod tests {
     }
 
     #[test]
-    fn function_typeof_to_pg_typeof() {
+    fn subset_core__function_typeof_to_pg_typeof() {
         let r = translate("SELECT typeof(x) FROM t").unwrap();
         assert!(r.sql.contains("pg_typeof") || r.sql.contains("PG_TYPEOF"));
     }
 
     #[test]
-    fn function_last_insert_rowid_to_lastval() {
+    fn subset_core__function_last_insert_rowid_to_lastval() {
         let r = translate("SELECT last_insert_rowid()").unwrap();
         assert!(r.sql.to_lowercase().contains("lastval()"));
         assert!(!r.sql.to_lowercase().contains("last_insert_rowid"));
     }
 
     #[test]
-    fn function_substr_to_substring() {
+    fn subset_core__function_substr_to_substring() {
         let r = translate("SELECT SUBSTR(a, 1, 5) FROM t").unwrap();
         assert!(r.sql.to_uppercase().contains("SUBSTRING"));
     }
 
     #[test]
-    fn function_length_preserved() {
+    fn subset_core__function_length_preserved() {
         let r = translate("SELECT LENGTH(name) FROM t").unwrap();
         assert!(r.sql.to_uppercase().contains("LENGTH"));
     }
 
     #[test]
-    fn function_instr_to_strpos() {
+    fn subset_core__function_instr_to_strpos() {
         let r = translate("SELECT instr(haystack, needle) FROM t").unwrap();
         assert!(r.sql.to_uppercase().contains("STRPOS"));
         assert!(!r.sql.to_lowercase().contains("instr"));
     }
 
     #[test]
-    fn function_strftime_epoch() {
+    fn subset_core__function_strftime_epoch() {
         let r = translate("SELECT strftime('%s', 'now') FROM t").unwrap();
         assert!(r.sql.to_uppercase().contains("EXTRACT"));
         assert!(r.sql.to_uppercase().contains("EPOCH"));
     }
 
     #[test]
-    fn function_unixepoch_now() {
+    fn subset_core__function_unixepoch_now() {
         let r = translate("SELECT unixepoch('now') FROM t").unwrap();
         assert!(r.sql.to_uppercase().contains("EXTRACT"));
         assert!(r.sql.to_uppercase().contains("EPOCH"));
     }
 
     #[test]
-    fn function_json_extract_bracket_single_quoted_key() {
+    fn subset_json__function_json_extract_bracket_single_quoted_key() {
         let r = translate("SELECT json_extract(extra_data, '$[\"pv:version\"]') FROM t").unwrap();
         let low = r.sql.to_lowercase();
         assert!(low.contains("jsonb_extract_path_text"), "{}", r.sql);
@@ -1462,7 +1463,7 @@ mod tests {
     }
 
     #[test]
-    fn function_json_extract_bracket_double_quoted_key_with_dot() {
+    fn subset_json__function_json_extract_bracket_double_quoted_key_with_dot() {
         let r = translate("SELECT json_extract(extra_data, '$[\"a.b\"][0]') FROM t").unwrap();
         let low = r.sql.to_lowercase();
         assert!(low.contains("jsonb_extract_path_text"), "{}", r.sql);
@@ -1471,7 +1472,7 @@ mod tests {
     }
 
     #[test]
-    fn function_json_extract_negative_index_supported() {
+    fn subset_json__function_json_extract_negative_index_supported() {
         let r = translate("SELECT json_extract(extra_data, '$.items[-1]') FROM t").unwrap();
         let low = r.sql.to_lowercase();
         assert!(low.contains("jsonb_extract_path_text"), "{}", r.sql);
@@ -1479,14 +1480,14 @@ mod tests {
     }
 
     #[test]
-    fn function_json_extract_wildcard_path_uses_jsonpath_fallback() {
+    fn subset_json__function_json_extract_wildcard_path_uses_jsonpath_fallback() {
         let r = translate("SELECT json_extract(extra_data, '$.items[*].id') FROM t").unwrap();
         let low = r.sql.to_lowercase();
         assert!(low.contains("jsonb_path_query_first"), "{}", r.sql);
     }
 
     #[test]
-    fn function_json_type_filter_path_uses_jsonpath_fallback() {
+    fn subset_json__function_json_type_filter_path_uses_jsonpath_fallback() {
         let r = translate("SELECT json_type(extra_data, '$.items ? (@.id > 1)') FROM t").unwrap();
         let low = r.sql.to_lowercase();
         assert!(low.contains("jsonb_path_query_first"), "{}", r.sql);
@@ -1494,7 +1495,7 @@ mod tests {
     }
 
     #[test]
-    fn function_json_array_length_wildcard_path_uses_jsonpath_fallback() {
+    fn subset_json__function_json_array_length_wildcard_path_uses_jsonpath_fallback() {
         let r = translate("SELECT json_array_length(extra_data, '$.items[*]') FROM t").unwrap();
         let low = r.sql.to_lowercase();
         assert!(low.contains("jsonb_path_query_first"), "{}", r.sql);
@@ -1502,7 +1503,7 @@ mod tests {
     }
 
     #[test]
-    fn function_json_remove_rewrites_to_jsonb_path_delete() {
+    fn subset_json__function_json_remove_rewrites_to_jsonb_path_delete() {
         let r = translate("SELECT json_remove(extra_data, '$.a.b') FROM t").unwrap();
         let low = r.sql.to_lowercase();
         assert!(low.contains("#-"), "{}", r.sql);
@@ -1511,7 +1512,7 @@ mod tests {
     }
 
     #[test]
-    fn function_json_patch_rewrites_to_jsonb_mergepatch() {
+    fn subset_json__function_json_patch_rewrites_to_jsonb_mergepatch() {
         let r = translate("SELECT json_patch(a, b) FROM t").unwrap();
         let low = r.sql.to_lowercase();
         assert!(low.contains("::jsonb"), "{}", r.sql);
@@ -1519,35 +1520,35 @@ mod tests {
     }
 
     #[test]
-    fn function_json_object_rewrites_to_jsonb_build_object() {
+    fn subset_json__function_json_object_rewrites_to_jsonb_build_object() {
         let r = translate("SELECT json_object('a', 1, 'b', 2)").unwrap();
         let low = r.sql.to_lowercase();
         assert!(low.contains("jsonb_build_object"), "{}", r.sql);
     }
 
     #[test]
-    fn function_json_array_rewrites_to_jsonb_build_array() {
+    fn subset_json__function_json_array_rewrites_to_jsonb_build_array() {
         let r = translate("SELECT json_array(1, 2, 3)").unwrap();
         let low = r.sql.to_lowercase();
         assert!(low.contains("jsonb_build_array"), "{}", r.sql);
     }
 
     #[test]
-    fn function_json_group_array_rewrites_to_jsonb_agg() {
+    fn subset_json__function_json_group_array_rewrites_to_jsonb_agg() {
         let r = translate("SELECT json_group_array(v) FROM t").unwrap();
         let low = r.sql.to_lowercase();
         assert!(low.contains("jsonb_agg"), "{}", r.sql);
     }
 
     #[test]
-    fn function_json_group_object_rewrites_to_jsonb_object_agg() {
+    fn subset_json__function_json_group_object_rewrites_to_jsonb_object_agg() {
         let r = translate("SELECT json_group_object(k, v) FROM t").unwrap();
         let low = r.sql.to_lowercase();
         assert!(low.contains("jsonb_object_agg"), "{}", r.sql);
     }
 
     #[test]
-    fn function_json_insert_is_conditional_on_missing_path() {
+    fn subset_json__function_json_insert_is_conditional_on_missing_path() {
         let r = translate("SELECT json_insert(extra_data, '$.status', 'ok') FROM t").unwrap();
         let low = r.sql.to_lowercase();
         assert!(low.contains("case"), "{}", r.sql);
@@ -1556,7 +1557,7 @@ mod tests {
     }
 
     #[test]
-    fn function_json_replace_is_conditional_on_existing_path() {
+    fn subset_json__function_json_replace_is_conditional_on_existing_path() {
         let r = translate("SELECT json_replace(extra_data, '$.status', 'ok') FROM t").unwrap();
         let low = r.sql.to_lowercase();
         assert!(low.contains("case"), "{}", r.sql);
@@ -1565,21 +1566,21 @@ mod tests {
     }
 
     #[test]
-    fn function_group_concat_rewrites_to_string_agg() {
+    fn subset_core__function_group_concat_rewrites_to_string_agg() {
         let r = translate("SELECT group_concat(v, '|') FROM t").unwrap();
         let low = r.sql.to_lowercase();
         assert!(low.contains("string_agg"), "{}", r.sql);
     }
 
     #[test]
-    fn function_printf_rewrites_to_format() {
+    fn subset_core__function_printf_rewrites_to_format() {
         let r = translate("SELECT printf('%s-%d', name, id) FROM t").unwrap();
         let low = r.sql.to_lowercase();
         assert!(low.contains("format"), "{}", r.sql);
     }
 
     #[test]
-    fn function_julianday_rewrites_to_epoch_math() {
+    fn subset_core__function_julianday_rewrites_to_epoch_math() {
         let r = translate("SELECT julianday('now')").unwrap();
         let low = r.sql.to_lowercase();
         assert!(low.contains("extract"), "{}", r.sql);
@@ -1588,7 +1589,7 @@ mod tests {
     }
 
     #[test]
-    fn function_total_rewrites_to_coalesce_sum() {
+    fn subset_core__function_total_rewrites_to_coalesce_sum() {
         let r = translate("SELECT total(v) FROM t").unwrap();
         let low = r.sql.to_lowercase();
         assert!(low.contains("coalesce"), "{}", r.sql);
