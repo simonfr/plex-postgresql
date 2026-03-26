@@ -77,7 +77,7 @@ gcc -shared -fPIC -fno-stack-protector \
     -std=c11 -D_GNU_SOURCE $ARCH_FLAGS $SANITIZE_FLAGS \
     -o db_interpose_pg.so \
     -Wl,--whole-archive "${LIBPLEX_PG_CORE_A}" -Wl,--no-whole-archive \
-    -Iinclude -Isrc -I/usr/local/pgsql/include -I/usr/include \
+    -Iinclude -I/usr/local/pgsql/include -I/usr/include \
     -L/usr/local/pgsql/lib -lpq \
     -lstdc++ \
     -ldl -lpthread \
