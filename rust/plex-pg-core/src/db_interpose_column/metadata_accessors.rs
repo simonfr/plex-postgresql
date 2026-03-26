@@ -66,12 +66,9 @@ pub(super) fn column_name_impl(p_stmt: *mut sqlite3_stmt, idx: c_int) -> *const 
                     )
                 };
                 use_orig = false;
-            } else if unsafe { (*pg_stmt).result.is_null() }
-                && unsafe { (*pg_stmt).col_names.is_null() }
-            {
-                use_orig = true;
             } else {
-                use_orig = false;
+                use_orig = unsafe { (*pg_stmt).result.is_null() }
+                    && unsafe { (*pg_stmt).col_names.is_null() };
             }
         }
         // Mutex released here.

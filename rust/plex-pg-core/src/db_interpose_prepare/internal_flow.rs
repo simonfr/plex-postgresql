@@ -62,11 +62,11 @@ fn current_stack_state() -> StackState {
         let stack_addr = unsafe { libc::pthread_get_stackaddr_np(self_thread) as *mut c_void };
         let stack_size = unsafe { libc::pthread_get_stacksize_np(self_thread) };
         let stack_used = (stack_addr as isize).wrapping_sub(current_stack).abs();
-        return StackState {
+        StackState {
             size: stack_size,
             used: stack_used,
             remaining: stack_size as isize - stack_used,
-        };
+        }
     }
 
     #[cfg(not(target_os = "macos"))]

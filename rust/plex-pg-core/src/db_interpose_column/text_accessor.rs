@@ -9,7 +9,7 @@ struct CachedTextState {
 struct LiveTextState {
     row: c_int,
     col_name: *const c_char,
-    oid: u32,
+    _oid: u32,
     oid_u: c_uint,
 }
 
@@ -65,7 +65,7 @@ unsafe fn load_cached_text_state(pg_stmt: *mut PgStmt, idx: c_int) -> Option<Cac
 /// to avoid deadlock with the LOGGER mutex.
 unsafe fn write_cached_text_output(
     pg_stmt: *mut PgStmt,
-    idx: c_int,
+    _idx: c_int,
     state: &CachedTextState,
 ) -> *const c_uchar {
     let str_len = libc::strlen(state.source_value) as usize;
@@ -131,7 +131,7 @@ unsafe fn load_live_text_state(pg_stmt: *mut PgStmt, idx: c_int) -> Option<LiveT
     Some(LiveTextState {
         row,
         col_name,
-        oid: oid_u as u32,
+        _oid: oid_u as u32,
         oid_u,
     })
 }
@@ -215,7 +215,7 @@ pub(super) fn column_text_impl(p_stmt: *mut sqlite3_stmt, idx: c_int) -> *const 
 
     // Hold mutex only for data extraction — no logging inside this block
     // to avoid ABBA deadlock between stmt mutex and LOGGER mutex.
-    let result = {
+    {
         let _guard = unsafe { PthreadMutexGuard::lock(&mut (*pg_stmt).mutex as *mut _) };
 
         if !unsafe { (*pg_stmt).cached_result }.is_null() {
@@ -238,8 +238,6 @@ pub(super) fn column_text_impl(p_stmt: *mut sqlite3_stmt, idx: c_int) -> *const 
                 }
             }
         }
-    };
+    }
     // Mutex released here.
-
-    result
 }

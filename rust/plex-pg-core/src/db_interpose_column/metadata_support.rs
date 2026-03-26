@@ -263,10 +263,8 @@ pub(crate) fn ensure_pg_result_for_metadata(pg_stmt: *mut PgStmt) -> bool {
         // resolve_column_tables acquires its own conn lock scope.
         drop(_conn_guard);
 
-        unsafe {
-            if rust_resolve_column_tables(pg_stmt, exec_conn) < 0 {
-                log_error("Failed to resolve column tables");
-            }
+        if rust_resolve_column_tables(pg_stmt, exec_conn) < 0 {
+            log_error("Failed to resolve column tables");
         }
 
         true

@@ -21,6 +21,7 @@ use next_result::{
 };
 use play_queue_trace::{trace_play_queue_params, trace_play_queue_result};
 pub use reexecution::rust_step_read_prepare_reexecution_state;
+#[allow(unused_imports)]
 use reexecution::{
     adopt_materialized_result_owner, should_clear_cross_thread_result, should_use_streaming,
 };

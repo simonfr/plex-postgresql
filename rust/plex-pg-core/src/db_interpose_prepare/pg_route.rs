@@ -153,7 +153,7 @@ pub(super) unsafe fn maybe_register_pg_stmt(
 
     let mut trans = if *have_pre_trans {
         *have_pre_trans = false;
-        std::mem::replace(pre_trans, std::mem::zeroed())
+        std::ptr::read(pre_trans)
     } else {
         sql_translate(z_sql)
     };

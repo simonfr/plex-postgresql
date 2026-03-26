@@ -12,6 +12,7 @@ use pg_path::exec_via_postgres;
 use std::cell::Cell;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
+#[allow(unused_imports)]
 use support::{orig_exec, parse_positive_returning_rowid};
 
 const SQLITE_OK: c_int = 0;

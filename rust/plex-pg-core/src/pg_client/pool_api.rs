@@ -72,6 +72,8 @@ pub extern "C" fn rust_pool_cleanup() {
     crate::pg_client_stmt_cache::clear_all_stmt_caches();
 }
 
+/// # Safety
+/// `db_path` must be a valid null-terminated C string.
 #[no_mangle]
 pub unsafe extern "C" fn rust_pool_get_connection(db_path: *const c_char) -> *mut c_void {
     pool_get_connection_inner(db_path)
@@ -147,6 +149,8 @@ pub extern "C" fn rust_find_registered_connection(db_handle: *const c_void) -> *
         .unwrap_or(std::ptr::null_mut())
 }
 
+/// # Safety
+/// `db_path` must be a valid null-terminated C string. `db_handle` must be a valid handle.
 #[no_mangle]
 pub unsafe extern "C" fn rust_pool_find_connection(
     db_handle: *const c_void,

@@ -105,7 +105,7 @@ struct ColumnTypeLogCtx {
 
 unsafe fn resolve_cached_column_type(
     pg_stmt: *mut PgStmt,
-    p_stmt: *mut sqlite3_stmt,
+    _p_stmt: *mut sqlite3_stmt,
     idx: c_int,
 ) -> (c_int, ColumnTypeLogCtx) {
     let mut ctx = ColumnTypeLogCtx {
@@ -208,7 +208,7 @@ unsafe fn load_live_type_state(pg_stmt: *mut PgStmt, idx: c_int) -> Option<LiveT
 
 unsafe fn resolve_live_column_type(
     pg_stmt: *mut PgStmt,
-    p_stmt: *mut sqlite3_stmt,
+    _p_stmt: *mut sqlite3_stmt,
     idx: c_int,
 ) -> (c_int, ColumnTypeLogCtx) {
     let mut ctx = ColumnTypeLogCtx {

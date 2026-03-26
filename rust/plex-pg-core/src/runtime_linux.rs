@@ -126,7 +126,10 @@ unsafe fn install_signal_handler(signum: c_int) {
 
 #[cfg(not(target_env = "musl"))]
 unsafe fn install_signal_handler(signum: c_int) {
-    libc::signal(signum, Some(db_interpose_common::common_signal_handler));
+    libc::signal(
+        signum,
+        db_interpose_common::common_signal_handler as libc::sighandler_t,
+    );
 }
 
 #[no_mangle]

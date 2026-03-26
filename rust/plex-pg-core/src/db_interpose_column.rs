@@ -46,6 +46,7 @@ use decltype_accessor::column_decltype_impl;
 use decltype_cache::{lookup_decltype_direct, lookup_sqlite_decltype};
 use fake_value_slot::allocate_fake_sqlite_value;
 use metadata_accessors::{column_count_impl, column_name_impl, data_count_impl};
+#[allow(unused_imports)]
 use metadata_support::{
     ensure_pg_result_for_metadata, mask_collection_metadata_type, set_metadata_result_state,
 };
@@ -80,10 +81,10 @@ const PMT_COLUMN_DECODED_BLOB_ALLOC: c_int = 4;
 
 static DECLTYPE_TEXT: &[u8] = b"TEXT\0";
 static DECLTYPE_DT_INTEGER_8: &[u8] = b"dt_integer(8)\0";
-static DECLTYPE_INTEGER: &[u8] = b"INTEGER\0";
-static DECLTYPE_BIGINT: &[u8] = b"BIGINT\0";
-static NEEDLE_TYPE: &[u8] = b"type\0";
-static NEEDLE_METADATA_TYPE: &[u8] = b"metadata_type\0";
+static _DECLTYPE_INTEGER: &[u8] = b"INTEGER\0";
+static _DECLTYPE_BIGINT: &[u8] = b"BIGINT\0";
+static _NEEDLE_TYPE: &[u8] = b"type\0";
+static _NEEDLE_METADATA_TYPE: &[u8] = b"metadata_type\0";
 
 thread_local! {
     static COLUMN_TEXT_BUFFERS: RefCell<Box<[[u8; TEXT_BUFFER_SIZE]; NUM_TEXT_BUFFERS]>> =

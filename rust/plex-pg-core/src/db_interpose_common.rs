@@ -37,6 +37,7 @@ pub use exception_runtime::{
     rust_common_signal_handler, rust_pg_exception_get_last_column,
     rust_pg_exception_get_last_query, rust_print_exception_info,
 };
+#[allow(unused_imports)]
 use exception_support::{
     env_usize, log_exception_object_dump, log_exception_string_scan, trace_last_query_enabled,
     write_box_line, BOX_BL, BOX_BR, BOX_H, BOX_INNER_WIDTH, BOX_ML, BOX_MR, BOX_TL, BOX_TR,

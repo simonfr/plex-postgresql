@@ -1,14 +1,14 @@
 use super::*;
 
 struct CachedScalarState {
-    row: c_int,
+    _row: c_int,
     col_name: *const c_char,
     value_ptr: *const c_char,
 }
 
 struct LiveScalarState {
-    row: c_int,
-    oid: u32,
+    _row: c_int,
+    _oid: u32,
     col_name: *const c_char,
     is_null: bool,
     value_buf: [c_char; 128],
@@ -18,8 +18,8 @@ struct LiveScalarState {
 impl LiveScalarState {
     fn new(row: c_int, oid: u32, col_name: *const c_char, is_null: bool) -> Self {
         Self {
-            row,
-            oid,
+            _row: row,
+            _oid: oid,
             col_name,
             is_null,
             value_buf: [0; 128],
@@ -49,7 +49,7 @@ unsafe fn load_cached_scalar_state(pg_stmt: *mut PgStmt, idx: c_int) -> Option<C
     };
 
     Some(CachedScalarState {
-        row,
+        _row: row,
         col_name,
         value_ptr,
     })
