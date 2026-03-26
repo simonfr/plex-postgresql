@@ -463,8 +463,12 @@ static INIT: extern "C" fn() = shim_init_wrapper;
 static FINI: extern "C" fn() = shim_cleanup_wrapper;
 
 // ────────────────────────────────────────────────────────────────────────────
-// LD_PRELOAD wrappers
+// LD_PRELOAD wrappers — excluded from test builds to avoid duplicate symbol
+// errors with rusqlite's bundled sqlite3.
 // ────────────────────────────────────────────────────────────────────────────
+#[cfg(not(test))]
+mod ld_preload_wrappers {
+use super::*;
 
 macro_rules! wrap_db_ret {
     ($name:ident, $ret:ty, $my:ident) => {
@@ -776,3 +780,5 @@ pub extern "C" fn sqlite3_create_collation_v2(
 pub extern "C" fn sqlite3_column_decltype(stmt: *mut sqlite3_stmt, idx: c_int) -> *const c_char {
     c_abi::my_sqlite3_column_decltype(stmt, idx)
 }
+
+} // mod ld_preload_wrappers
