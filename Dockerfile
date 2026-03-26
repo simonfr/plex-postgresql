@@ -33,10 +33,10 @@ RUN --mount=type=cache,target=/usr/local/rustup,sharing=locked \
     /usr/local/cargo/bin/rustup default stable
 
 # Copy source files
-COPY src/ src/
 COPY include/ include/
 COPY rust/ rust/
-COPY scripts/docker-build-shim.sh scripts/docker-build-shim.sh
+COPY Makefile Makefile
+COPY VERSION VERSION
 
 # Build PostgreSQL/libpq, Rust core, shim, and collect runtime libs in /libs
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
