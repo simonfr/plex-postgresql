@@ -12,15 +12,17 @@ Una librería shim pequeña que captura las llamadas SQLite de Plex y las envía
 | Linux (Docker) | ✅ Funciona (init y ejecución probados, no probado en producción) |
 | Linux (Nativo) | ⚠️ No probado |
 
-## Última versión: v1.0.0
+## Última versión: v1.1.0
 
-**Traductor SQL y módulos PG migrados a Rust** — toda la traducción SQLite-a-PostgreSQL ahora se ejecuta en el motor AST `sqlparser-rs` de Rust, y los 7 módulos backend están migrados a C/Rust híbrido.
+**Shim 100% Rust** — todo el código runtime C ha sido eliminado. El shim se compila enteramente desde Rust a una sola librería dinámica. El modelo de propiedad y el borrow checker de Rust previenen fugas de memoria, desbordamientos de buffer y errores use-after-free por diseño.
 
-- 🆕 **Traductor SQL en Rust:** 525 tests Rust, traducción AST completa reemplazando el traductor C
-- 🆕 **Módulos PG en Rust:** pg_config, pg_logging, pg_mem_telemetry, shim_alloc, pg_query_cache, pg_statement, pg_client
-- ✅ **1.075+ tests** (525 Rust + ~550 C en 25 suites)
+- 🆕 **Runtime completo en Rust:** toda la interposición, acceso a columnas, ejecución de consultas y gestión de conexiones en Rust
+- 🆕 **Arquitectura modular:** archivos monolíticos divididos en submódulos enfocados para mejor mantenibilidad
+- 🔧 **Correcciones de deadlock:** mutex de conexión recursivo, tiempos de bloqueo reducidos, logging lock-free como fallback
+- 🔧 **Seguridad de pila:** buffers thread-local asignados en heap para los hilos de 544K de Plex
+- ✅ **713 tests pasando** en suites unitarias, de integración y compatibilidad
 
-Descarga: https://github.com/cgnl/plex-postgresql/releases/tag/v1.0.0
+Descarga: https://github.com/cgnl/plex-postgresql/releases/tag/v1.1.0
 
 ## ¿Por qué PostgreSQL?
 
