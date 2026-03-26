@@ -69,6 +69,7 @@ pub use process_policy::{
     linux_handle_fork_child,
 };
 #[cfg(target_os = "linux")]
+#[allow(unused_imports)]
 pub(crate) use process_policy::{
     linux_process_name_is_primary, linux_process_name_requires_passthrough,
 };

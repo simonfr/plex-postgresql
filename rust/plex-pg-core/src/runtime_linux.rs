@@ -5,11 +5,13 @@ use std::os::raw::{c_char, c_int, c_void};
 use std::ptr;
 use std::sync::atomic::{AtomicI32, Ordering};
 
+#[allow(unused_imports)]
 use crate::c_abi;
 use crate::db_interpose_common;
 use crate::db_interpose_common::stderr_ptr;
 use crate::env_utils;
 use crate::exception_what::pg_exception_install_terminate_logger;
+#[allow(unused_imports)]
 use crate::ffi_types::{sqlite3, sqlite3_stmt, sqlite3_value};
 use crate::runtime_common::{handle_exception_with_tls, log_shim_unloading, shim_init_common};
 
@@ -195,7 +197,7 @@ pub unsafe extern "C" fn sigaction(
         }
         let mut sa: libc::sigaction = std::mem::zeroed();
         sa.sa_sigaction =
-            std::mem::transmute::<extern "C" fn(c_int), usize>(db_interpose_common::common_signal_handler as extern "C" fn(c_int));
+            db_interpose_common::common_signal_handler as extern "C" fn(c_int) as usize;
         libc::sigemptyset(&mut sa.sa_mask);
         sa.sa_flags = 0;
         return orig(signum, &sa, ptr::null_mut());

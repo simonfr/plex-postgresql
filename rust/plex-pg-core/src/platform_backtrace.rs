@@ -71,7 +71,7 @@ unsafe fn collect_frames(frames: &mut [*mut c_void]) -> usize {
         iterations += 1;
 
         let fp_addr = fp as usize;
-        if fp_addr < 0x1000 || fp_addr > 0x0000_ffff_ffff_ffff {
+        if !(0x1000..=0x0000_ffff_ffff_ffff).contains(&fp_addr) {
             break;
         }
 
@@ -211,9 +211,11 @@ fn load_memory_map() -> Vec<MapEntry> {
         };
 
         let path = parts.last().unwrap_or("[anonymous]");
-        let mut entry = MapEntry::default();
-        entry.start = start;
-        entry.end = end;
+        let mut entry = MapEntry {
+            start,
+            end,
+            ..MapEntry::default()
+        };
 
         let bytes = path.as_bytes();
         let mut i = 0usize;

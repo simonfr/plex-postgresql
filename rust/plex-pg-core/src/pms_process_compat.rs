@@ -466,7 +466,7 @@ pub unsafe extern "C" fn syscall(
 
     if let Some(op) = syscall_log_label(number) {
         let err = if rc < 0 { *libc::__errno_location() } else { 0 };
-        maybe_log_event(op, rc as i64, err);
+        maybe_log_event(op, rc, err);
     }
 
     rc
