@@ -13,7 +13,7 @@ macro_rules! load_sym {
 }
 
 pub(super) unsafe fn read_option<T: Copy>(slot: *const Option<T>) -> Option<T> {
-    *slot
+    ptr::read(slot)
 }
 
 #[no_mangle]
@@ -437,7 +437,7 @@ pub extern "C" fn rust_shim_ensure_ready() -> c_int {
     std::sync::atomic::fence(Ordering::SeqCst);
 
     unsafe {
-        if shim_initialized == 0 {
+        if ptr::read(ptr::addr_of!(shim_initialized)) == 0 {
             libc::fprintf(
                 stderr_ptr(),
                 b"[SHIM] WARNING: shim_ensure_ready called before shim_initialized!\n\0".as_ptr()
@@ -459,22 +459,23 @@ pub extern "C" fn rust_shim_ensure_ready() -> c_int {
             libc::fflush(stderr_ptr());
 
             if cfg!(target_os = "macos") {
-                if !sqlite_handle.is_null() {
+                let sh = ptr::read(ptr::addr_of!(sqlite_handle));
+                if !sh.is_null() {
                     load_sym!(
                         orig_sqlite3_open,
-                        sqlite_handle,
+                        sh,
                         b"sqlite3_open\0",
                         Sqlite3OpenFn
                     );
                     load_sym!(
                         orig_sqlite3_prepare_v2,
-                        sqlite_handle,
+                        sh,
                         b"sqlite3_prepare_v2\0",
                         Sqlite3PrepareFn
                     );
                     load_sym!(
                         orig_sqlite3_step,
-                        sqlite_handle,
+                        sh,
                         b"sqlite3_step\0",
                         Sqlite3StmtToIntFn
                     );

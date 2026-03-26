@@ -26,13 +26,13 @@ unsafe extern "C" fn my_cxa_throw(
     let (handled, _should_call_original) = handle_exception_with_tls(thrown_exception, tinfo);
 
     if handled == 0 {
-        if let Some(orig) = ORIG_CXA_THROW {
+        if let Some(orig) = std::ptr::read(std::ptr::addr_of!(ORIG_CXA_THROW)) {
             orig(thrown_exception, tinfo, dest);
         }
         libc::abort();
     }
 
-    if let Some(orig) = ORIG_CXA_THROW {
+    if let Some(orig) = std::ptr::read(std::ptr::addr_of!(ORIG_CXA_THROW)) {
         orig(thrown_exception, tinfo, dest);
     }
     libc::abort();
@@ -527,7 +527,7 @@ unsafe fn load_sqlite_fallback() {
     ];
 
     for path in sqlite_paths.iter() {
-        if !db_interpose_common::sqlite_handle.is_null() {
+        if !std::ptr::read(std::ptr::addr_of!(db_interpose_common::sqlite_handle)).is_null() {
             break;
         }
         let handle = libc::dlopen(
@@ -535,7 +535,7 @@ unsafe fn load_sqlite_fallback() {
             libc::RTLD_LAZY | libc::RTLD_LOCAL,
         );
         if !handle.is_null() {
-            db_interpose_common::sqlite_handle = handle;
+            std::ptr::write(std::ptr::addr_of_mut!(db_interpose_common::sqlite_handle), handle);
             let _ = libc::fprintf(
                 stderr_ptr(),
                 b"[SHIM_INIT] Loaded SQLite fallback from: %s\n\0".as_ptr() as *const c_char,
@@ -544,7 +544,8 @@ unsafe fn load_sqlite_fallback() {
         }
     }
 
-    if !db_interpose_common::sqlite_handle.is_null()
+    let sqlite_h = std::ptr::read(std::ptr::addr_of!(db_interpose_common::sqlite_handle));
+    if !sqlite_h.is_null()
         && (read_option(std::ptr::addr_of!(
             db_interpose_common::shim_sqlite3_prepare_v2
         ))
@@ -558,7 +559,7 @@ unsafe fn load_sqlite_fallback() {
             stderr_ptr(),
             b"[SHIM_INIT] Fishhook incomplete, using dlsym fallback\n\0".as_ptr() as *const c_char,
         );
-        db_interpose_common::common_load_sqlite_symbols(db_interpose_common::sqlite_handle);
+        db_interpose_common::common_load_sqlite_symbols(sqlite_h);
     }
 }
 
@@ -572,22 +573,33 @@ pub extern "C" fn ensure_real_sqlite_loaded() {
         {
             return;
         }
-        if db_interpose_common::sqlite_handle.is_null() {
+        let sqlite_h = std::ptr::read(std::ptr::addr_of!(db_interpose_common::sqlite_handle));
+        if sqlite_h.is_null() {
             load_sqlite_fallback();
         }
-        if !db_interpose_common::sqlite_handle.is_null() {
-            db_interpose_common::shim_sqlite3_prepare_v2 = Some(std::mem::transmute(libc::dlsym(
-                db_interpose_common::sqlite_handle,
-                b"sqlite3_prepare_v2\0".as_ptr() as *const c_char,
-            )));
-            db_interpose_common::shim_sqlite3_errmsg = Some(std::mem::transmute(libc::dlsym(
-                db_interpose_common::sqlite_handle,
-                b"sqlite3_errmsg\0".as_ptr() as *const c_char,
-            )));
-            db_interpose_common::shim_sqlite3_errcode = Some(std::mem::transmute(libc::dlsym(
-                db_interpose_common::sqlite_handle,
-                b"sqlite3_errcode\0".as_ptr() as *const c_char,
-            )));
+        let sqlite_h = std::ptr::read(std::ptr::addr_of!(db_interpose_common::sqlite_handle));
+        if !sqlite_h.is_null() {
+            std::ptr::write(
+                std::ptr::addr_of_mut!(db_interpose_common::shim_sqlite3_prepare_v2),
+                Some(std::mem::transmute(libc::dlsym(
+                    sqlite_h,
+                    b"sqlite3_prepare_v2\0".as_ptr() as *const c_char,
+                ))),
+            );
+            std::ptr::write(
+                std::ptr::addr_of_mut!(db_interpose_common::shim_sqlite3_errmsg),
+                Some(std::mem::transmute(libc::dlsym(
+                    sqlite_h,
+                    b"sqlite3_errmsg\0".as_ptr() as *const c_char,
+                ))),
+            );
+            std::ptr::write(
+                std::ptr::addr_of_mut!(db_interpose_common::shim_sqlite3_errcode),
+                Some(std::mem::transmute(libc::dlsym(
+                    sqlite_h,
+                    b"sqlite3_errcode\0".as_ptr() as *const c_char,
+                ))),
+            );
         }
     }
 }
@@ -633,7 +645,7 @@ unsafe extern "C" fn shim_init() {
 }
 
 unsafe extern "C" fn shim_cleanup() {
-    if db_interpose_common::shim_initialized == 0 {
+    if std::ptr::read(std::ptr::addr_of!(db_interpose_common::shim_initialized)) == 0 {
         return;
     }
 

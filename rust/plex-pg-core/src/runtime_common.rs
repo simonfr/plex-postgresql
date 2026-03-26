@@ -81,7 +81,7 @@ pub(crate) fn shim_init_common<F, G, H, K>(
     after_modules();
 
     unsafe {
-        crate::db_interpose_common::shim_initialized = 1;
+        std::ptr::write(std::ptr::addr_of_mut!(crate::db_interpose_common::shim_initialized), 1);
     }
 
     after_ready();

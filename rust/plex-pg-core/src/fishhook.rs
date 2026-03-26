@@ -397,7 +397,7 @@ unsafe fn rebind_symbols_for_image(
 
 extern "C" fn rebind_symbols_for_image_callback(header: *const MachHeader, slide: isize) {
     unsafe {
-        rebind_symbols_for_image(REBINDINGS_HEAD, header, slide);
+        rebind_symbols_for_image(ptr::read(ptr::addr_of!(REBINDINGS_HEAD)), header, slide);
     }
 }
 
@@ -431,14 +431,15 @@ pub unsafe fn rebind_symbols(rebindings: &mut [Rebinding]) -> c_int {
         return retval;
     }
 
-    if !REBINDINGS_HEAD.is_null() && (*REBINDINGS_HEAD).next.is_null() {
+    let head = ptr::read(ptr::addr_of!(REBINDINGS_HEAD));
+    if !head.is_null() && (*head).next.is_null() {
         _dyld_register_func_for_add_image(rebind_symbols_for_image_callback);
     } else {
         let count = _dyld_image_count();
         for i in 0..count {
             let header = _dyld_get_image_header(i);
             let slide = _dyld_get_image_vmaddr_slide(i);
-            rebind_symbols_for_image(REBINDINGS_HEAD, header, slide);
+            rebind_symbols_for_image(ptr::read(ptr::addr_of!(REBINDINGS_HEAD)), header, slide);
         }
     }
 

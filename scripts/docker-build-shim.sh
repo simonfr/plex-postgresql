@@ -55,7 +55,7 @@ cd ../../bin/pg_config && make && make install
 echo "=== Building Rust core ==="
 cd /build/rust/plex-pg-core
 : "${CARGO_TARGET_DIR:=/build/target}"
-cargo +stable build --release --lib
+cargo +stable build --release --lib --features interpose
 
 echo "=== Building shim .so ==="
 cd /build

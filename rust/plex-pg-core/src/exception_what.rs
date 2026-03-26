@@ -330,7 +330,7 @@ mod impl_unix {
                 libc::free(demangled as *mut c_void);
             }
 
-            if let Some(prev) = PREV_TERMINATE {
+            if let Some(prev) = ptr::read(ptr::addr_of!(PREV_TERMINATE)) {
                 prev();
             }
             libc::abort();
@@ -342,7 +342,7 @@ mod impl_unix {
         unsafe {
             if let Some(set_term) = cxa_set_terminate() {
                 let prev = set_term(rust_terminate_logger);
-                PREV_TERMINATE = Some(prev);
+                ptr::write(ptr::addr_of_mut!(PREV_TERMINATE), Some(prev));
                 let _ = libc::fprintf(
                     stderr_ptr(),
                     b"[EXC_TERMINATE] __cxa_set_terminate installed\n\0".as_ptr() as *const c_char,

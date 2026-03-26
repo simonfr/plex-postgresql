@@ -52,15 +52,15 @@ fn exception_catcher_enabled() -> bool {
 }
 
 unsafe fn resolve_cxa_throw() -> Option<CxaThrowFn> {
-    if let Some(f) = ORIG_CXA_THROW {
+    if let Some(f) = ptr::read(ptr::addr_of!(ORIG_CXA_THROW)) {
         return Some(f);
     }
     let sym = libc::dlsym(libc::RTLD_NEXT, b"__cxa_throw\0".as_ptr() as *const c_char);
     if sym.is_null() {
         return None;
     }
-    let f: CxaThrowFn = std::mem::transmute(sym);
-    ORIG_CXA_THROW = Some(f);
+    let f: CxaThrowFn = std::mem::transmute::<*mut c_void, CxaThrowFn>(sym);
+    ptr::write(ptr::addr_of_mut!(ORIG_CXA_THROW), Some(f));
     Some(f)
 }
 
@@ -112,7 +112,7 @@ pub unsafe extern "C" fn __cxa_throw(
     let (handled, _should_call_original) = handle_exception_with_tls(thrown_exception, tinfo);
 
     if handled == 0 {
-        return orig(thrown_exception, tinfo, dest);
+        orig(thrown_exception, tinfo, dest);
     }
 
     orig(thrown_exception, tinfo, dest);
@@ -120,15 +120,16 @@ pub unsafe extern "C" fn __cxa_throw(
 
 #[cfg(target_env = "musl")]
 unsafe fn install_signal_handler(signum: c_int) {
-    let handler = db_interpose_common::common_signal_handler as libc::sighandler_t;
-    libc::signal(signum, handler);
+    let handler: extern "C" fn(c_int) = db_interpose_common::common_signal_handler;
+    libc::signal(signum, handler as libc::sighandler_t);
 }
 
 #[cfg(not(target_env = "musl"))]
 unsafe fn install_signal_handler(signum: c_int) {
+    let handler: extern "C" fn(c_int) = db_interpose_common::common_signal_handler;
     libc::signal(
         signum,
-        db_interpose_common::common_signal_handler as libc::sighandler_t,
+        handler as libc::sighandler_t,
     );
 }
 
@@ -141,16 +142,16 @@ pub unsafe extern "C" fn sigaction(
     act: *const libc::sigaction,
     oldact: *mut libc::sigaction,
 ) -> c_int {
-    if ORIG_SIGACTION.is_none() {
+    if ptr::read(ptr::addr_of!(ORIG_SIGACTION)).is_none() {
         let sym = libc::dlsym(libc::RTLD_NEXT, b"sigaction\0".as_ptr() as *const c_char);
         if !sym.is_null() {
-            ORIG_SIGACTION = Some(std::mem::transmute(sym));
+            ptr::write(ptr::addr_of_mut!(ORIG_SIGACTION), Some(std::mem::transmute::<*mut c_void, SigactionFn>(sym)));
         } else {
             return -1;
         }
     }
 
-    let Some(orig) = ORIG_SIGACTION else {
+    let Some(orig) = ptr::read(ptr::addr_of!(ORIG_SIGACTION)) else {
         return -1;
     };
 
@@ -179,7 +180,7 @@ pub unsafe extern "C" fn sigaction(
             || signum == libc::SIGFPE
             || signum == libc::SIGILL
             || {
-                #[cfg(any(target_os = "linux"))]
+                #[cfg(target_os = "linux")]
                 {
                     signum == libc::SIGBUS
                 }
@@ -194,7 +195,7 @@ pub unsafe extern "C" fn sigaction(
         }
         let mut sa: libc::sigaction = std::mem::zeroed();
         sa.sa_sigaction =
-            std::mem::transmute(db_interpose_common::common_signal_handler as extern "C" fn(c_int));
+            std::mem::transmute::<extern "C" fn(c_int), usize>(db_interpose_common::common_signal_handler as extern "C" fn(c_int));
         libc::sigemptyset(&mut sa.sa_mask);
         sa.sa_flags = 0;
         return orig(signum, &sa, ptr::null_mut());
@@ -224,7 +225,7 @@ unsafe fn load_original_functions() {
                 b"[SHIM_INIT] Loaded real SQLite from %s\n\0".as_ptr() as *const c_char,
                 path.as_ptr() as *const c_char,
             );
-            REAL_SQLITE_HANDLE = handle;
+            ptr::write(ptr::addr_of_mut!(REAL_SQLITE_HANDLE), handle);
             break;
         }
     }
@@ -248,12 +249,21 @@ unsafe fn load_original_functions() {
 #[no_mangle]
 pub extern "C" fn ensure_real_sqlite_loaded() {
     unsafe {
-        if db_interpose_common::shim_sqlite3_prepare_v2.is_some() {
+        if ptr::read(ptr::addr_of!(db_interpose_common::shim_sqlite3_prepare_v2)).is_some() {
             return;
         }
-        db_interpose_common::shim_sqlite3_prepare_v2 = db_interpose_common::orig_sqlite3_prepare_v2;
-        db_interpose_common::shim_sqlite3_errmsg = db_interpose_common::orig_sqlite3_errmsg;
-        db_interpose_common::shim_sqlite3_errcode = db_interpose_common::orig_sqlite3_errcode;
+        ptr::write(
+            ptr::addr_of_mut!(db_interpose_common::shim_sqlite3_prepare_v2),
+            ptr::read(ptr::addr_of!(db_interpose_common::orig_sqlite3_prepare_v2)),
+        );
+        ptr::write(
+            ptr::addr_of_mut!(db_interpose_common::shim_sqlite3_errmsg),
+            ptr::read(ptr::addr_of!(db_interpose_common::orig_sqlite3_errmsg)),
+        );
+        ptr::write(
+            ptr::addr_of_mut!(db_interpose_common::shim_sqlite3_errcode),
+            ptr::read(ptr::addr_of!(db_interpose_common::orig_sqlite3_errcode)),
+        );
     }
 }
 
@@ -279,9 +289,9 @@ unsafe extern "C" fn shim_init() {
                     );
                     FORCE_IGNORE_SIGCHLD.store(0, Ordering::Relaxed);
                     INTERCEPT_SIGACTION.store(0, Ordering::Relaxed);
-                    db_interpose_common::shim_passthrough_only = 1;
+                    ptr::write(ptr::addr_of_mut!(db_interpose_common::shim_passthrough_only), 1);
                     load_original_functions();
-                    db_interpose_common::shim_initialized = 1;
+                    ptr::write(ptr::addr_of_mut!(db_interpose_common::shim_initialized), 1);
                     let base_c = CString::new(base_str).unwrap_or_default();
                     let _ = libc::fprintf(
                         stderr_ptr(),
@@ -316,8 +326,8 @@ unsafe extern "C" fn shim_init() {
 
             load_original_functions();
 
-            if db_interpose_common::orig_sqlite3_open.is_none()
-                || db_interpose_common::orig_sqlite3_prepare_v2.is_none()
+            if ptr::read(ptr::addr_of!(db_interpose_common::orig_sqlite3_open)).is_none()
+                || ptr::read(ptr::addr_of!(db_interpose_common::orig_sqlite3_prepare_v2)).is_none()
             {
                 let _ = libc::fprintf(
                     stderr_ptr(),
@@ -343,7 +353,7 @@ unsafe extern "C" fn shim_init() {
                 install_signal_handler(libc::SIGABRT);
                 install_signal_handler(libc::SIGFPE);
                 install_signal_handler(libc::SIGILL);
-                #[cfg(any(target_os = "linux"))]
+                #[cfg(target_os = "linux")]
                 {
                     install_signal_handler(libc::SIGBUS);
                 }
@@ -356,15 +366,15 @@ unsafe extern "C" fn shim_init() {
                 let _ = libc::fflush(stderr_ptr());
             }
 
-            if ORIG_SIGACTION.is_none() {
+            if ptr::read(ptr::addr_of!(ORIG_SIGACTION)).is_none() {
                 let sym = libc::dlsym(libc::RTLD_NEXT, b"sigaction\0".as_ptr() as *const c_char);
                 if !sym.is_null() {
-                    ORIG_SIGACTION = Some(std::mem::transmute(sym));
+                    ptr::write(ptr::addr_of_mut!(ORIG_SIGACTION), Some(std::mem::transmute::<*mut c_void, SigactionFn>(sym)));
                 }
             }
 
             if FORCE_IGNORE_SIGCHLD.load(Ordering::Relaxed) != 0 {
-                if let Some(orig) = ORIG_SIGACTION {
+                if let Some(orig) = ptr::read(ptr::addr_of!(ORIG_SIGACTION)) {
                     let mut sa: libc::sigaction = std::mem::zeroed();
                     sa.sa_sigaction = libc::SIG_IGN;
                     libc::sigemptyset(&mut sa.sa_mask);
@@ -439,7 +449,7 @@ unsafe extern "C" fn shim_init() {
 }
 
 unsafe extern "C" fn shim_cleanup() {
-    if db_interpose_common::shim_initialized == 0 {
+    if ptr::read(ptr::addr_of!(db_interpose_common::shim_initialized)) == 0 {
         return;
     }
     log_shim_unloading("Linux");
@@ -463,10 +473,12 @@ static INIT: extern "C" fn() = shim_init_wrapper;
 static FINI: extern "C" fn() = shim_cleanup_wrapper;
 
 // ────────────────────────────────────────────────────────────────────────────
-// LD_PRELOAD wrappers — excluded from test builds to avoid duplicate symbol
-// errors with rusqlite's bundled sqlite3.
+// LD_PRELOAD wrappers — only compiled when the `interpose` feature is active.
+// This avoids duplicate-symbol errors with rusqlite's bundled sqlite3 in
+// test targets AND bin targets.  The shared-library (.so) build enables
+// `interpose` explicitly via `--features interpose`.
 // ────────────────────────────────────────────────────────────────────────────
-#[cfg(not(test))]
+#[cfg(feature = "interpose")]
 mod ld_preload_wrappers {
 use super::*;
 

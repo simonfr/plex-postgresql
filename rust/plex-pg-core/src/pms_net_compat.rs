@@ -17,7 +17,7 @@ static PMS_NET_COMPAT_LOG_BUDGET: AtomicI32 = AtomicI32::new(0);
 const DEFAULT_LOG_BUDGET: i32 = 16;
 
 unsafe fn resolve_setsockopt() -> Option<SetsockoptFn> {
-    if let Some(f) = ORIG_SETSOCKOPT {
+    if let Some(f) = std::ptr::read(std::ptr::addr_of!(ORIG_SETSOCKOPT)) {
         return Some(f);
     }
 
@@ -26,8 +26,8 @@ unsafe fn resolve_setsockopt() -> Option<SetsockoptFn> {
         return None;
     }
 
-    let f: SetsockoptFn = mem::transmute(sym);
-    ORIG_SETSOCKOPT = Some(f);
+    let f: SetsockoptFn = mem::transmute::<*mut c_void, SetsockoptFn>(sym);
+    std::ptr::write(std::ptr::addr_of_mut!(ORIG_SETSOCKOPT), Some(f));
     Some(f)
 }
 

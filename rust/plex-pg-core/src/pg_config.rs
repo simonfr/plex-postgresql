@@ -330,7 +330,7 @@ fn init_config_once() {
         };
         let _ = pg_config_load(&mut cfg as *mut PgConnConfig);
         unsafe {
-            GLOBAL_CONFIG = cfg;
+            std::ptr::write(std::ptr::addr_of_mut!(GLOBAL_CONFIG), cfg);
         }
 
         let cfg_ptr = std::ptr::addr_of!(GLOBAL_CONFIG);

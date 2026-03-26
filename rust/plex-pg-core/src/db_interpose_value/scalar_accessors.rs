@@ -96,7 +96,7 @@ pub(super) fn value_int64_impl(p_val: *mut sqlite3_value) -> i64 {
             helpers_result_ptr((*ctx.pg_stmt).result),
             ctx.row,
             ctx.col,
-        ) as i64
+        )
     }
 }
 

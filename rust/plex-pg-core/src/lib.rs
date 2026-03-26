@@ -1,4 +1,5 @@
 #![allow(
+    static_mut_refs,
     clippy::cmp_null,
     clippy::collapsible_match,
     clippy::collapsible_else_if,

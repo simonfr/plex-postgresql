@@ -42,7 +42,7 @@ static PMS_CHILD_ENV_SCRUB_LOG_BUDGET: AtomicI32 = AtomicI32::new(0);
 static SELF_LD_PRELOAD: OnceLock<Option<CString>> = OnceLock::new();
 
 const DEFAULT_LOG_BUDGET: i32 = 16;
-const PRIVATE_LIB_DIR: &str = "/usr/local/lib/plex-postgresql";
+const _PRIVATE_LIB_DIR: &str = "/usr/local/lib/plex-postgresql";
 const SHIM_SO_TOKEN: &str = "db_interpose_pg.so";
 // Only the dedicated scanner binary needs shim reinjection in child execs.
 // Reinjecting into self-spawned "Plex Media Server" children causes Plex to
@@ -51,7 +51,7 @@ const KEEP_PROCESS_MARKERS: [&str; 1] = ["Plex Media Scanner"];
 const LD_PRELOAD_ENV: &[u8] = b"LD_PRELOAD\0";
 
 struct FilteredEnv {
-    storage: Vec<CString>,
+    _storage: Vec<CString>,
     ptrs: Vec<*const c_char>,
     removed: usize,
     modified: usize,
@@ -115,11 +115,11 @@ pub fn scrub_current_process_preload() {
     }
 }
 
-unsafe fn resolve_symbol<T>(slot: &mut Option<T>, name: &'static [u8]) -> Option<T>
+unsafe fn resolve_symbol<T>(slot: *mut Option<T>, name: &'static [u8]) -> Option<T>
 where
     T: Copy,
 {
-    if let Some(f) = *slot {
+    if let Some(f) = ptr::read(slot) {
         return Some(f);
     }
 
@@ -129,28 +129,28 @@ where
     }
 
     let f: T = mem::transmute_copy(&sym);
-    *slot = Some(f);
+    ptr::write(slot, Some(f));
     Some(f)
 }
 
 unsafe fn resolve_execve() -> Option<ExecveFn> {
-    resolve_symbol(&mut ORIG_EXECVE, b"execve\0")
+    resolve_symbol(ptr::addr_of_mut!(ORIG_EXECVE), b"execve\0")
 }
 
 unsafe fn resolve_execvp() -> Option<ExecvpFn> {
-    resolve_symbol(&mut ORIG_EXECVP, b"execvp\0")
+    resolve_symbol(ptr::addr_of_mut!(ORIG_EXECVP), b"execvp\0")
 }
 
 unsafe fn resolve_execvpe() -> Option<ExecvpeFn> {
-    resolve_symbol(&mut ORIG_EXECVPE, b"execvpe\0")
+    resolve_symbol(ptr::addr_of_mut!(ORIG_EXECVPE), b"execvpe\0")
 }
 
 unsafe fn resolve_posix_spawn() -> Option<PosixSpawnFn> {
-    resolve_symbol(&mut ORIG_POSIX_SPAWN, b"posix_spawn\0")
+    resolve_symbol(ptr::addr_of_mut!(ORIG_POSIX_SPAWN), b"posix_spawn\0")
 }
 
 unsafe fn resolve_posix_spawnp() -> Option<PosixSpawnFn> {
-    resolve_symbol(&mut ORIG_POSIX_SPAWNP, b"posix_spawnp\0")
+    resolve_symbol(ptr::addr_of_mut!(ORIG_POSIX_SPAWNP), b"posix_spawnp\0")
 }
 
 unsafe fn set_errno(err: c_int) {
@@ -337,7 +337,7 @@ unsafe fn build_scrubbed_env(envp: *const *const c_char) -> Option<FilteredEnv> 
 
     let (storage, ptrs) = build_cstring_env(&rewritten)?;
     Some(FilteredEnv {
-        storage,
+        _storage: storage,
         ptrs,
         removed,
         modified,
@@ -351,7 +351,7 @@ unsafe fn build_kept_env(envp: *const *const c_char) -> Option<FilteredEnv> {
     let rewritten = inject_ld_preload_entry(&entries, &preload.to_string_lossy())?;
     let (storage, ptrs) = build_cstring_env(&rewritten)?;
     Some(FilteredEnv {
-        storage,
+        _storage: storage,
         ptrs,
         removed: 0,
         modified: 0,
