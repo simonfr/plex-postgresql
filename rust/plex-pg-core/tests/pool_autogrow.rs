@@ -57,10 +57,26 @@ fn autogrow_and_shrink_phases() {
     pool.shrink_to(2);
     assert_eq!(pool.size, 2);
 
-    // Phase 3: grow again for new demand
-    for _ in 0..3 {
-        assert!(pool.acquire());
-    }
+    // Phase 3: grow again for new demand (pool.used=2, pool.size=2)
+    // First acquire fits, next two trigger auto-grow
+    assert!(pool.acquire()); // used=3, size grows to 3
     assert_eq!(pool.size, 3);
     assert_eq!(pool.used, 3);
+
+    // Phase 4: release all
+    for _ in 0..3 {
+        pool.release();
+    }
+    assert_eq!(pool.used, 0);
+    pool.shrink_to(1);
+    assert_eq!(pool.size, 1);
+
+    // Phase 5: grow from minimum to max
+    for _ in 0..5 {
+        assert!(pool.acquire());
+    }
+    assert_eq!(pool.size, 5);
+    assert_eq!(pool.used, 5);
+    // max reached — next acquire fails
+    assert!(!pool.acquire());
 }
