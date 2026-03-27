@@ -71,11 +71,14 @@ impl PreparedEntry {
     }
 }
 
-static FINALIZED_RING: LazyLock<Mutex<Box<[FinalizedEntry; FINALIZED_RING_SIZE]>>> =
-    LazyLock::new(|| Mutex::new(Box::new([FinalizedEntry::empty(); FINALIZED_RING_SIZE])));
+// Use vec![].into_boxed_slice() to allocate directly on the heap.
+// Box::new([T; N]) would place the array on the stack first (~560KB for
+// FinalizedEntry × 2048), exceeding Plex's 544K worker thread stacks.
+static FINALIZED_RING: LazyLock<Mutex<Box<[FinalizedEntry]>>> =
+    LazyLock::new(|| Mutex::new(vec![FinalizedEntry::empty(); FINALIZED_RING_SIZE].into_boxed_slice()));
 
-static PREPARED_RING: LazyLock<Mutex<Box<[PreparedEntry; PREPARED_RING_SIZE]>>> =
-    LazyLock::new(|| Mutex::new(Box::new([PreparedEntry::empty(); PREPARED_RING_SIZE])));
+static PREPARED_RING: LazyLock<Mutex<Box<[PreparedEntry]>>> =
+    LazyLock::new(|| Mutex::new(vec![PreparedEntry::empty(); PREPARED_RING_SIZE].into_boxed_slice()));
 
 pub(super) fn skip_clear_bindings_on_finalized() -> bool {
     let cached = SKIP_CLEAR_BINDINGS_CACHED.load(Ordering::Relaxed);
