@@ -12,7 +12,7 @@ Una librería shim pequeña que captura las llamadas SQLite de Plex y las envía
 | Linux (Docker) | ✅ Funciona (init y ejecución probados, no probado en producción) |
 | Linux (Nativo) | ⚠️ No probado |
 
-## Última versión: v1.1.0
+## Última versión: v1.2.0
 
 **Shim 100% Rust** — todo el código runtime C ha sido eliminado. El shim se compila enteramente desde Rust a una sola librería dinámica. El modelo de propiedad y el borrow checker de Rust previenen fugas de memoria, desbordamientos de buffer y errores use-after-free por diseño.
 
@@ -22,7 +22,7 @@ Una librería shim pequeña que captura las llamadas SQLite de Plex y las envía
 - 🔧 **Seguridad de pila:** buffers thread-local asignados en heap para los hilos de 544K de Plex
 - ✅ **713 tests pasando** en suites unitarias, de integración y compatibilidad
 
-Descarga: https://github.com/cgnl/plex-postgresql/releases/tag/v1.1.0
+Descarga: https://github.com/cgnl/plex-postgresql/releases/tag/v1.2.0
 
 ## ¿Por qué PostgreSQL?
 
