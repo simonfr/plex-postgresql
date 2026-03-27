@@ -12,7 +12,7 @@ pub(super) fn value_type_impl(p_val: *mut sqlite3_value) -> c_int {
             p_val as *mut sqlite3_stmt,
             ptr::null_mut(),
         );
-        global_value_type_calls = global_value_type_calls.wrapping_add(1);
+        GLOBAL_VALUE_TYPE_CALLS.fetch_add(1, Ordering::Relaxed);
         let tls_calls = tls_value_type_calls_ptr();
         *tls_calls = (*tls_calls).wrapping_add(1);
     }

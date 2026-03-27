@@ -437,7 +437,7 @@ pub extern "C" fn rust_shim_ensure_ready() -> c_int {
     std::sync::atomic::fence(Ordering::SeqCst);
 
     unsafe {
-        if ptr::read(ptr::addr_of!(shim_initialized)) == 0 {
+        if SHIM_INITIALIZED.load(Ordering::Acquire) == 0 {
             libc::fprintf(
                 stderr_ptr(),
                 b"[SHIM] WARNING: shim_ensure_ready called before shim_initialized!\n\0".as_ptr()

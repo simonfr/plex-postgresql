@@ -53,17 +53,38 @@ fn exception_catcher_enabled() -> bool {
     enabled
 }
 
-unsafe fn resolve_cxa_throw() -> Option<CxaThrowFn> {
-    if let Some(f) = ptr::read(ptr::addr_of!(ORIG_CXA_THROW)) {
-        return Some(f);
+/// Eagerly resolve all interposition hooks that live in this module.
+/// Called once from `shim_init()` before any other thread can call the
+/// interposed wrappers, eliminating the data race on lazy init.
+#[allow(static_mut_refs)]
+unsafe fn resolve_interposition_hooks() {
+    // sigaction
+    let sym = libc::dlsym(libc::RTLD_NEXT, b"sigaction\0".as_ptr() as *const c_char);
+    if !sym.is_null() {
+        ptr::write(
+            ptr::addr_of_mut!(ORIG_SIGACTION),
+            Some(std::mem::transmute::<*mut c_void, SigactionFn>(sym)),
+        );
     }
+
+    // __cxa_throw
     let sym = libc::dlsym(libc::RTLD_NEXT, b"__cxa_throw\0".as_ptr() as *const c_char);
-    if sym.is_null() {
-        return None;
+    if !sym.is_null() {
+        ptr::write(
+            ptr::addr_of_mut!(ORIG_CXA_THROW),
+            Some(std::mem::transmute::<*mut c_void, CxaThrowFn>(sym)),
+        );
     }
-    let f: CxaThrowFn = std::mem::transmute::<*mut c_void, CxaThrowFn>(sym);
-    ptr::write(ptr::addr_of_mut!(ORIG_CXA_THROW), Some(f));
-    Some(f)
+}
+
+#[allow(static_mut_refs)]
+unsafe fn read_cxa_throw() -> Option<CxaThrowFn> {
+    ptr::read(ptr::addr_of!(ORIG_CXA_THROW))
+}
+
+#[allow(static_mut_refs)]
+unsafe fn read_sigaction() -> Option<SigactionFn> {
+    ptr::read(ptr::addr_of!(ORIG_SIGACTION))
 }
 
 fn setup_exception_catcher_if_enabled() {
@@ -71,7 +92,7 @@ fn setup_exception_catcher_if_enabled() {
         return;
     }
     unsafe {
-        if resolve_cxa_throw().is_some() {
+        if read_cxa_throw().is_some() {
             let _ = libc::fprintf(
                 stderr_ptr(),
                 b"[SHIM_INIT] Exception catcher enabled (__cxa_throw interposed)\n\0".as_ptr()
@@ -102,7 +123,7 @@ pub unsafe extern "C" fn __cxa_throw(
     tinfo: *mut c_void,
     dest: Option<unsafe extern "C" fn(*mut c_void)>,
 ) -> ! {
-    let orig = match resolve_cxa_throw() {
+    let orig = match read_cxa_throw() {
         Some(f) => f,
         None => libc::abort(),
     };
@@ -144,16 +165,7 @@ pub unsafe extern "C" fn sigaction(
     act: *const libc::sigaction,
     oldact: *mut libc::sigaction,
 ) -> c_int {
-    if ptr::read(ptr::addr_of!(ORIG_SIGACTION)).is_none() {
-        let sym = libc::dlsym(libc::RTLD_NEXT, b"sigaction\0".as_ptr() as *const c_char);
-        if !sym.is_null() {
-            ptr::write(ptr::addr_of_mut!(ORIG_SIGACTION), Some(std::mem::transmute::<*mut c_void, SigactionFn>(sym)));
-        } else {
-            return -1;
-        }
-    }
-
-    let Some(orig) = ptr::read(ptr::addr_of!(ORIG_SIGACTION)) else {
+    let Some(orig) = read_sigaction() else {
         return -1;
     };
 
@@ -270,6 +282,13 @@ pub extern "C" fn ensure_real_sqlite_loaded() {
 }
 
 unsafe extern "C" fn shim_init() {
+    // Eagerly resolve all interposition hooks before any other thread can
+    // call the interposed wrappers.  This eliminates data races on the
+    // lazy-init pattern that was previously used.
+    resolve_interposition_hooks();
+    crate::pms_child_env::init_child_env_hooks();
+    crate::pms_net_compat::init_net_compat_hooks();
+
     shim_init_common(
         "Linux",
         || {
@@ -291,9 +310,9 @@ unsafe extern "C" fn shim_init() {
                     );
                     FORCE_IGNORE_SIGCHLD.store(0, Ordering::Relaxed);
                     INTERCEPT_SIGACTION.store(0, Ordering::Relaxed);
-                    ptr::write(ptr::addr_of_mut!(db_interpose_common::shim_passthrough_only), 1);
+                    db_interpose_common::SHIM_PASSTHROUGH_ONLY.store(1, Ordering::Release);
                     load_original_functions();
-                    ptr::write(ptr::addr_of_mut!(db_interpose_common::shim_initialized), 1);
+                    db_interpose_common::SHIM_INITIALIZED.store(1, Ordering::Release);
                     let base_c = CString::new(base_str).unwrap_or_default();
                     let _ = libc::fprintf(
                         stderr_ptr(),
@@ -368,15 +387,8 @@ unsafe extern "C" fn shim_init() {
                 let _ = libc::fflush(stderr_ptr());
             }
 
-            if ptr::read(ptr::addr_of!(ORIG_SIGACTION)).is_none() {
-                let sym = libc::dlsym(libc::RTLD_NEXT, b"sigaction\0".as_ptr() as *const c_char);
-                if !sym.is_null() {
-                    ptr::write(ptr::addr_of_mut!(ORIG_SIGACTION), Some(std::mem::transmute::<*mut c_void, SigactionFn>(sym)));
-                }
-            }
-
             if FORCE_IGNORE_SIGCHLD.load(Ordering::Relaxed) != 0 {
-                if let Some(orig) = ptr::read(ptr::addr_of!(ORIG_SIGACTION)) {
+                if let Some(orig) = read_sigaction() {
                     let mut sa: libc::sigaction = std::mem::zeroed();
                     sa.sa_sigaction = libc::SIG_IGN;
                     libc::sigemptyset(&mut sa.sa_mask);
@@ -451,7 +463,7 @@ unsafe extern "C" fn shim_init() {
 }
 
 unsafe extern "C" fn shim_cleanup() {
-    if ptr::read(ptr::addr_of!(db_interpose_common::shim_initialized)) == 0 {
+    if db_interpose_common::SHIM_INITIALIZED.load(Ordering::Acquire) == 0 {
         return;
     }
     log_shim_unloading("Linux");

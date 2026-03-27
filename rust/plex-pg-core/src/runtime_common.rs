@@ -76,9 +76,7 @@ pub(crate) fn shim_init_common<F, G, H, K>(
     crate::db_interpose_common::common_shim_init_modules();
     after_modules();
 
-    unsafe {
-        std::ptr::write(std::ptr::addr_of_mut!(crate::db_interpose_common::shim_initialized), 1);
-    }
+    crate::db_interpose_common::SHIM_INITIALIZED.store(1, std::sync::atomic::Ordering::Release);
 
     after_ready();
     log_ctor_complete(os_label, unsafe { libc::getpid() });

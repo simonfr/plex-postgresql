@@ -185,8 +185,8 @@ pub extern "C" fn rust_print_exception_info(
 
         let ctx_query = last_query_being_processed;
         let ctx_column = last_column_being_accessed;
-        let ctx_value_calls = global_value_type_calls;
-        let ctx_column_calls = global_column_type_calls;
+        let ctx_value_calls = GLOBAL_VALUE_TYPE_CALLS.load(Ordering::Relaxed);
+        let ctx_column_calls = GLOBAL_COLUMN_TYPE_CALLS.load(Ordering::Relaxed);
         let tls_column_type_calls = *tls_column_type_calls_ptr();
         let tls_value_type_calls = *tls_value_type_calls_ptr();
         let tls_last_query = *tls_last_query_ptr();

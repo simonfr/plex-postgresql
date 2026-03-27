@@ -73,8 +73,15 @@ pub(super) static CRASH_LAST_QUERY_LEN: AtomicI32 = AtomicI32::new(0);
 pub(super) static mut CRASH_LAST_PHASE: [c_char; CRASH_PHASE_MAX_LEN] = [0; CRASH_PHASE_MAX_LEN];
 pub(super) static CRASH_LAST_PHASE_LEN: AtomicI32 = AtomicI32::new(0);
 
-pub(super) static TRACE_LAST_QUERY_CACHED: AtomicI32 = AtomicI32::new(-1);
-pub(super) static mut TRACE_LAST_QUERY_PATH: *const c_char = ptr::null();
+/// Wrapper around `*const c_char` that is `Send + Sync` so it can be stored
+/// inside a `OnceLock`.  The pointer is either a `&'static [u8]` literal or
+/// the result of `libc::getenv` (whose lifetime matches the process).
+#[derive(Copy, Clone)]
+pub(super) struct SendCharPtr(pub(super) *const c_char);
+unsafe impl Send for SendCharPtr {}
+unsafe impl Sync for SendCharPtr {}
+
+pub(super) static TRACE_LAST_QUERY_PATH: std::sync::OnceLock<SendCharPtr> = std::sync::OnceLock::new();
 
 pub(super) static SYMBOLS_VERIFIED: AtomicI32 = AtomicI32::new(0);
 
@@ -242,20 +249,16 @@ pub(super) static mut worker_request: WorkerRequest = WorkerRequest {
 #[no_mangle]
 pub(super) static mut worker_running: c_int = 0;
 
-#[no_mangle]
-pub static mut shim_initialized: c_int = 0;
-#[no_mangle]
-pub static mut shim_passthrough_only: c_int = 0;
+pub static SHIM_INITIALIZED: AtomicI32 = AtomicI32::new(0);
+pub static SHIM_PASSTHROUGH_ONLY: AtomicI32 = AtomicI32::new(0);
 
 #[no_mangle]
 pub(super) static mut last_query_being_processed: *const c_char = ptr::null();
 #[no_mangle]
 pub(super) static mut last_column_being_accessed: *const c_char = ptr::null();
 
-#[no_mangle]
-pub(super) static mut global_value_type_calls: c_long = 0;
-#[no_mangle]
-pub(super) static mut global_column_type_calls: c_long = 0;
+pub(crate) static GLOBAL_VALUE_TYPE_CALLS: AtomicI64 = AtomicI64::new(0);
+pub(crate) static GLOBAL_COLUMN_TYPE_CALLS: AtomicI64 = AtomicI64::new(0);
 
 #[no_mangle]
 pub static mut cxa_demangle_fn: Option<

@@ -1,7 +1,7 @@
 use std::ffi::CStr;
-use std::os::raw::{c_char, c_int, c_long, c_uchar, c_uint, c_void};
+use std::os::raw::{c_char, c_int, c_uchar, c_uint, c_void};
 use std::ptr;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
 
 use crate::db_interpose_conn_utils::{log_error, log_info, PthreadMutexGuard};
 use crate::env_utils;
@@ -99,7 +99,7 @@ pub use state::{
     orig_sqlite3_stmt_busy, orig_sqlite3_stmt_readonly, orig_sqlite3_stmt_status,
     orig_sqlite3_value_blob, orig_sqlite3_value_bytes, orig_sqlite3_value_double,
     orig_sqlite3_value_int, orig_sqlite3_value_int64, orig_sqlite3_value_text,
-    orig_sqlite3_value_type, shim_initialized, shim_passthrough_only, shim_sqlite3_errcode,
+    orig_sqlite3_value_type, SHIM_INITIALIZED, SHIM_PASSTHROUGH_ONLY, shim_sqlite3_errcode,
     shim_sqlite3_errmsg, shim_sqlite3_prepare_v2, sqlite_handle,
 };
 pub(crate) use tls_support::{
@@ -109,6 +109,7 @@ pub(crate) use tls_support::{
 #[cfg(target_os = "linux")]
 pub(crate) use worker_runtime::fast_mark_fork_child_passthrough;
 pub use worker_runtime::{rust_delegate_prepare_to_worker, rust_worker_cleanup, rust_worker_init};
+pub(crate) use state::{GLOBAL_COLUMN_TYPE_CALLS, GLOBAL_VALUE_TYPE_CALLS};
 
 #[cfg(test)]
 mod tests;

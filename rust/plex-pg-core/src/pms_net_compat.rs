@@ -16,19 +16,21 @@ static PMS_NET_COMPAT_LOG_BUDGET: AtomicI32 = AtomicI32::new(0);
 
 const DEFAULT_LOG_BUDGET: i32 = 16;
 
-unsafe fn resolve_setsockopt() -> Option<SetsockoptFn> {
-    if let Some(f) = std::ptr::read(std::ptr::addr_of!(ORIG_SETSOCKOPT)) {
-        return Some(f);
-    }
-
+/// Eagerly resolve the real `setsockopt` via `dlsym(RTLD_NEXT, ...)`.
+/// Called once from the shim constructor so the interposition wrapper never
+/// races on a lazy write.
+#[allow(static_mut_refs)]
+pub unsafe fn init_net_compat_hooks() {
     let sym = libc::dlsym(libc::RTLD_NEXT, b"setsockopt\0".as_ptr() as *const c_char);
-    if sym.is_null() {
-        return None;
+    if !sym.is_null() {
+        let f: SetsockoptFn = mem::transmute::<*mut c_void, SetsockoptFn>(sym);
+        std::ptr::write(std::ptr::addr_of_mut!(ORIG_SETSOCKOPT), Some(f));
     }
+}
 
-    let f: SetsockoptFn = mem::transmute::<*mut c_void, SetsockoptFn>(sym);
-    std::ptr::write(std::ptr::addr_of_mut!(ORIG_SETSOCKOPT), Some(f));
-    Some(f)
+#[allow(static_mut_refs)]
+unsafe fn read_setsockopt() -> Option<SetsockoptFn> {
+    std::ptr::read(std::ptr::addr_of!(ORIG_SETSOCKOPT))
 }
 
 fn is_enabled() -> bool {
@@ -153,7 +155,7 @@ pub unsafe extern "C" fn setsockopt(
     optval: *const c_void,
     optlen: libc::socklen_t,
 ) -> c_int {
-    let Some(orig) = resolve_setsockopt() else {
+    let Some(orig) = read_setsockopt() else {
         set_errno(libc::ENOSYS);
         return -1;
     };

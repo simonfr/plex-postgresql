@@ -125,9 +125,13 @@ pub extern "C" fn rust_pg_exception_note_phase(
         };
         CRASH_LAST_PHASE_LEN.store(plen, Ordering::SeqCst);
 
-        if trace_last_query_enabled() && !TRACE_LAST_QUERY_PATH.is_null() && qlen > 0 {
+        let trace_path = TRACE_LAST_QUERY_PATH
+            .get()
+            .map(|p| p.0)
+            .unwrap_or(ptr::null());
+        if trace_last_query_enabled() && !trace_path.is_null() && qlen > 0 {
             let fd = libc::open(
-                TRACE_LAST_QUERY_PATH,
+                trace_path,
                 libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC,
                 0o644,
             );

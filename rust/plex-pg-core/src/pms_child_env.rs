@@ -115,42 +115,54 @@ pub fn scrub_current_process_preload() {
     }
 }
 
-unsafe fn resolve_symbol<T>(slot: *mut Option<T>, name: &'static [u8]) -> Option<T>
-where
-    T: Copy,
-{
-    if let Some(f) = ptr::read(slot) {
-        return Some(f);
-    }
-
+/// Resolve a single symbol via `dlsym(RTLD_NEXT, ...)` and store it into the
+/// provided slot.  Returns `true` if the symbol was found.
+#[allow(static_mut_refs)]
+unsafe fn resolve_symbol_into<T: Copy>(slot: *mut Option<T>, name: &'static [u8]) -> bool {
     let sym = libc::dlsym(libc::RTLD_NEXT, name.as_ptr() as *const c_char);
     if sym.is_null() {
-        return None;
+        return false;
     }
-
     let f: T = mem::transmute_copy(&sym);
     ptr::write(slot, Some(f));
-    Some(f)
+    true
 }
 
-unsafe fn resolve_execve() -> Option<ExecveFn> {
-    resolve_symbol(ptr::addr_of_mut!(ORIG_EXECVE), b"execve\0")
+/// Eagerly resolve all interposition hooks.  Called once from the shim
+/// constructor (`shim_init_wrapper`) so that the interposition wrappers below
+/// never race on a lazy write.
+#[allow(static_mut_refs)]
+pub unsafe fn init_child_env_hooks() {
+    resolve_symbol_into(ptr::addr_of_mut!(ORIG_EXECVE), b"execve\0");
+    resolve_symbol_into(ptr::addr_of_mut!(ORIG_EXECVP), b"execvp\0");
+    resolve_symbol_into(ptr::addr_of_mut!(ORIG_EXECVPE), b"execvpe\0");
+    resolve_symbol_into(ptr::addr_of_mut!(ORIG_POSIX_SPAWN), b"posix_spawn\0");
+    resolve_symbol_into(ptr::addr_of_mut!(ORIG_POSIX_SPAWNP), b"posix_spawnp\0");
 }
 
-unsafe fn resolve_execvp() -> Option<ExecvpFn> {
-    resolve_symbol(ptr::addr_of_mut!(ORIG_EXECVP), b"execvp\0")
+#[allow(static_mut_refs)]
+unsafe fn read_execve() -> Option<ExecveFn> {
+    ptr::read(ptr::addr_of!(ORIG_EXECVE))
 }
 
-unsafe fn resolve_execvpe() -> Option<ExecvpeFn> {
-    resolve_symbol(ptr::addr_of_mut!(ORIG_EXECVPE), b"execvpe\0")
+#[allow(static_mut_refs)]
+unsafe fn read_execvp() -> Option<ExecvpFn> {
+    ptr::read(ptr::addr_of!(ORIG_EXECVP))
 }
 
-unsafe fn resolve_posix_spawn() -> Option<PosixSpawnFn> {
-    resolve_symbol(ptr::addr_of_mut!(ORIG_POSIX_SPAWN), b"posix_spawn\0")
+#[allow(static_mut_refs)]
+unsafe fn read_execvpe() -> Option<ExecvpeFn> {
+    ptr::read(ptr::addr_of!(ORIG_EXECVPE))
 }
 
-unsafe fn resolve_posix_spawnp() -> Option<PosixSpawnFn> {
-    resolve_symbol(ptr::addr_of_mut!(ORIG_POSIX_SPAWNP), b"posix_spawnp\0")
+#[allow(static_mut_refs)]
+unsafe fn read_posix_spawn() -> Option<PosixSpawnFn> {
+    ptr::read(ptr::addr_of!(ORIG_POSIX_SPAWN))
+}
+
+#[allow(static_mut_refs)]
+unsafe fn read_posix_spawnp() -> Option<PosixSpawnFn> {
+    ptr::read(ptr::addr_of!(ORIG_POSIX_SPAWNP))
 }
 
 unsafe fn set_errno(err: c_int) {
@@ -431,7 +443,7 @@ pub fn maybe_reexec_current_process_without_shim(label: &str, cmdline: &[u8]) {
         let Ok(exe_c) = CString::new(exe_path.as_os_str().as_bytes()) else {
             return;
         };
-        let Some(orig_execve) = resolve_execve() else {
+        let Some(orig_execve) = read_execve() else {
             return;
         };
 
@@ -478,7 +490,7 @@ pub unsafe extern "C" fn execve(
     argv: *const *const c_char,
     envp: *const *const c_char,
 ) -> c_int {
-    let Some(orig) = resolve_execve() else {
+    let Some(orig) = read_execve() else {
         set_errno(libc::ENOSYS);
         return -1;
     };
@@ -502,7 +514,7 @@ pub unsafe extern "C" fn execve(
 /// ABI interposition wrapper for `execvp`. Callers must provide valid libc
 /// pointers for file/argv.
 pub unsafe extern "C" fn execvp(file: *const c_char, argv: *const *const c_char) -> c_int {
-    let Some(orig_execvp) = resolve_execvp() else {
+    let Some(orig_execvp) = read_execvp() else {
         set_errno(libc::ENOSYS);
         return -1;
     };
@@ -511,7 +523,7 @@ pub unsafe extern "C" fn execvp(file: *const c_char, argv: *const *const c_char)
         return orig_execvp(file, argv);
     };
 
-    let Some(orig_execvpe) = resolve_execvpe() else {
+    let Some(orig_execvpe) = read_execvpe() else {
         return orig_execvp(file, argv);
     };
 
@@ -534,7 +546,7 @@ pub unsafe extern "C" fn execvpe(
     argv: *const *const c_char,
     envp: *const *const c_char,
 ) -> c_int {
-    let Some(orig) = resolve_execvpe() else {
+    let Some(orig) = read_execvpe() else {
         set_errno(libc::ENOSYS);
         return -1;
     };
@@ -565,7 +577,7 @@ pub unsafe extern "C" fn posix_spawn(
     argv: *const *const c_char,
     envp: *const *const c_char,
 ) -> c_int {
-    let Some(orig) = resolve_posix_spawn() else {
+    let Some(orig) = read_posix_spawn() else {
         return libc::ENOSYS;
     };
 
@@ -595,7 +607,7 @@ pub unsafe extern "C" fn posix_spawnp(
     argv: *const *const c_char,
     envp: *const *const c_char,
 ) -> c_int {
-    let Some(orig) = resolve_posix_spawnp() else {
+    let Some(orig) = read_posix_spawnp() else {
         return libc::ENOSYS;
     };
 

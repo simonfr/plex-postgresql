@@ -361,7 +361,7 @@ pub extern "C" fn pg_config_get() -> *mut PgConnConfig {
 
 #[no_mangle]
 pub extern "C" fn should_redirect(filename: *const c_char) -> c_int {
-    let passthrough = unsafe { crate::db_interpose_common::shim_passthrough_only };
+    let passthrough = crate::db_interpose_common::SHIM_PASSTHROUGH_ONLY.load(std::sync::atomic::Ordering::Acquire);
     pg_config_should_redirect(filename, passthrough)
 }
 

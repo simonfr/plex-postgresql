@@ -645,7 +645,7 @@ unsafe extern "C" fn shim_init() {
 }
 
 unsafe extern "C" fn shim_cleanup() {
-    if std::ptr::read(std::ptr::addr_of!(db_interpose_common::shim_initialized)) == 0 {
+    if db_interpose_common::SHIM_INITIALIZED.load(std::sync::atomic::Ordering::Acquire) == 0 {
         return;
     }
 
