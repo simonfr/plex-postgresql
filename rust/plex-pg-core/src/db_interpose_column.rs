@@ -87,8 +87,11 @@ static _NEEDLE_TYPE: &[u8] = b"type\0";
 static _NEEDLE_METADATA_TYPE: &[u8] = b"metadata_type\0";
 
 thread_local! {
-    static COLUMN_TEXT_BUFFERS: RefCell<Box<[[u8; TEXT_BUFFER_SIZE]; NUM_TEXT_BUFFERS]>> =
-        RefCell::new(Box::new([[0u8; TEXT_BUFFER_SIZE]; NUM_TEXT_BUFFERS]));
+    // Use vec![].into_boxed_slice() to allocate on the heap directly.
+    // Box::new([T; 64*8192]) would place 512KB on the stack, exceeding
+    // Plex's 544K worker thread stacks.
+    static COLUMN_TEXT_BUFFERS: RefCell<Box<[[u8; TEXT_BUFFER_SIZE]]>> =
+        RefCell::new(vec![[0u8; TEXT_BUFFER_SIZE]; NUM_TEXT_BUFFERS].into_boxed_slice());
     static COLUMN_TEXT_BUF_IDX: Cell<usize> = Cell::new(0);
 }
 
