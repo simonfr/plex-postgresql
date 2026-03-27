@@ -123,16 +123,6 @@ pub(crate) fn should_skip_sql_str(sql: &str) -> bool {
     false
 }
 
-fn is_transaction_control_sql(lower_trimmed_sql: &str) -> bool {
-    lower_trimmed_sql.starts_with("begin")
-        || lower_trimmed_sql.starts_with("end")
-        || lower_trimmed_sql.starts_with("commit")
-        || lower_trimmed_sql.starts_with("rollback")
-        || lower_trimmed_sql.starts_with("savepoint")
-        || lower_trimmed_sql.starts_with("release ")
-        || lower_trimmed_sql.starts_with("release savepoint")
-}
-
 /// Returns true if the SQL is a write operation (INSERT, UPDATE, DELETE, REPLACE).
 pub(crate) fn is_write_operation_str(sql: &str) -> bool {
     let lower = strip_leading_ws_and_sql_comments(sql).to_lowercase();

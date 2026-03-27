@@ -5,12 +5,12 @@ use std::sync::atomic::{
 };
 use std::sync::{Mutex, OnceLock};
 
-use crate::db_interpose_conn_utils::log_info;
 use crate::ffi_types::PgConnection;
 use crate::sync_utils::mutex_lock;
 
 use super::registry::{ConnectionRegistry, DbToPool};
 use super::tls_cache::tls_pool_cache_clear;
+use crate::log_info_lazy;
 
 pub(crate) const SLOT_FREE: u8 = 0;
 pub(crate) const SLOT_RESERVED: u8 = 1;
@@ -197,10 +197,10 @@ impl PoolManager {
                     .store(0, Ordering::Release);
             }
 
-            log_info(&format!(
+            log_info_lazy!(
                 "Pool: cleared stale streaming_active flag for slot {} (state={})",
                 i, state
-            ));
+            );
             return true;
         }
 

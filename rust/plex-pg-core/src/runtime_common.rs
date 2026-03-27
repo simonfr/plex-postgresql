@@ -4,12 +4,8 @@ use std::os::raw::{c_char, c_int, c_void};
 
 use crate::db_interpose_common::stderr_ptr;
 use crate::env_utils;
+use crate::log_info_lazy;
 
-pub(crate) fn log_info(msg: &str) {
-    if let Ok(cs) = CString::new(msg) {
-        crate::pg_logging::rust_logging_write(1, cs.as_ptr());
-    }
-}
 
 pub(crate) fn should_skip_shim_init() -> bool {
     if cfg!(test) {
@@ -37,17 +33,17 @@ pub(crate) fn log_logging_initialized() {
 }
 
 pub(crate) fn log_shim_loaded(os_label: &str) {
-    log_info(&format!(
+    log_info_lazy!(
         "=== Plex PostgreSQL Interpose Shim loaded ({}) ===",
         os_label
-    ));
+    );
 }
 
 pub(crate) fn log_shim_unloading(os_label: &str) {
-    log_info(&format!(
+    log_info_lazy!(
         "=== Plex PostgreSQL Interpose Shim unloading ({}) ===",
         os_label
-    ));
+    );
 }
 
 pub(crate) fn shim_init_common<F, G, H, K>(

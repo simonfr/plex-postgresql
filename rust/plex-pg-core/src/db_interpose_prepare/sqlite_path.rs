@@ -1,4 +1,6 @@
 use super::*;
+use crate::log_debug_lazy;
+use crate::log_info_lazy;
 
 pub(super) struct DummyShadowPrepareResult {
     pub(super) rc: c_int,
@@ -16,11 +18,11 @@ pub(super) unsafe fn prepare_dummy_shadow_stmt(
     let mut pre_trans = sql_translate(z_sql);
 
     if contains_icase_ptr(z_sql, "json_each(") {
-        log_info(&format!(
+        log_info_lazy!(
             "JSON_EACH_TRANSLATE: orig={}",
             cstr_prefix(z_sql, 220, "NULL")
-        ));
-        log_info(&format!(
+        );
+        log_info_lazy!(
             "JSON_EACH_TRANSLATE: rc={} err={} out={}",
             pre_trans.success,
             if pre_trans.error[0] != 0 {
@@ -29,7 +31,7 @@ pub(super) unsafe fn prepare_dummy_shadow_stmt(
                 "(null)".to_string()
             },
             cstr_prefix(pre_trans.sql, 220, "(null)")
-        ));
+        );
     }
 
     if contains_icase_ptr(z_sql, "metadata_item_settings")
@@ -41,18 +43,18 @@ pub(super) unsafe fn prepare_dummy_shadow_stmt(
             let out_bytes = CStr::from_ptr(pre_trans.sql).to_bytes();
             out_q_count = out_bytes.iter().filter(|b| **b == b'?').count();
         }
-        log_info(&format!(
+        log_info_lazy!(
             "MIS_TRANSLATE: orig={}",
             cstr_prefix(z_sql, 1000, "NULL")
-        ));
-        log_info(&format!(
+        );
+        log_info_lazy!(
             "MIS_TRANSLATE: rc={} params={} q_orig={} q_out={} out={}",
             pre_trans.success,
             pre_trans.param_count,
             q_count,
             out_q_count,
             cstr_prefix(pre_trans.sql, 1000, "(null)")
-        ));
+        );
     }
 
     if !pre_trans.sql.is_null() {
@@ -146,11 +148,11 @@ pub(super) unsafe fn prepare_dummy_shadow_stmt(
         };
     }
 
-    log_debug(&format!(
+    log_debug_lazy!(
         "PREPARE: Dummy shadow OK ({} params) for PG query: {}",
         param_count,
         cstr_prefix(z_sql, 100, "NULL")
-    ));
+    );
 
     DummyShadowPrepareResult {
         rc,
@@ -177,14 +179,14 @@ pub(super) unsafe fn prepare_real_sqlite_stmt(
                 if let Ok(cs) = CString::new(out) {
                     sql_for_sqlite = cs.as_ptr();
                     cleaned_sql = Some(cs);
-                    log_info(&format!(
+                    log_info_lazy!(
                         "FTS query ORIGINAL: {}",
                         cstr_prefix(z_sql, 500, "NULL")
-                    ));
-                    log_info(&format!(
+                    );
+                    log_info_lazy!(
                         "FTS query SIMPLIFIED: {}",
                         cstr_prefix(sql_for_sqlite, 500, "NULL")
-                    ));
+                    );
                 }
             }
         }
@@ -204,10 +206,10 @@ pub(super) unsafe fn prepare_real_sqlite_stmt(
 
     if contains_icase_ptr(sql_for_sqlite, "fts4_") || contains_icase_ptr(sql_for_sqlite, " match ")
     {
-        log_info(&format!(
+        log_info_lazy!(
             "FTS query blocked from SQLite (tokenizer not available): {}",
             cstr_prefix(sql_for_sqlite, 100, "NULL")
-        ));
+        );
         if let Some(prepare) = shim_sqlite3_prepare_v2 {
             let rc = prepare(db, c"SELECT 1 WHERE 0".as_ptr(), -1, pp_stmt, pz_tail);
             if rc == SQLITE_OK && !pp_stmt.is_null() && !(*pp_stmt).is_null() {
@@ -225,10 +227,10 @@ pub(super) unsafe fn prepare_real_sqlite_stmt(
                 if let Ok(cs) = CString::new(out) {
                     cleaned_sql = Some(cs);
                     sql_for_sqlite = cleaned_sql.as_ref().unwrap().as_ptr();
-                    log_info(&format!(
+                    log_info_lazy!(
                         "Added IF NOT EXISTS for SQLite DDL: {}",
                         cstr_prefix(sql_for_sqlite, 200, "NULL")
-                    ));
+                    );
                 }
             }
         }

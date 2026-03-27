@@ -3,6 +3,7 @@ use crate::db_interpose_bind::support::{
     begin_bind, bytes_to_pg_hex, contains_binary_bytes, free_dynamic_param_value,
     mapped_param_index, retry_on_misuse,
 };
+use crate::log_debug_lazy;
 
 unsafe fn store_text_param(
     pg_stmt: *mut PgStmt,
@@ -16,10 +17,10 @@ unsafe fn store_text_param(
     free_dynamic_param_value(pg_stmt, pg_idx);
 
     if contains_binary_bytes(val as *const u8, actual_len) {
-        log_debug(&format!(
+        log_debug_lazy!(
             "{}: detected binary data at idx={}, len={}, converting to hex",
             label, idx, actual_len
-        ));
+        );
         (*pg_stmt).param_values[pg_idx] = bytes_to_pg_hex(val as *const u8, actual_len);
         return;
     }
@@ -63,10 +64,10 @@ unsafe fn store_blob_hex_param(
     label: &str,
 ) {
     free_dynamic_param_value(pg_stmt, pg_idx);
-    log_debug(&format!(
+    log_debug_lazy!(
         "{}: converting {} bytes to hex at idx={}",
         label, n_bytes, idx
-    ));
+    );
     (*pg_stmt).param_values[pg_idx] = bytes_to_pg_hex(val as *const u8, n_bytes);
     (*pg_stmt).param_lengths[pg_idx] = 0;
     (*pg_stmt).param_formats[pg_idx] = 0;

@@ -7,6 +7,7 @@ use crate::ffi_types::{sqlite3_stmt, PgConnection, PgStmt};
 use super::super::support::{sql_translate, sql_translation_free};
 use super::super::{note_pg_conn_error, STEP_RESULT_DONE, STEP_RESULT_ERROR};
 use super::free_expanded_sql;
+use crate::log_debug_lazy;
 
 pub(super) unsafe fn handle_cached_write(
     p_stmt: *mut sqlite3_stmt,
@@ -25,14 +26,14 @@ pub(super) unsafe fn handle_cached_write(
             .any(|w| w.eq_ignore_ascii_case(b"metadata_items"))
     {
         log_debug("CACHED INSERT metadata_items:");
-        log_debug(&format!(
+        log_debug_lazy!(
             "  expanded_sql={}",
             if expanded_sql.is_null() { "NO" } else { "YES" }
-        ));
-        log_debug(&format!(
+        );
+        log_debug_lazy!(
             "  sql (first 300): {}",
             cstr_prefix(sql, 300, "(null)")
-        ));
+        );
     }
     if crate::db_interpose_helpers::rust_is_junk_metadata_insert(sql) != 0 {
         log_error(

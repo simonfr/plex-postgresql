@@ -2,6 +2,7 @@ use super::*;
 use crate::db_interpose_value::support::{
     fake_value_has_result, helpers_result_ptr, load_fake_value_context, sqlite_type_name,
 };
+use crate::log_info_lazy;
 
 pub(super) fn value_type_impl(p_val: *mut sqlite3_value) -> c_int {
     unsafe {
@@ -37,10 +38,10 @@ pub(super) fn value_type_impl(p_val: *mut sqlite3_value) -> c_int {
 
     let _guard = unsafe { PthreadMutexGuard::lock(&mut (*ctx.pg_stmt).mutex as *mut _) };
     if unsafe { !fake_value_has_result(&ctx) } {
-        log_info(&format!(
+        log_info_lazy!(
             "VALUE_TYPE[{}]: FAKE VALUE but no result (row={} col={})",
             call_num, ctx.row, ctx.col
-        ));
+        );
         return SQLITE_NULL;
     }
 
@@ -66,7 +67,7 @@ pub(super) fn value_type_impl(p_val: *mut sqlite3_value) -> c_int {
 
     let result = if ok != 0 { sqlite_type } else { SQLITE_NULL };
     if call_num % 1000 == 0 {
-        log_info(&format!(
+        log_info_lazy!(
             "VALUE_TYPE[{}]: col='{}' row={} OID={} is_null={} -> {} sql={}",
             call_num,
             cstr_to_string_or(col_name, "?"),
@@ -75,7 +76,7 @@ pub(super) fn value_type_impl(p_val: *mut sqlite3_value) -> c_int {
             is_null,
             sqlite_type_name(result),
             cstr_prefix(unsafe { (*ctx.pg_stmt).pg_sql }, 60, "?")
-        ));
+        );
     }
     result
 }
@@ -121,10 +122,10 @@ pub(super) fn value_text_impl(p_val: *mut sqlite3_value) -> *const c_uchar {
     };
     if len < 0 {
         if call_num % 100 == 0 {
-            log_info(&format!(
+            log_info_lazy!(
                 "VALUE_TEXT[{}]: col={} row={} -> NULL (is_null)",
                 call_num, ctx.col, ctx.row
-            ));
+            );
         }
         return ptr::null();
     }
@@ -135,7 +136,7 @@ pub(super) fn value_text_impl(p_val: *mut sqlite3_value) -> *const c_uchar {
             ctx.col,
         );
         let suffix = if len > 30 { "..." } else { "" };
-        log_info(&format!(
+        log_info_lazy!(
             "VALUE_TEXT[{}]: col='{}' row={} val='{:.30}{}'",
             call_num,
             cstr_to_string_or(col_name, "?"),
@@ -143,7 +144,7 @@ pub(super) fn value_text_impl(p_val: *mut sqlite3_value) -> *const c_uchar {
             unsafe { CStr::from_ptr(VALUE_TEXT_BUFFERS[buf].as_ptr() as *const c_char) }
                 .to_string_lossy(),
             suffix
-        ));
+        );
     }
 
     (unsafe { VALUE_TEXT_BUFFERS[buf].as_ptr() }) as *const c_uchar

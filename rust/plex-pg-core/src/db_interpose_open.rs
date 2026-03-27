@@ -2,8 +2,9 @@ use std::ffi::CStr;
 use std::os::raw::{c_char, c_int, c_void};
 use std::ptr;
 
-use crate::db_interpose_conn_utils::{cstr_to_string_or, log_info};
+use crate::db_interpose_conn_utils::{cstr_to_string_or};
 use crate::ffi_types::{sqlite3, PgConnection};
+use crate::log_info_lazy;
 
 const SQLITE_OK: c_int = 0;
 const SQLITE_ERROR: c_int = 1;
@@ -48,11 +49,11 @@ unsafe fn handle_conn_path_contains(conn: *mut PgConnection, needle: &[u8]) -> b
 #[no_mangle]
 pub extern "C" fn rust_my_sqlite3_open(filename: *const c_char, pp_db: *mut *mut sqlite3) -> c_int {
     let redirect = should_redirect(filename);
-    log_info(&format!(
+    log_info_lazy!(
         "OPEN: {} (redirect={})",
         cstr_to_string_or(filename, "(null)"),
         redirect as i32
-    ));
+    );
 
     let rc = unsafe {
         orig_sqlite3_open
@@ -72,10 +73,10 @@ pub extern "C" fn rust_my_sqlite3_open(filename: *const c_char, pp_db: *mut *mut
             let pg_conn = crate::pg_client::rust_pg_connect(filename, db);
             if !pg_conn.is_null() {
                 crate::pg_client::rust_pg_register_connection(pg_conn);
-                log_info(&format!(
+                log_info_lazy!(
                     "PostgreSQL connection established for: {}",
                     cstr_to_string_or(filename, "(null)")
-                ));
+                );
             }
         }
     }
@@ -91,12 +92,12 @@ pub extern "C" fn rust_my_sqlite3_open_v2(
     z_vfs: *const c_char,
 ) -> c_int {
     let redirect = should_redirect(filename);
-    log_info(&format!(
+    log_info_lazy!(
         "OPEN_V2: {} flags=0x{:x} (redirect={})",
         cstr_to_string_or(filename, "(null)"),
         flags,
         redirect as i32
-    ));
+    );
 
     let rc = unsafe {
         orig_sqlite3_open_v2
@@ -116,10 +117,10 @@ pub extern "C" fn rust_my_sqlite3_open_v2(
             let pg_conn = crate::pg_client::rust_pg_connect(filename, db);
             if !pg_conn.is_null() {
                 crate::pg_client::rust_pg_register_connection(pg_conn);
-                log_info(&format!(
+                log_info_lazy!(
                     "PostgreSQL connection established for: {}",
                     cstr_to_string_or(filename, "(null)")
-                ));
+                );
             }
         }
     }
@@ -131,9 +132,9 @@ pub extern "C" fn rust_my_sqlite3_open_v2(
 pub extern "C" fn rust_my_sqlite3_close(db: *mut sqlite3) -> c_int {
     let handle_conn = crate::pg_client::rust_pg_find_handle_connection(db);
     if !handle_conn.is_null() {
-        log_info(&format!("CLOSE: PostgreSQL connection for {}", unsafe {
+        log_info_lazy!("CLOSE: PostgreSQL connection for {}", unsafe {
             cstr_to_string_or((*handle_conn).db_path.as_ptr(), "(null)")
-        }));
+        });
 
         unsafe {
             if handle_conn_path_contains(handle_conn, NEEDLE_LIBRARY_DB) {

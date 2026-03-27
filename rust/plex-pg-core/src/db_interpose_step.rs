@@ -2,8 +2,9 @@ use std::os::raw::{c_char, c_int, c_void};
 use std::sync::atomic::Ordering;
 
 use crate::db_interpose_common::tls_in_resolve_tables_ptr;
-use crate::db_interpose_conn_utils::{cstr_prefix, log_debug, PthreadMutexGuard};
+use crate::db_interpose_conn_utils::{cstr_prefix, PthreadMutexGuard};
 use crate::ffi_types::{sqlite3, sqlite3_stmt, PgConnection, PgStmt, MAX_PARAMS};
+use crate::log_debug_lazy;
 
 mod cached;
 mod retry;
@@ -75,12 +76,12 @@ unsafe fn my_sqlite3_step_impl(p_stmt: *mut sqlite3_stmt) -> c_int {
     }
 
     if !pg_stmt.is_null() && (*pg_stmt).is_pg == 3 {
-        log_debug(&format!(
+        log_debug_lazy!(
             "[RACE_DEBUG] STEP_END thread={:p} stmt={:p} rc={} reason=skip",
             libc::pthread_self() as *mut c_void,
             p_stmt,
             SQLITE_DONE
-        ));
+        );
         return SQLITE_DONE;
     }
 
@@ -211,11 +212,11 @@ unsafe fn my_sqlite3_step_impl(p_stmt: *mut sqlite3_stmt) -> c_int {
                 &mut txn_state,
             ) != 0
             {
-                log_debug(&format!(
+                log_debug_lazy!(
                     "TXN_NOOP: skipping tx terminator in state={} sql={}",
                     txn_state,
                     cstr_prefix(pg_sql, 120, "(null)")
-                ));
+                );
                 let _stmt_guard = PthreadMutexGuard::lock(&mut (*pg_stmt).mutex as *mut _);
                 (*pg_stmt).write_executed = 1;
                 return SQLITE_DONE;

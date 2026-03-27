@@ -1,6 +1,5 @@
 use std::sync::atomic::Ordering;
 
-use crate::db_interpose_conn_utils::log_info;
 use crate::ffi_types::PgConnection;
 
 use super::super::connection_helpers::conn_is_streaming_active;
@@ -8,6 +7,7 @@ use super::super::connection_lifecycle::destroy_pool_connection;
 use super::super::threading::check_thread_alive;
 use super::super::SLOT_READY;
 use super::shared::AcquireCtx;
+use crate::log_info_lazy;
 
 pub(super) fn reclaim_zombies_and_reap(ctx: &AcquireCtx<'_>) {
     let idle_timeout = ctx.pm.idle_timeout_secs.load(Ordering::Relaxed) as i64;
@@ -30,19 +30,19 @@ pub(super) fn reclaim_zombies_and_reap(ctx: &AcquireCtx<'_>) {
 
         let conn = slot.conn.load(Ordering::Acquire);
         if !conn.is_null() && conn_is_streaming_active(conn as *mut PgConnection) {
-            log_info(&format!(
+            log_info_lazy!(
                 "Pool PHASE 0: slot {} owner dead but streaming_active, skipping reclaim",
                 i
-            ));
+            );
             continue;
         }
 
         if slot.try_reclaim_zombie() {
-            log_info(&format!(
+            log_info_lazy!(
                 "Pool PHASE 0: Freed zombie slot {} (owner thread dead, idle {} sec)",
                 i,
                 ctx.now - last_used
-            ));
+            );
         }
     }
 
@@ -59,10 +59,10 @@ pub(super) fn reclaim_zombies_and_reap(ctx: &AcquireCtx<'_>) {
         return;
     }
 
-    log_info(&format!(
+    log_info_lazy!(
         "Pool reaper: running (last run {} seconds ago)",
         ctx.now - last_reap
-    ));
+    );
     let to_destroy = ctx.pm.reap_idle(ctx.now);
     for (_slot_idx, conn_ptr) in to_destroy {
         destroy_pool_connection(conn_ptr);

@@ -1,4 +1,5 @@
 use super::*;
+use crate::log_debug_lazy;
 
 pub(super) fn advance_cached_result_impl(stmt: *mut PgStmt) -> c_int {
     unsafe {
@@ -149,12 +150,12 @@ pub(super) fn log_debug_context_impl(stmt: *mut PgStmt, exec_conn: *mut PgConnec
     }
     unsafe {
         if (*stmt).result.is_null() {
-            log_debug(&format!(
+            log_debug_lazy!(
                 "STEP READ: thread={:p} stmt={:p} exec_conn={:p}",
                 libc::pthread_self() as usize as *const c_void,
                 stmt,
                 exec_conn
-            ));
+            );
         }
     }
 }

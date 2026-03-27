@@ -1,4 +1,6 @@
 use super::*;
+use crate::log_debug_lazy;
+use crate::log_info_lazy;
 
 unsafe fn prepare_shadow_stmt(
     db: *mut sqlite3,
@@ -38,10 +40,10 @@ pub(super) unsafe fn maybe_delegate_prepare_to_worker(
         && worker_active
         && !should_bypass_worker_delegation(z_sql)
     {
-        log_debug(&format!(
+        log_debug_lazy!(
             "WORKER DELEGATION: stack_remaining={} bytes < {}, delegating to 8MB worker",
             stack_remaining, WORKER_DELEGATION_THRESHOLD
-        ));
+        );
         depth_guard.decrement_now();
         return Some(delegate_prepare_to_worker(
             db, z_sql, n_byte, pp_stmt, pz_tail,
@@ -69,10 +71,10 @@ pub(super) unsafe fn maybe_handle_ondeck_low_stack(
         return None;
     }
 
-    log_info(&format!(
+    log_info_lazy!(
         "STACK LOW OnDeck: {} bytes remaining - using PG fast path",
         stack_remaining
-    ));
+    );
 
     let pg_conn = crate::pg_client::rust_pg_find_connection(db);
     if !pg_conn.is_null()
@@ -105,10 +107,10 @@ pub(super) unsafe fn maybe_handle_ondeck_low_stack(
                     (*pg_stmt).pg_sql = pg_sql_ptr;
                     (*pg_stmt).param_count = trans.param_count;
                     trace_prepare_pgsql_if_enabled(z_sql, (*pg_stmt).pg_sql);
-                    log_info(&format!(
+                    log_info_lazy!(
                         "STACK LOW OnDeck: routed to PG: {}",
                         cstr_prefix(trans.sql, 100, "NULL")
-                    ));
+                    );
                 }
                 sql_translation_free(&mut trans as *mut SqlTranslation);
             }
@@ -151,11 +153,11 @@ pub(super) unsafe fn maybe_handle_low_stack_prepare_path(
             != 0;
 
     if is_pg_read {
-        log_info(&format!(
+        log_info_lazy!(
             "STACK LOW ({} bytes) but using PG path for: {}",
             stack_remaining,
             cstr_prefix(z_sql, 100, "NULL")
-        ));
+        );
 
         let rc = prepare_shadow_stmt(db, c"SELECT 1".as_ptr(), pp_stmt, pz_tail);
 
@@ -224,10 +226,10 @@ pub(super) unsafe fn maybe_handle_low_stack_prepare_path(
     }
 
     if starts_with_ascii_icase(bytes, b"SELECT") {
-        log_debug(&format!(
+        log_debug_lazy!(
             "STACK PROTECTION select preview: {}",
             cstr_prefix(z_sql, 160, "NULL")
-        ));
+        );
     }
 
     Some(SQLITE_NOMEM)

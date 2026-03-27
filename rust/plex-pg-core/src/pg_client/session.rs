@@ -1,13 +1,14 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_void};
 
-use crate::db_interpose_conn_utils::{log_debug, log_error};
+use crate::db_interpose_conn_utils::{log_error};
 use crate::db_interpose_helpers::cstr_to_str_or_empty;
 use crate::ffi_types::PgConnection;
 use crate::libpq_helpers::{
     rust_pq_clear, rust_pq_exec, rust_pq_result_error_message, rust_pq_result_status,
     rust_pq_socket, rust_pq_transaction_status, PGconn,
 };
+use crate::log_debug_lazy;
 
 const PG_SOCKET_TIMEOUT_SEC: i64 = 60;
 pub(super) const CONNECTION_OK: i32 = 0;
@@ -53,10 +54,10 @@ pub(super) fn pg_set_socket_timeout(pg_conn: *mut PGconn) {
         }
     }
 
-    log_debug(&format!(
+    log_debug_lazy!(
         "Socket timeout set to {} seconds for socket {}",
         PG_SOCKET_TIMEOUT_SEC, sock
-    ));
+    );
 }
 
 pub(super) fn exec_command(pg_conn: *mut PGconn, sql: &str) -> bool {
@@ -147,10 +148,10 @@ pub(super) fn exec_simple(conn: *mut c_void, sql: *const c_char) -> bool {
             }
         };
         if txn != PQTRANS_INTRANS && txn != PQTRANS_INERROR {
-            log_debug(&format!(
+            log_debug_lazy!(
                 "exec_simple: skipped {} in non-transaction state={}",
                 trimmed, txn
-            ));
+            );
             return true;
         }
     }

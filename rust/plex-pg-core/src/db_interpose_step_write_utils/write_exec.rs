@@ -1,4 +1,5 @@
 use super::*;
+use crate::log_debug_lazy;
 
 #[no_mangle]
 pub extern "C" fn rust_step_write_execute_and_finalize(
@@ -68,14 +69,14 @@ pub extern "C" fn rust_step_write_execute_and_finalize(
                     cached_name = (*pg_stmt).stmt_name.as_ptr();
                     is_cached = true;
                 } else {
-                    log_debug(&format!(
+                    log_debug_lazy!(
                         "PQprepare (write) failed for {}: {}",
                         cstr_to_string_or((*pg_stmt).stmt_name.as_ptr(), ""),
                         cstr_to_string_or(
                             crate::libpq_helpers::rust_pq_error_message((*exec_conn).conn),
                             "(null)"
                         )
-                    ));
+                    );
                 }
                 crate::libpq_helpers::rust_pq_clear(prep_res);
             }
@@ -151,12 +152,12 @@ pub extern "C" fn rust_step_write_execute_and_finalize(
                     if !(*pg_stmt).pg_sql.is_null()
                         && contains_bytes(cstr_bytes((*pg_stmt).pg_sql), b"play_queue_generators")
                     {
-                        log_debug(&format!(
+                        log_debug_lazy!(
                             "STEP play_queue_generators: RETURNING id = {} on thread {:p} conn {:p}",
                             cstr_to_string_or(id_str, "?"),
                             libc::pthread_self() as *mut c_void,
                             exec_conn
-                        ));
+                        );
                     }
                     let meta_id = crate::pg_statement::rust_extract_metadata_id((*pg_stmt).sql);
                     if meta_id > 0 {

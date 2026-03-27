@@ -1,4 +1,5 @@
 use super::*;
+use crate::log_debug_lazy;
 
 struct CachedTypeState {
     row: c_int,
@@ -259,7 +260,7 @@ unsafe fn resolve_live_column_type(
 pub(super) fn column_type_impl(p_stmt: *mut sqlite3_stmt, idx: c_int) -> c_int {
     unsafe { bump_column_type_counters() };
 
-    log_debug(&format!("COLUMN_TYPE: stmt={:p} idx={}", p_stmt, idx));
+    log_debug_lazy!("COLUMN_TYPE: stmt={:p} idx={}", p_stmt, idx);
     let pg_stmt = unsafe { pg_find_any_stmt(p_stmt) };
     let dbg_sql = unsafe { column_type_debug_sql(pg_stmt) };
     let dbg_db = unsafe {
@@ -308,19 +309,19 @@ fn column_type_emit_log(
     ctx: &ColumnTypeLogCtx,
 ) {
     if ctx.out_of_bounds {
-        log_debug(&format!(
+        log_debug_lazy!(
             "COLUMN_TYPE_VERBOSE: idx={} row={} -> SQLITE_NULL ({}, out of bounds)",
             ctx.idx, ctx.row, ctx.phase
-        ));
+        );
         return;
     }
     if ctx.is_null {
-        log_debug(&format!(
+        log_debug_lazy!(
             "COLUMN_TYPE: idx={} col='{}' is NULL, returning SQLITE_NULL ({})",
             ctx.idx,
             cstr_to_string_or(ctx.col_name, "?"),
             ctx.phase
-        ));
+        );
         if ctx.trace_col {
             trace_badcast_log_ctx(
                 pg_stmt,
@@ -333,14 +334,14 @@ fn column_type_emit_log(
                 ctx.oid,
                 ctx.col_name,
             );
-            log_debug(&format!(
+            log_debug_lazy!(
                 "TRACE_BADCAST: column_type idx={} col='{}' row={} oid={} is_null=1 -> NULL sql={}",
                 ctx.idx,
                 cstr_to_string_or(ctx.col_name, "?"),
                 ctx.row,
                 ctx.oid,
                 cstr_prefix(ctx.pg_sql, 200, "?")
-            ));
+            );
         }
         return;
     }
@@ -356,7 +357,7 @@ fn column_type_emit_log(
             ctx.oid,
             ctx.col_name,
         );
-        log_debug(&format!(
+        log_debug_lazy!(
             "TRACE_BADCAST: column_type ({}) idx={} col='{}' row={} oid={} is_null=0 -> {} (guess_decltype='{}') sql={}",
             ctx.phase,
             ctx.idx,
@@ -366,9 +367,9 @@ fn column_type_emit_log(
             sqlite_type_name(ctx.result),
             ctx.decltype_guess,
             cstr_prefix(ctx.pg_sql, 200, "?")
-        ));
+        );
     }
-    log_debug(&format!(
+    log_debug_lazy!(
         "COLUMN_TYPE: idx={} col='{}' row={} OID={} -> {} (decltype='{}', {})",
         ctx.idx,
         cstr_to_string_or(ctx.col_name, "?"),
@@ -377,5 +378,5 @@ fn column_type_emit_log(
         sqlite_type_name(ctx.result),
         ctx.decltype_guess,
         ctx.phase
-    ));
+    );
 }

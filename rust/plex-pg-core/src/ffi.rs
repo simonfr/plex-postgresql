@@ -31,6 +31,8 @@ fn set_last_error(msg: &str) {
 
 const CACHE_SIZE: usize = 256;
 
+// Clone is derived only for `vec![None; CACHE_SIZE]` init — the hot-path
+// cache_lookup_and_fill() borrows in-place and never clones an entry.
 #[derive(Clone)]
 struct CacheEntry {
     hash: u64,
@@ -64,20 +66,64 @@ fn hash_sql_bytes(bytes: &[u8]) -> u64 {
     h
 }
 
-fn cache_lookup(sql: &str, hash: u64) -> Option<CacheEntry> {
+/// Look up `sql` in the translation cache and, on hit, copy the cached
+/// translation directly into the C output struct `result`.  Returns `true`
+/// on a cache hit (with `result` fully populated), `false` on miss.
+///
+/// By borrowing the `CacheEntry` inside the TLS closure we avoid the
+/// deep-clone of `String` + `Vec<Option<String>>` that the old
+/// `cache_lookup() -> Option<CacheEntry>` API performed on every hit.
+fn cache_lookup_and_fill(sql: &str, hash: u64, result: &mut SqlTranslation) -> bool {
     TRANSLATION_CACHE
         .try_with(|cell| {
             let cache = cell.borrow();
             let idx = (hash % CACHE_SIZE as u64) as usize;
             if let Some(entry) = &cache.entries[idx] {
                 if entry.hash == hash && entry.input == sql {
-                    return Some(entry.clone());
+                    // ── Copy translated SQL directly to C buffer ──
+                    let sql_dup = unsafe { dup_c_bytes(entry.sql.as_bytes()) };
+                    if sql_dup.is_null() {
+                        write_error(&mut result.error, "out of memory");
+                        return false;
+                    }
+                    result.sql = sql_dup;
+                    result.param_count = entry.param_names.len() as i32;
+
+                    // ── Copy param_names directly to C array ──
+                    if !entry.param_names.is_empty() {
+                        let arr = unsafe {
+                            libc::calloc(
+                                entry.param_names.len(),
+                                size_of::<*mut c_char>(),
+                            ) as *mut *mut c_char
+                        };
+                        if arr.is_null() {
+                            unsafe {
+                                libc::free(result.sql as *mut c_void);
+                            }
+                            result.sql = ptr::null_mut();
+                            write_error(&mut result.error, "out of memory");
+                            return false;
+                        }
+                        for (i, name) in entry.param_names.iter().enumerate() {
+                            let ptr = match name {
+                                Some(n) => unsafe { dup_c_bytes(n.as_bytes()) },
+                                None => ptr::null_mut(),
+                            };
+                            unsafe {
+                                *arr.add(i) = ptr;
+                            }
+                        }
+                        result.param_names = arr;
+                    }
+
+                    result.success = 1;
+                    return true;
                 }
             }
-            None
+            false
         })
-        .ok()
-        .flatten()
+        .unwrap_or(false)
 }
 
 fn cache_store(sql: &str, hash: u64, translated: &str, param_names: &[Option<String>]) {
@@ -316,40 +362,7 @@ pub extern "C" fn sql_translate(sqlite_sql: *const c_char) -> SqlTranslation {
     };
 
     let hash = hash_sql_bytes(sql_cstr.to_bytes());
-    if let Some(entry) = cache_lookup(sql_str, hash) {
-        let sql_dup = unsafe { dup_c_bytes(entry.sql.as_bytes()) };
-        if sql_dup.is_null() {
-            write_error(&mut result.error, "out of memory");
-            return result;
-        }
-        result.sql = sql_dup;
-        result.param_count = entry.param_names.len() as i32;
-
-        if !entry.param_names.is_empty() {
-            let arr = unsafe {
-                libc::calloc(entry.param_names.len(), size_of::<*mut c_char>()) as *mut *mut c_char
-            };
-            if arr.is_null() {
-                unsafe {
-                    libc::free(result.sql as *mut c_void);
-                }
-                result.sql = ptr::null_mut();
-                write_error(&mut result.error, "out of memory");
-                return result;
-            }
-            for (i, name) in entry.param_names.iter().enumerate() {
-                let ptr = match name {
-                    Some(n) => unsafe { dup_c_bytes(n.as_bytes()) },
-                    None => ptr::null_mut(),
-                };
-                unsafe {
-                    *arr.add(i) = ptr;
-                }
-            }
-            result.param_names = arr;
-        }
-
-        result.success = 1;
+    if cache_lookup_and_fill(sql_str, hash, &mut result) {
         return result;
     }
 

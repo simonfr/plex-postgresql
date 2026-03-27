@@ -2,13 +2,13 @@ use std::ffi::CString;
 use std::os::raw::{c_char, c_void};
 use std::sync::atomic::Ordering;
 
-use crate::db_interpose_conn_utils::log_debug;
 use crate::db_interpose_helpers::cstr_to_str_or_empty;
 use crate::ffi_types::PgConnection;
 use crate::sync_utils::mutex_lock;
 
 use super::tls_cache::{tls_pool_cache_get, tls_pool_cache_set};
 use super::{conn_db_path, conn_is_pg_active, pool, pool_get_connection_inner};
+use crate::log_debug_lazy;
 
 pub(super) fn is_library_db(path: &str) -> bool {
     path.ends_with("com.plexapp.plugins.library.db")
@@ -68,7 +68,7 @@ pub(super) fn pool_find_connection_for_db(db_handle: usize, db_path: *const c_ch
         let slot = &pm.slots[i];
         if slot.conn.load(Ordering::Acquire) == pool_conn {
             pm.db_to_pool.assign(db_handle, i);
-            log_debug(&format!("Tracked db {:x} -> pool slot {}", db_handle, i));
+            log_debug_lazy!("Tracked db {:x} -> pool slot {}", db_handle, i);
             break;
         }
     }

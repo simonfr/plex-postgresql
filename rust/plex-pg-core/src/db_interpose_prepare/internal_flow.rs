@@ -1,4 +1,6 @@
 use super::*;
+use crate::log_debug_lazy;
+use crate::log_info_lazy;
 
 struct StackState {
     size: usize,
@@ -110,22 +112,22 @@ fn current_stack_state() -> StackState {
 
 fn maybe_log_query_shape(z_sql: *const c_char, bytes: &[u8], skip_complex_processing: c_int) {
     if bytes.contains(&b'`') {
-        log_debug(&format!(
+        log_debug_lazy!(
             "BACKTICK_QUERY: skip_complex={} len={} sql={}",
             skip_complex_processing,
             bytes.len(),
             cstr_prefix(z_sql, 200, "NULL")
-        ));
+        );
     }
 
     if skip_complex_processing == 0
         && starts_with_ascii_icase(bytes, b"INSERT")
         && contains_ascii_icase(bytes, b"metadata_items")
     {
-        log_info(&format!(
+        log_info_lazy!(
             "PREPARE_V2 INSERT metadata_items: {}",
             cstr_prefix(z_sql, 300, "NULL")
-        ));
+        );
         if contains_ascii_icase(bytes, b"icu_root") {
             log_info("PREPARE_V2 has icu_root - will clean!");
         }
@@ -158,21 +160,21 @@ fn maybe_log_txn_route(
         TXN_ROUTE_PG.fetch_add(1, Ordering::Relaxed);
     }
 
-    log_info(&format!(
+    log_info_lazy!(
         "TXN_ROUTE prepare: skip={} is_write={} is_read={} sql={}",
         skip_now as i32,
         is_write as i32,
         is_read as i32,
         cstr_prefix(z_sql, 220, "NULL")
-    ));
+    );
 
     if total == 1 || total.is_multiple_of(50) {
         let skipped = TXN_ROUTE_SKIPPED.load(Ordering::Relaxed);
         let routed_pg = TXN_ROUTE_PG.load(Ordering::Relaxed);
-        log_info(&format!(
+        log_info_lazy!(
             "TXN_ROUTE stats: total={} skipped={} pg_routed={}",
             total, skipped, routed_pg
-        ));
+        );
     }
 }
 
@@ -197,10 +199,10 @@ pub(super) fn prepare_v2_internal_impl(
     }
 
     if trace_prepare_sql_ok(z_sql) {
-        log_debug(&format!(
+        log_debug_lazy!(
             "TRACE_PREPARE_SQL: {}",
             cstr_prefix(z_sql, 700, "NULL")
-        ));
+        );
     }
 
     unsafe {
@@ -281,10 +283,10 @@ pub(super) fn prepare_v2_internal_impl(
     let mut skip_complex_processing = 0;
     if from_worker == 0 && stack.remaining < 64_000 {
         skip_complex_processing = 1;
-        log_info(&format!(
+        log_info_lazy!(
             "STACK CAUTION: stack_used={}/{} bytes, remaining={} - skipping complex processing",
             stack.used, stack.size, stack.remaining
-        ));
+        );
     }
 
     if z_sql.is_null() {
@@ -313,11 +315,11 @@ pub(super) fn prepare_v2_internal_impl(
     maybe_log_txn_route(z_sql, pg_conn, is_read, is_write);
 
     if contains_icase_ptr(z_sql, "plugins") {
-        log_info(&format!(
+        log_info_lazy!(
             "SKIP_DEBUG plugins query skip={} sql={}",
             crate::pg_config::pg_config_should_skip_sql(z_sql) != 0,
             cstr_prefix(z_sql, 220, "NULL")
-        ));
+        );
     }
 
     let use_dummy_shadow = unsafe { should_use_dummy_shadow(pg_conn, z_sql, is_read, is_write) };

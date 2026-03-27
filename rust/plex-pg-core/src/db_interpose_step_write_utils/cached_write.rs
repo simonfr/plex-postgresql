@@ -1,4 +1,5 @@
 use super::*;
+use crate::log_debug_lazy;
 
 #[no_mangle]
 pub extern "C" fn rust_step_cached_write_should_noop(
@@ -111,11 +112,11 @@ pub extern "C" fn rust_step_cached_write_execute_and_finalize(
         }
 
         if contains_bytes(cstr_bytes(orig_sql), b"play_queue_generators") {
-            log_debug(&format!(
+            log_debug_lazy!(
                 "CACHED INSERT play_queue_generators on thread {:p} conn {:p}",
                 libc::pthread_self() as *mut c_void,
                 exec_conn
-            ));
+            );
         }
 
         crate::pg_client::rust_pool_touch_connection(exec_conn as *const c_void);
@@ -202,13 +203,13 @@ pub extern "C" fn rust_step_cached_write_execute_and_finalize(
                     0,
                 )
             } else {
-                log_debug(&format!(
+                log_debug_lazy!(
                     "CACHED EXEC prepare failed, using PQexec: {}",
                     cstr_to_string_or(
                         crate::libpq_helpers::rust_pq_error_message((*exec_conn).conn),
                         "(null)"
                     )
-                ));
+                );
                 crate::libpq_helpers::rust_pq_clear(prep_res);
                 crate::libpq_helpers::rust_pq_exec((*exec_conn).conn, exec_sql)
             }

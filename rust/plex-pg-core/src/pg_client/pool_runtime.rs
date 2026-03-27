@@ -11,6 +11,7 @@ use super::session::{exec_simple, PQTRANS_INERROR, PQTRANS_INTRANS};
 use super::threading::{current_thread_id, threads_equal};
 use super::tls_cache::tls_pool_cache_clear;
 use super::{log_info, pool, rust_stmt_cache_clear, SLOT_FREE, SLOT_READY};
+use crate::log_info_lazy;
 
 pub(super) fn pool_release_for_db_inner(db_handle: usize) {
     let pm = pool();
@@ -52,20 +53,20 @@ pub(super) fn pool_release_for_db_inner(db_handle: usize) {
                             } else {
                                 c"ROLLBACK"
                             };
-                            log_info(&format!(
+                            log_info_lazy!(
                                 "Pool: slot {} has pending transaction (status={}), sending cleanup before release",
                                 slot_idx, txn
-                            ));
+                            );
                             let _ = exec_simple(conn, cmd.as_ptr());
                         }
                     }
 
                     slot.owner_thread.store(0, Ordering::Release);
                     slot.state.store(SLOT_FREE, Ordering::Release);
-                    log_info(&format!(
+                    log_info_lazy!(
                         "Pool: releasing slot {} for db {:x}",
                         slot_idx, db_handle
-                    ));
+                    );
                 }
             }
         }
@@ -107,7 +108,7 @@ pub(super) fn pool_check_health_inner(conn: *mut c_void) -> i32 {
 
         let reset_ok = reset_conn(conn);
         if reset_ok {
-            log_info(&format!("Pool: connection reset successful for slot {}", i));
+            log_info_lazy!("Pool: connection reset successful for slot {}", i);
             slot.last_used.store(
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -132,10 +133,10 @@ pub(super) fn pool_check_health_inner(conn: *mut c_void) -> i32 {
                     .unwrap_or(0),
                 Ordering::Release,
             );
-            log_info(&format!(
+            log_info_lazy!(
                 "Pool: fresh connection succeeded for slot {} (reconnected)",
                 i
-            ));
+            );
             slot.mark_ready();
             return 1;
         } else {

@@ -6,6 +6,7 @@ use crate::sync_utils::mutex_lock;
 
 use super::super::pool_lookup::{is_blobs_db, is_library_db, select_library_pool_path};
 use super::super::PoolManager;
+use crate::log_debug_lazy;
 
 pub(super) fn resolve_selected_pool_path(
     pm: &PoolManager,
@@ -27,10 +28,10 @@ pub(super) fn resolve_selected_pool_path(
         Some(path) => path,
         None => {
             if !raw_path.is_empty() {
-                log_debug(&format!(
+                log_debug_lazy!(
                     "Pool: skipping non-library db_path for acquisition: {}",
                     raw_path
-                ));
+                );
             } else if !exclude_conn.is_null() {
                 log_debug(
                     "Pool: alternate acquisition has empty db_path and no cached library path",
@@ -41,17 +42,17 @@ pub(super) fn resolve_selected_pool_path(
     };
 
     if is_blobs_db(raw_path) && selected_path != raw_path {
-        log_debug(&format!(
+        log_debug_lazy!(
             "Pool: canonicalized blobs db_path {} to shared pool path {}",
             raw_path, selected_path
-        ));
+        );
     }
 
     if raw_path.is_empty() && !exclude_conn.is_null() {
-        log_debug(&format!(
+        log_debug_lazy!(
             "Pool: alternate acquisition using cached library path {}",
             selected_path
-        ));
+        );
     }
 
     if !is_library_db(&selected_path) {

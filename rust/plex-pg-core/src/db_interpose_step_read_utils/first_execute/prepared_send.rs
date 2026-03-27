@@ -1,4 +1,5 @@
 use super::*;
+use crate::log_debug_lazy;
 
 pub(super) fn disable_streaming_env() -> bool {
     unsafe {
@@ -102,12 +103,12 @@ pub(super) unsafe fn send_query_for_read(
 
     trace_play_queue_params(pg_stmt, param_values, "EXEC");
 
-    log_debug(&format!(
+    log_debug_lazy!(
         "PREPARED CHECK: use_prepared={} stmt_name[0]={} pg_sql={:p}",
         (*pg_stmt).use_prepared,
         (*pg_stmt).stmt_name[0] as i32,
         (*pg_stmt).pg_sql
-    ));
+    );
 
     let send_ok = send_prepared_or_params(pg_stmt, exec_conn, param_values);
     if send_ok != 0 {

@@ -3,9 +3,10 @@ use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_void};
 use std::sync::{Mutex, OnceLock};
 
-use crate::db_interpose_conn_utils::{log_debug, log_info};
 use crate::ffi_types::{PgConnection, STMT_NAME_LEN};
 use crate::libpq_helpers::{rust_pq_clear, rust_pq_exec};
+use crate::log_debug_lazy;
+use crate::log_info_lazy;
 
 pub(crate) const STMT_CACHE_SIZE: usize = 512;
 
@@ -273,10 +274,10 @@ pub extern "C" fn rust_stmt_cache_add(
 
     if let Some(evicted_name) = evicted {
         deallocate_stmt(conn, &evicted_name);
-        log_debug(&format!(
+        log_debug_lazy!(
             "Evicted prepared statement from cache: {}",
             stmt_name_to_string(&evicted_name)
-        ));
+        );
     }
 
     idx
@@ -292,10 +293,10 @@ pub extern "C" fn rust_stmt_cache_clear_local(conn: *mut c_void) {
     if let Some(cache) = caches.get_mut(&(conn as usize)) {
         cache.clear();
     }
-    log_info(&format!(
+    log_info_lazy!(
         "Cleared prepared statement cache (local only) for connection {:p}",
         conn
-    ));
+    );
 }
 
 /// Clear all cached statements for a connection (includes DEALLOCATE).
@@ -318,10 +319,10 @@ pub extern "C" fn rust_stmt_cache_clear(conn: *mut c_void) {
         deallocate_stmt(conn, name);
     }
 
-    log_debug(&format!(
+    log_debug_lazy!(
         "Cleared prepared statement cache for connection {:p}",
         conn
-    ));
+    );
 }
 
 /// Drop cache entry for a connection (no DEALLOCATE).

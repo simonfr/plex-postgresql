@@ -1,4 +1,5 @@
 use super::*;
+use crate::log_debug_lazy;
 
 pub(super) fn create_collation_impl(
     db: *mut sqlite3,
@@ -10,10 +11,10 @@ pub(super) fn create_collation_impl(
     if !name.is_null() {
         let name_bytes = unsafe { CStr::from_ptr(name).to_bytes() };
         if contains_icase_bytes(name_bytes, b"icu") {
-            log_debug(&format!(
+            log_debug_lazy!(
                 "Faking registration of collation: {}",
                 cstr_to_string_or(name, "")
-            ));
+            );
             return SQLITE_OK;
         }
     }
@@ -36,10 +37,10 @@ pub(super) fn create_collation_v2_impl(
     if !name.is_null() {
         let name_bytes = unsafe { CStr::from_ptr(name).to_bytes() };
         if contains_icase_bytes(name_bytes, b"icu") {
-            log_debug(&format!(
+            log_debug_lazy!(
                 "Faking registration of collation v2: {}",
                 cstr_to_string_or(name, "")
-            ));
+            );
             return SQLITE_OK;
         }
     }

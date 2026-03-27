@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 
 use crate::db_interpose_common::{tls_last_query_ptr, tls_value_type_calls_ptr};
 use crate::db_interpose_conn_utils::{
-    cstr_prefix, cstr_to_string_or, log_debug, log_error, log_info, PthreadMutexGuard,
+    cstr_prefix, cstr_to_string_or, log_error, PthreadMutexGuard,
 };
 use crate::db_interpose_helpers::PGresult as PgResultHelpers;
 use crate::ffi_types::{sqlite3, sqlite3_stmt, sqlite3_value, PgStmt};

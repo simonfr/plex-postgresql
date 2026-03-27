@@ -1,4 +1,6 @@
 use super::*;
+use crate::log_debug_lazy;
+use crate::log_info_lazy;
 
 pub(super) fn trace_prepare_sql_ok(sql: *const c_char) -> bool {
     crate::db_interpose_helpers::rust_trace_prepare_sql_ok(sql) != 0
@@ -11,10 +13,10 @@ pub(super) fn trace_prepare_pgsql_if_enabled(sqlite_sql: *const c_char, pg_sql: 
     if pg_sql.is_null() {
         return;
     }
-    log_debug(&format!(
+    log_debug_lazy!(
         "TRACE_PREPARE_PGSQL: {}",
         cstr_prefix(pg_sql, 900, "")
-    ));
+    );
 }
 
 pub(super) fn prepared_statements_disabled() -> bool {
@@ -67,12 +69,12 @@ pub(super) fn detect_query_loop(sql: *const c_char) -> bool {
         QUERY_LOOP_LOG_COUNTER.with(|c| {
             let cur = c.get();
             if cur % 10 == 0 {
-                log_info(&format!(
+                log_info_lazy!(
                     "High-frequency query: {} calls in {} ms (likely batch operation with different params) sql={}",
                     count,
                     elapsed_ms,
                     cstr_prefix(sql, 200, "NULL")
-                ));
+                );
             }
             c.set(cur.wrapping_add(1));
         });

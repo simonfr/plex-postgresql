@@ -1,5 +1,6 @@
 use super::support::{bytes_preview, cstr_to_str, param_at};
 use super::*;
+use crate::log_info_lazy;
 
 static TRACE_PLAY_QUEUE: AtomicI32 = AtomicI32::new(-1);
 
@@ -41,21 +42,21 @@ pub(crate) unsafe fn trace_play_queue_params(
     };
     let max_params = 16usize;
     let max_len = 256usize;
-    log_info(&format!(
+    log_info_lazy!(
         "PLAY_QUEUE TRACE {}: param_count={} sql={:.200}",
         phase,
         param_count,
         cstr_to_str((*pg_stmt).pg_sql)
-    ));
+    );
     if !(*pg_stmt).sql.is_null() && (*pg_stmt).sql != (*pg_stmt).pg_sql {
-        log_info(&format!(
+        log_info_lazy!(
             "PLAY_QUEUE TRACE {}: sqlite_sql={:.200}",
             phase,
             cstr_to_str((*pg_stmt).sql)
-        ));
+        );
     }
     if count == 0 {
-        log_info(&format!("PLAY_QUEUE TRACE {} params: (none)", phase));
+        log_info_lazy!("PLAY_QUEUE TRACE {} params: (none)", phase);
         return;
     }
     let mut parts: Vec<String> = Vec::with_capacity(count.min(max_params));
@@ -74,16 +75,16 @@ pub(crate) unsafe fn trace_play_queue_params(
         };
         parts.push(format!("${}={}", i + 1, val_str));
     }
-    log_info(&format!(
+    log_info_lazy!(
         "PLAY_QUEUE TRACE {} params: {}",
         phase,
         parts.join(", ")
-    ));
+    );
     if count > max_params {
-        log_info(&format!(
+        log_info_lazy!(
             "PLAY_QUEUE TRACE {} params: truncated {} of {}",
             phase, max_params, count
-        ));
+        );
     }
 }
 
@@ -100,10 +101,10 @@ pub(crate) unsafe fn trace_play_queue_result(
     let max_rows = 5i32;
     let max_cols = 16i32;
     let max_len = 256usize;
-    log_info(&format!(
+    log_info_lazy!(
         "PLAY_QUEUE TRACE {} result: rows={} cols={}",
         phase, num_rows, num_cols
-    ));
+    );
     let rows = if num_rows > 0 { num_rows } else { 0 };
     let cols = if num_cols > 0 { num_cols } else { 0 };
     let row_cap = rows.min(max_rows);
@@ -139,23 +140,23 @@ pub(crate) unsafe fn trace_play_queue_result(
             };
             parts.push(format!("{}={}", name, val));
         }
-        log_info(&format!(
+        log_info_lazy!(
             "PLAY_QUEUE TRACE {} row {}: {}",
             phase,
             r,
             parts.join(", ")
-        ));
+        );
     }
     if rows > row_cap {
-        log_info(&format!(
+        log_info_lazy!(
             "PLAY_QUEUE TRACE {} result: truncated rows {} of {}",
             phase, row_cap, rows
-        ));
+        );
     }
     if cols > col_cap {
-        log_info(&format!(
+        log_info_lazy!(
             "PLAY_QUEUE TRACE {} result: truncated cols {} of {}",
             phase, col_cap, cols
-        ));
+        );
     }
 }
