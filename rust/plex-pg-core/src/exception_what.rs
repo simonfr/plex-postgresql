@@ -11,12 +11,8 @@ mod impl_unix {
     use std::ptr;
 
     type TerminateHandler = extern "C" fn();
-    type CxaDemangleFn = unsafe extern "C" fn(
-        *const c_char,
-        *mut c_char,
-        *mut libc::size_t,
-        *mut c_int,
-    ) -> *mut c_char;
+    use crate::db_interpose_common::{CxaDemangleFn, CXA_DEMANGLE_FN};
+
     type CxaSetTerminateFn = unsafe extern "C" fn(TerminateHandler) -> TerminateHandler;
     type CxaGetExceptionPtrFn = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
     type CxaCurrentExceptionTypeFn = unsafe extern "C" fn() -> *mut c_void;
@@ -40,25 +36,15 @@ mod impl_unix {
     }
 
     unsafe fn ensure_cxa_demangle() -> Option<CxaDemangleFn> {
-        let slot = ptr::addr_of!(crate::db_interpose_common::cxa_demangle_fn);
-        let mut current = read_option(slot);
-        if current.is_none() {
+        let opt = CXA_DEMANGLE_FN.get_or_init(|| {
             let sym = load_sym_raw(b"__cxa_demangle\0");
             if !sym.is_null() {
-                *ptr::addr_of_mut!(crate::db_interpose_common::cxa_demangle_fn) =
-                    Some(std::mem::transmute::<
-                        *mut c_void,
-                        unsafe extern "C" fn(
-                            *const c_char,
-                            *mut c_char,
-                            *mut libc::size_t,
-                            *mut c_int,
-                        ) -> *mut c_char,
-                    >(sym));
+                Some(std::mem::transmute::<*mut c_void, CxaDemangleFn>(sym))
+            } else {
+                None
             }
-            current = read_option(slot);
-        }
-        current
+        });
+        *opt
     }
 
     #[cfg(target_os = "macos")]

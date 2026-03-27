@@ -2,6 +2,7 @@ use std::mem::size_of;
 
 use std::os::raw::{c_char, c_int, c_uint, c_void};
 use std::ptr;
+use std::sync::atomic::{AtomicPtr, Ordering};
 
 #[repr(C)]
 pub struct Rebinding {
@@ -17,7 +18,7 @@ struct RebindingsEntry {
     next: *mut RebindingsEntry,
 }
 
-static mut REBINDINGS_HEAD: *mut RebindingsEntry = ptr::null_mut();
+static REBINDINGS_HEAD: AtomicPtr<RebindingsEntry> = AtomicPtr::new(ptr::null_mut());
 
 const SEG_DATA: &[u8] = b"__DATA\0";
 const SEG_LINKEDIT: &[u8] = b"__LINKEDIT\0";
@@ -258,6 +259,39 @@ unsafe fn prepend_rebindings(
     0
 }
 
+/// Atomically prepend a new entry to the global `REBINDINGS_HEAD` list using
+/// a CAS loop.  Returns 0 on success, -1 on allocation failure.
+unsafe fn prepend_rebindings_atomic(
+    rebindings: *const Rebinding,
+    nel: usize,
+) -> c_int {
+    let entry = libc::malloc(size_of::<RebindingsEntry>()) as *mut RebindingsEntry;
+    if entry.is_null() {
+        return -1;
+    }
+    let reb_mem = libc::malloc(size_of::<Rebinding>() * nel) as *mut Rebinding;
+    if reb_mem.is_null() {
+        libc::free(entry as *mut c_void);
+        return -1;
+    }
+    ptr::copy_nonoverlapping(rebindings, reb_mem, nel);
+
+    (*entry).rebindings = reb_mem;
+    (*entry).rebindings_nel = nel;
+
+    loop {
+        let old_head = REBINDINGS_HEAD.load(Ordering::Acquire);
+        (*entry).next = old_head;
+        if REBINDINGS_HEAD
+            .compare_exchange_weak(old_head, entry, Ordering::Release, Ordering::Relaxed)
+            .is_ok()
+        {
+            break;
+        }
+    }
+    0
+}
+
 unsafe fn perform_rebinding_with_section(
     rebindings: *mut RebindingsEntry,
     section: *const Section,
@@ -397,7 +431,7 @@ unsafe fn rebind_symbols_for_image(
 
 extern "C" fn rebind_symbols_for_image_callback(header: *const MachHeader, slide: isize) {
     unsafe {
-        rebind_symbols_for_image(ptr::read(ptr::addr_of!(REBINDINGS_HEAD)), header, slide);
+        rebind_symbols_for_image(REBINDINGS_HEAD.load(Ordering::Acquire), header, slide);
     }
 }
 
@@ -422,16 +456,12 @@ unsafe fn rebind_symbols_image(
 /// duration of the call. The caller must ensure the supplied symbol names
 /// are null-terminated and remain valid until rebinding completes.
 pub unsafe fn rebind_symbols(rebindings: &mut [Rebinding]) -> c_int {
-    let retval = prepend_rebindings(
-        std::ptr::addr_of_mut!(REBINDINGS_HEAD),
-        rebindings.as_ptr(),
-        rebindings.len(),
-    );
+    let retval = prepend_rebindings_atomic(rebindings.as_ptr(), rebindings.len());
     if retval < 0 {
         return retval;
     }
 
-    let head = ptr::read(ptr::addr_of!(REBINDINGS_HEAD));
+    let head = REBINDINGS_HEAD.load(Ordering::Acquire);
     if !head.is_null() && (*head).next.is_null() {
         _dyld_register_func_for_add_image(rebind_symbols_for_image_callback);
     } else {
@@ -439,7 +469,7 @@ pub unsafe fn rebind_symbols(rebindings: &mut [Rebinding]) -> c_int {
         for i in 0..count {
             let header = _dyld_get_image_header(i);
             let slide = _dyld_get_image_vmaddr_slide(i);
-            rebind_symbols_for_image(ptr::read(ptr::addr_of!(REBINDINGS_HEAD)), header, slide);
+            rebind_symbols_for_image(REBINDINGS_HEAD.load(Ordering::Acquire), header, slide);
         }
     }
 

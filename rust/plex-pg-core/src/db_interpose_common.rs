@@ -1,7 +1,7 @@
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int, c_uchar, c_uint, c_void};
 use std::ptr;
-use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU32, Ordering};
 
 use crate::db_interpose_conn_utils::{log_error, log_info, PthreadMutexGuard};
 use crate::env_utils;
@@ -74,13 +74,12 @@ pub(crate) use process_policy::{
     linux_process_name_is_primary, linux_process_name_requires_passthrough,
 };
 pub(crate) use sqlite_abi::*;
-use sqlite_symbols::read_option;
 pub use sqlite_symbols::{
     rust_common_load_sqlite_symbols, rust_reset_symbol_verification, rust_shim_ensure_ready,
 };
 use state::*;
 pub use state::{
-    cxa_demangle_fn, orig_sqlite3_bind_blob, orig_sqlite3_bind_blob64, orig_sqlite3_bind_double,
+    CxaDemangleFn, CXA_DEMANGLE_FN, orig_sqlite3_bind_blob, orig_sqlite3_bind_blob64, orig_sqlite3_bind_double,
     orig_sqlite3_bind_int, orig_sqlite3_bind_int64, orig_sqlite3_bind_null,
     orig_sqlite3_bind_parameter_count, orig_sqlite3_bind_parameter_index,
     orig_sqlite3_bind_parameter_name, orig_sqlite3_bind_text, orig_sqlite3_bind_text64,
@@ -110,6 +109,10 @@ pub(crate) use tls_support::{
 pub(crate) use worker_runtime::fast_mark_fork_child_passthrough;
 pub use worker_runtime::{rust_delegate_prepare_to_worker, rust_worker_cleanup, rust_worker_init};
 pub(crate) use state::{GLOBAL_COLUMN_TYPE_CALLS, GLOBAL_VALUE_TYPE_CALLS};
+pub(crate) use state::{
+    CRASH_LAST_COLUMN, CRASH_LAST_COLUMN_LEN, CRASH_LAST_COLUMN_SEQ,
+    CRASH_COLUMN_MAX_LEN as CRASH_LAST_COLUMN_MAX_LEN,
+};
 
 #[cfg(test)]
 mod tests;

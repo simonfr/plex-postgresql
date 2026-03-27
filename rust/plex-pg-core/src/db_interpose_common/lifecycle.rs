@@ -34,8 +34,7 @@ pub extern "C" fn rust_common_atfork_child() {
         worker_thread = 0 as libc::pthread_t;
         worker_running = 0;
         worker_request = EMPTY_WORKER_REQUEST;
-        last_query_being_processed = ptr::null();
-        last_column_being_accessed = ptr::null();
+        CRASH_LAST_COLUMN_LEN.store(0, Ordering::SeqCst);
         GLOBAL_VALUE_TYPE_CALLS.store(0, Ordering::Relaxed);
         GLOBAL_COLUMN_TYPE_CALLS.store(0, Ordering::Relaxed);
 
@@ -69,8 +68,7 @@ pub extern "C" fn rust_common_check_fork() -> c_int {
             libc::fflush(stderr_ptr());
 
             SHIM_INITIALIZED.store(0, Ordering::Release);
-            last_query_being_processed = ptr::null();
-            last_column_being_accessed = ptr::null();
+            CRASH_LAST_COLUMN_LEN.store(0, Ordering::SeqCst);
             GLOBAL_VALUE_TYPE_CALLS.store(0, Ordering::Relaxed);
             GLOBAL_COLUMN_TYPE_CALLS.store(0, Ordering::Relaxed);
             rust_reset_exception_tracking();

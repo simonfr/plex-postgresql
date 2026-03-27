@@ -7,6 +7,7 @@ pub(super) const EXC_PHASE_MAX_LEN: usize = 32;
 
 pub(super) const CRASH_QUERY_MAX_LEN: usize = 512;
 pub(super) const CRASH_PHASE_MAX_LEN: usize = 64;
+pub(crate) const CRASH_COLUMN_MAX_LEN: usize = 64;
 
 pub(super) const WORK_NONE: c_int = 0;
 pub(super) const WORK_PREPARE_V2: c_int = 1;
@@ -70,8 +71,13 @@ pub(super) static mut EXC_PHASE_RING_MUTEX: libc::pthread_mutex_t = libc::PTHREA
 
 pub(super) static mut CRASH_LAST_QUERY: [c_char; CRASH_QUERY_MAX_LEN] = [0; CRASH_QUERY_MAX_LEN];
 pub(super) static CRASH_LAST_QUERY_LEN: AtomicI32 = AtomicI32::new(0);
+pub(super) static CRASH_LAST_QUERY_SEQ: AtomicU32 = AtomicU32::new(0);
 pub(super) static mut CRASH_LAST_PHASE: [c_char; CRASH_PHASE_MAX_LEN] = [0; CRASH_PHASE_MAX_LEN];
 pub(super) static CRASH_LAST_PHASE_LEN: AtomicI32 = AtomicI32::new(0);
+pub(super) static CRASH_LAST_PHASE_SEQ: AtomicU32 = AtomicU32::new(0);
+pub(crate) static mut CRASH_LAST_COLUMN: [c_char; CRASH_COLUMN_MAX_LEN] = [0; CRASH_COLUMN_MAX_LEN];
+pub(crate) static CRASH_LAST_COLUMN_LEN: AtomicI32 = AtomicI32::new(0);
+pub(crate) static CRASH_LAST_COLUMN_SEQ: AtomicU32 = AtomicU32::new(0);
 
 /// Wrapper around `*const c_char` that is `Send + Sync` so it can be stored
 /// inside a `OnceLock`.  The pointer is either a `&'static [u8]` literal or
@@ -252,18 +258,19 @@ pub(super) static mut worker_running: c_int = 0;
 pub static SHIM_INITIALIZED: AtomicI32 = AtomicI32::new(0);
 pub static SHIM_PASSTHROUGH_ONLY: AtomicI32 = AtomicI32::new(0);
 
-#[no_mangle]
-pub(super) static mut last_query_being_processed: *const c_char = ptr::null();
-#[no_mangle]
-pub(super) static mut last_column_being_accessed: *const c_char = ptr::null();
 
 pub(crate) static GLOBAL_VALUE_TYPE_CALLS: AtomicI64 = AtomicI64::new(0);
 pub(crate) static GLOBAL_COLUMN_TYPE_CALLS: AtomicI64 = AtomicI64::new(0);
 
-#[no_mangle]
-pub static mut cxa_demangle_fn: Option<
-    unsafe extern "C" fn(*const c_char, *mut c_char, *mut libc::size_t, *mut c_int) -> *mut c_char,
-> = None;
+pub type CxaDemangleFn = unsafe extern "C" fn(
+    *const c_char,
+    *mut c_char,
+    *mut libc::size_t,
+    *mut c_int,
+) -> *mut c_char;
+
+pub static CXA_DEMANGLE_FN: std::sync::OnceLock<Option<CxaDemangleFn>> =
+    std::sync::OnceLock::new();
 
 #[no_mangle]
 pub(super) static mut shim_init_pid: libc::pid_t = 0;

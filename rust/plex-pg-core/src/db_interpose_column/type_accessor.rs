@@ -1,4 +1,7 @@
 use super::*;
+use crate::db_interpose_common::{
+    CRASH_LAST_COLUMN, CRASH_LAST_COLUMN_LEN, CRASH_LAST_COLUMN_MAX_LEN, CRASH_LAST_COLUMN_SEQ,
+};
 use crate::log_debug_lazy;
 
 struct CachedTypeState {
@@ -236,7 +239,32 @@ unsafe fn resolve_live_column_type(
 
     let trace_col = trace_badcast_should_log_col(pg_stmt, idx, state.col_name);
     ctx.trace_col = trace_col;
-    last_column_being_accessed = state.col_name;
+    // --- seqlock: begin CRASH_LAST_COLUMN write ---
+    {
+        let c_seq = CRASH_LAST_COLUMN_SEQ.load(Ordering::Relaxed);
+        CRASH_LAST_COLUMN_SEQ.store(c_seq.wrapping_add(1), Ordering::Release);
+        let clen = if !state.col_name.is_null() && *state.col_name != 0 {
+            let mut wrote = libc::snprintf(
+                ptr::addr_of_mut!(CRASH_LAST_COLUMN) as *mut c_char,
+                CRASH_LAST_COLUMN_MAX_LEN,
+                b"%.63s\0".as_ptr() as *const c_char,
+                state.col_name,
+            );
+            if wrote < 0 {
+                wrote = 0;
+            }
+            if wrote >= CRASH_LAST_COLUMN_MAX_LEN as c_int {
+                wrote = CRASH_LAST_COLUMN_MAX_LEN as c_int - 1;
+            }
+            wrote
+        } else {
+            CRASH_LAST_COLUMN[0] = 0;
+            0
+        };
+        CRASH_LAST_COLUMN_LEN.store(clen, Ordering::SeqCst);
+        CRASH_LAST_COLUMN_SEQ.store(c_seq.wrapping_add(2), Ordering::Release);
+    }
+    // --- seqlock: end CRASH_LAST_COLUMN write ---
 
     if state.is_null {
         ctx.is_null = true;
@@ -279,7 +307,6 @@ pub(super) fn column_type_impl(p_stmt: *mut sqlite3_stmt, idx: c_int) -> c_int {
 
     if !pg_stmt.is_null() && unsafe { (*pg_stmt).is_pg != 0 } {
         unsafe {
-            last_query_being_processed = (*pg_stmt).pg_sql;
             let tls_query = tls_last_query_ptr();
             *tls_query = (*pg_stmt).pg_sql;
         }

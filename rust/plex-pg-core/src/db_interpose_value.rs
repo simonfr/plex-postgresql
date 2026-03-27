@@ -65,8 +65,6 @@ extern "C" {
     static mut orig_sqlite3_value_blob:
         Option<unsafe extern "C" fn(*mut sqlite3_value) -> *const c_void>;
 
-    static mut last_query_being_processed: *const c_char;
-    static mut last_column_being_accessed: *const c_char;
     fn pg_check_fake_value(p_val: *mut sqlite3_value) -> *mut PgFakeValue;
     fn pg_exception_note_phase(
         phase: *const c_char,

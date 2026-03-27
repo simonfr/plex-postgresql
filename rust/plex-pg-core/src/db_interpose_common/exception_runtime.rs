@@ -66,26 +66,40 @@ pub extern "C" fn rust_common_signal_handler(sig: c_int) {
         );
         let _ = libc::write(fd, b"\n".as_ptr() as *const c_void, 1);
 
-        let plen = CRASH_LAST_PHASE_LEN.load(Ordering::SeqCst);
-        if plen > 0 && (plen as usize) < CRASH_PHASE_MAX_LEN {
-            let _ = libc::write(fd, b"Last Phase: ".as_ptr() as *const c_void, 12);
-            let _ = libc::write(
-                fd,
-                ptr::addr_of!(CRASH_LAST_PHASE) as *const c_void,
-                plen as usize,
-            );
-            let _ = libc::write(fd, b"\n".as_ptr() as *const c_void, 1);
+        // --- seqlock-guarded read of CRASH_LAST_PHASE ---
+        let p_seq1 = CRASH_LAST_PHASE_SEQ.load(Ordering::Acquire);
+        if p_seq1 & 1 == 0 {
+            let plen = CRASH_LAST_PHASE_LEN.load(Ordering::SeqCst);
+            if plen > 0 && (plen as usize) < CRASH_PHASE_MAX_LEN {
+                let p_seq2 = CRASH_LAST_PHASE_SEQ.load(Ordering::Acquire);
+                if p_seq1 == p_seq2 {
+                    let _ = libc::write(fd, b"Last Phase: ".as_ptr() as *const c_void, 12);
+                    let _ = libc::write(
+                        fd,
+                        ptr::addr_of!(CRASH_LAST_PHASE) as *const c_void,
+                        plen as usize,
+                    );
+                    let _ = libc::write(fd, b"\n".as_ptr() as *const c_void, 1);
+                }
+            }
         }
 
-        let qlen = CRASH_LAST_QUERY_LEN.load(Ordering::SeqCst);
-        if qlen > 0 && (qlen as usize) < CRASH_QUERY_MAX_LEN {
-            let _ = libc::write(fd, b"Last Query: ".as_ptr() as *const c_void, 12);
-            let _ = libc::write(
-                fd,
-                ptr::addr_of!(CRASH_LAST_QUERY) as *const c_void,
-                qlen as usize,
-            );
-            let _ = libc::write(fd, b"\n".as_ptr() as *const c_void, 1);
+        // --- seqlock-guarded read of CRASH_LAST_QUERY ---
+        let q_seq1 = CRASH_LAST_QUERY_SEQ.load(Ordering::Acquire);
+        if q_seq1 & 1 == 0 {
+            let qlen = CRASH_LAST_QUERY_LEN.load(Ordering::SeqCst);
+            if qlen > 0 && (qlen as usize) < CRASH_QUERY_MAX_LEN {
+                let q_seq2 = CRASH_LAST_QUERY_SEQ.load(Ordering::Acquire);
+                if q_seq1 == q_seq2 {
+                    let _ = libc::write(fd, b"Last Query: ".as_ptr() as *const c_void, 12);
+                    let _ = libc::write(
+                        fd,
+                        ptr::addr_of!(CRASH_LAST_QUERY) as *const c_void,
+                        qlen as usize,
+                    );
+                    let _ = libc::write(fd, b"\n".as_ptr() as *const c_void, 1);
+                }
+            }
         }
     }
 
@@ -104,28 +118,45 @@ pub extern "C" fn rust_common_signal_handler(sig: c_int) {
         );
         write_box_line(BOX_ML, BOX_MR);
 
-        let ctx_query = last_query_being_processed;
-        let ctx_column = last_column_being_accessed;
-        if !ctx_query.is_null() {
-            let mut q: [c_char; 65] = [0; 65];
-            libc::snprintf(
-                q.as_mut_ptr(),
-                q.len(),
-                b"%.64s\0".as_ptr() as *const c_char,
-                ctx_query,
-            );
-            libc::fprintf(
-                stderr_ptr(),
-                b"\xE2\x95\x91 Last Query:  %-65s \xE2\x95\x91\n\0".as_ptr() as *const c_char,
-                q.as_ptr(),
-            );
+        // --- seqlock-guarded read of CRASH_LAST_QUERY for box output ---
+        let q_box_seq1 = CRASH_LAST_QUERY_SEQ.load(Ordering::Acquire);
+        if q_box_seq1 & 1 == 0 {
+            let qlen = CRASH_LAST_QUERY_LEN.load(Ordering::SeqCst);
+            if qlen > 0 && (qlen as usize) < CRASH_QUERY_MAX_LEN {
+                let q_box_seq2 = CRASH_LAST_QUERY_SEQ.load(Ordering::Acquire);
+                if q_box_seq1 == q_box_seq2 {
+                    let mut q: [c_char; 65] = [0; 65];
+                    libc::snprintf(
+                        q.as_mut_ptr(),
+                        q.len(),
+                        b"%.64s\0".as_ptr() as *const c_char,
+                        ptr::addr_of!(CRASH_LAST_QUERY) as *const c_char,
+                    );
+                    libc::fprintf(
+                        stderr_ptr(),
+                        b"\xE2\x95\x91 Last Query:  %-65s \xE2\x95\x91\n\0".as_ptr()
+                            as *const c_char,
+                        q.as_ptr(),
+                    );
+                }
+            }
         }
-        if !ctx_column.is_null() {
-            libc::fprintf(
-                stderr_ptr(),
-                b"\xE2\x95\x91 Last Column: %-65s \xE2\x95\x91\n\0".as_ptr() as *const c_char,
-                ctx_column,
-            );
+
+        // --- seqlock-guarded read of CRASH_LAST_COLUMN for box output ---
+        let c_box_seq1 = CRASH_LAST_COLUMN_SEQ.load(Ordering::Acquire);
+        if c_box_seq1 & 1 == 0 {
+            let clen = CRASH_LAST_COLUMN_LEN.load(Ordering::SeqCst);
+            if clen > 0 && (clen as usize) < CRASH_COLUMN_MAX_LEN {
+                let c_box_seq2 = CRASH_LAST_COLUMN_SEQ.load(Ordering::Acquire);
+                if c_box_seq1 == c_box_seq2 {
+                    libc::fprintf(
+                        stderr_ptr(),
+                        b"\xE2\x95\x91 Last Column: %-65s \xE2\x95\x91\n\0".as_ptr()
+                            as *const c_char,
+                        ptr::addr_of!(CRASH_LAST_COLUMN) as *const c_char,
+                    );
+                }
+            }
         }
 
         write_box_line(BOX_BL, BOX_BR);
@@ -152,26 +183,20 @@ pub extern "C" fn rust_print_exception_info(
     tinfo: *mut c_void,
 ) -> *mut c_char {
     unsafe {
-        if read_option(ptr::addr_of!(cxa_demangle_fn)).is_none() {
+        let demangle_opt = CXA_DEMANGLE_FN.get_or_init(|| {
             let sym = libc::dlsym(
                 libc::RTLD_DEFAULT,
                 b"__cxa_demangle\0".as_ptr() as *const c_char,
             );
             if !sym.is_null() {
-                *ptr::addr_of_mut!(cxa_demangle_fn) = Some(std::mem::transmute::<
-                    *mut libc::c_void,
-                    unsafe extern "C" fn(
-                        *const c_char,
-                        *mut c_char,
-                        *mut libc::size_t,
-                        *mut c_int,
-                    ) -> *mut c_char,
-                >(sym));
+                Some(std::mem::transmute::<*mut libc::c_void, CxaDemangleFn>(sym))
+            } else {
+                None
             }
-        }
+        });
 
         let mut demangled: *mut c_char = ptr::null_mut();
-        if let Some(demangle) = read_option(ptr::addr_of!(cxa_demangle_fn)) {
+        if let Some(demangle) = demangle_opt {
             if !type_name.is_null() {
                 let mut status: c_int = 0;
                 demangled = demangle(type_name, ptr::null_mut(), ptr::null_mut(), &mut status);
@@ -183,16 +208,28 @@ pub extern "C" fn rust_print_exception_info(
             type_name
         };
 
-        let ctx_query = last_query_being_processed;
-        let ctx_column = last_column_being_accessed;
         let ctx_value_calls = GLOBAL_VALUE_TYPE_CALLS.load(Ordering::Relaxed);
         let ctx_column_calls = GLOBAL_COLUMN_TYPE_CALLS.load(Ordering::Relaxed);
         let tls_column_type_calls = *tls_column_type_calls_ptr();
         let tls_value_type_calls = *tls_value_type_calls_ptr();
         let tls_last_query = *tls_last_query_ptr();
-        let is_shim_related = ctx_value_calls > 0 || ctx_column_calls > 0 || !ctx_query.is_null();
+        let is_shim_related =
+            ctx_value_calls > 0 || ctx_column_calls > 0 || !tls_last_query.is_null();
         let tls_is_shim_related =
             tls_column_type_calls > 0 || tls_value_type_calls > 0 || !tls_last_query.is_null();
+        // Read CRASH_LAST_COLUMN into a local buffer (exception handler, not
+        // signal-safe context, so a simple copy is fine).
+        let mut exc_col_buf: [c_char; CRASH_COLUMN_MAX_LEN] = [0; CRASH_COLUMN_MAX_LEN];
+        let exc_col_len = CRASH_LAST_COLUMN_LEN.load(Ordering::SeqCst);
+        let has_crash_column =
+            exc_col_len > 0 && (exc_col_len as usize) < CRASH_COLUMN_MAX_LEN;
+        if has_crash_column {
+            ptr::copy_nonoverlapping(
+                ptr::addr_of!(CRASH_LAST_COLUMN) as *const c_char,
+                exc_col_buf.as_mut_ptr(),
+                exc_col_len as usize + 1,
+            );
+        }
 
         let tid = libc::pthread_self();
 
@@ -290,26 +327,26 @@ pub extern "C" fn rust_print_exception_info(
                         .as_ptr() as *const c_char,
                 );
             }
-            if !ctx_query.is_null() && *ctx_query != 0 {
+            if !tls_last_query.is_null() && *tls_last_query != 0 {
                 let mut query_snippet: [c_char; 55] = [0; 55];
                 libc::snprintf(
                     query_snippet.as_mut_ptr(),
                     query_snippet.len(),
                     b"%.54s\0".as_ptr() as *const c_char,
-                    ctx_query,
+                    tls_last_query,
                 );
                 libc::fprintf(
                     stderr_ptr(),
-                    b"\xE2\x95\x91   Last Query (any thread): %-51s \xE2\x95\x91\n\0".as_ptr()
+                    b"\xE2\x95\x91   Last Query (this thread): %-50s \xE2\x95\x91\n\0".as_ptr()
                         as *const c_char,
                     query_snippet.as_ptr(),
                 );
             }
-            if !ctx_column.is_null() && *ctx_column != 0 {
+            if has_crash_column {
                 libc::fprintf(
                     stderr_ptr(),
                     b"\xE2\x95\x91   Last Column: %-63s \xE2\x95\x91\n\0".as_ptr() as *const c_char,
-                    ctx_column,
+                    exc_col_buf.as_ptr(),
                 );
             }
         } else {
@@ -502,12 +539,17 @@ pub extern "C" fn rust_common_handle_exception(
 
 #[no_mangle]
 pub extern "C" fn rust_pg_exception_get_last_query() -> *const c_char {
-    unsafe { last_query_being_processed }
+    unsafe { *tls_last_query_ptr() }
 }
 
 #[no_mangle]
 pub extern "C" fn rust_pg_exception_get_last_column() -> *const c_char {
-    unsafe { last_column_being_accessed }
+    let len = CRASH_LAST_COLUMN_LEN.load(Ordering::SeqCst);
+    if len > 0 && (len as usize) < CRASH_COLUMN_MAX_LEN {
+        ptr::addr_of!(CRASH_LAST_COLUMN) as *const c_char
+    } else {
+        ptr::null()
+    }
 }
 
 #[no_mangle]

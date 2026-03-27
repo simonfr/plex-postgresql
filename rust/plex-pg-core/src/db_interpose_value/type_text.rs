@@ -1,4 +1,7 @@
 use super::*;
+use crate::db_interpose_common::{
+    CRASH_LAST_COLUMN, CRASH_LAST_COLUMN_LEN, CRASH_LAST_COLUMN_MAX_LEN, CRASH_LAST_COLUMN_SEQ,
+};
 use crate::db_interpose_value::support::{
     fake_value_has_result, helpers_result_ptr, load_fake_value_context, sqlite_type_name,
 };
@@ -31,7 +34,6 @@ pub(super) fn value_type_impl(p_val: *mut sqlite3_value) -> c_int {
 
     let call_num = VALUE_TYPE_CALLS.fetch_add(1, Ordering::Relaxed);
     unsafe {
-        last_query_being_processed = (*ctx.pg_stmt).pg_sql;
         let tls_query = tls_last_query_ptr();
         *tls_query = (*ctx.pg_stmt).pg_sql;
     }
@@ -61,9 +63,32 @@ pub(super) fn value_type_impl(p_val: *mut sqlite3_value) -> c_int {
         helpers_result_ptr(result_ptr),
         ctx.col,
     );
+    // --- seqlock: begin CRASH_LAST_COLUMN write ---
     unsafe {
-        last_column_being_accessed = col_name;
+        let c_seq = CRASH_LAST_COLUMN_SEQ.load(Ordering::Relaxed);
+        CRASH_LAST_COLUMN_SEQ.store(c_seq.wrapping_add(1), Ordering::Release);
+        let clen = if !col_name.is_null() && *col_name != 0 {
+            let mut wrote = libc::snprintf(
+                ptr::addr_of_mut!(CRASH_LAST_COLUMN) as *mut c_char,
+                CRASH_LAST_COLUMN_MAX_LEN,
+                b"%.63s\0".as_ptr() as *const c_char,
+                col_name,
+            );
+            if wrote < 0 {
+                wrote = 0;
+            }
+            if wrote >= CRASH_LAST_COLUMN_MAX_LEN as c_int {
+                wrote = CRASH_LAST_COLUMN_MAX_LEN as c_int - 1;
+            }
+            wrote
+        } else {
+            CRASH_LAST_COLUMN[0] = 0;
+            0
+        };
+        CRASH_LAST_COLUMN_LEN.store(clen, Ordering::SeqCst);
+        CRASH_LAST_COLUMN_SEQ.store(c_seq.wrapping_add(2), Ordering::Release);
     }
+    // --- seqlock: end CRASH_LAST_COLUMN write ---
 
     let result = if ok != 0 { sqlite_type } else { SQLITE_NULL };
     if call_num % 1000 == 0 {

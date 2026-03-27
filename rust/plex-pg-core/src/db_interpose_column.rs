@@ -121,9 +121,6 @@ extern "C" {
     static mut orig_sqlite3_db_handle:
         Option<unsafe extern "C" fn(*mut sqlite3_stmt) -> *mut sqlite3>;
 
-    static mut last_query_being_processed: *const c_char;
-    static mut last_column_being_accessed: *const c_char;
-
     fn pg_find_any_stmt(stmt: *mut sqlite3_stmt) -> *mut PgStmt;
     fn pg_get_thread_connection(db_path: *const c_char) -> *mut PgConnection;
     fn pg_get_thread_connection_excluding(

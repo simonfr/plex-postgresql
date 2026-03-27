@@ -85,6 +85,9 @@ pub extern "C" fn rust_pg_exception_note_phase(
 
         phase_guard.unlock();
 
+        // --- seqlock: begin CRASH_LAST_QUERY write ---
+        let q_seq = CRASH_LAST_QUERY_SEQ.load(Ordering::Relaxed);
+        CRASH_LAST_QUERY_SEQ.store(q_seq.wrapping_add(1), Ordering::Release); // odd = writing
         let qlen = if !sql.is_null() && *sql != 0 {
             let mut wrote = libc::snprintf(
                 ptr::addr_of_mut!(CRASH_LAST_QUERY) as *mut c_char,
@@ -104,7 +107,12 @@ pub extern "C" fn rust_pg_exception_note_phase(
             0
         };
         CRASH_LAST_QUERY_LEN.store(qlen, Ordering::SeqCst);
+        CRASH_LAST_QUERY_SEQ.store(q_seq.wrapping_add(2), Ordering::Release); // even = done
+        // --- seqlock: end CRASH_LAST_QUERY write ---
 
+        // --- seqlock: begin CRASH_LAST_PHASE write ---
+        let p_seq = CRASH_LAST_PHASE_SEQ.load(Ordering::Relaxed);
+        CRASH_LAST_PHASE_SEQ.store(p_seq.wrapping_add(1), Ordering::Release); // odd = writing
         let plen = if !phase.is_null() && *phase != 0 {
             let mut wrote = libc::snprintf(
                 ptr::addr_of_mut!(CRASH_LAST_PHASE) as *mut c_char,
@@ -124,6 +132,8 @@ pub extern "C" fn rust_pg_exception_note_phase(
             0
         };
         CRASH_LAST_PHASE_LEN.store(plen, Ordering::SeqCst);
+        CRASH_LAST_PHASE_SEQ.store(p_seq.wrapping_add(2), Ordering::Release); // even = done
+        // --- seqlock: end CRASH_LAST_PHASE write ---
 
         let trace_path = TRACE_LAST_QUERY_PATH
             .get()

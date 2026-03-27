@@ -2,7 +2,7 @@ use std::ffi::CStr;
 use std::os::raw::{c_char, c_int, c_void};
 use std::ptr;
 
-use crate::db_interpose_common::cxa_demangle_fn;
+use crate::db_interpose_common::CXA_DEMANGLE_FN;
 
 const MAX_FRAMES: usize = 64;
 const MAX_DISPLAY: usize = 25;
@@ -131,7 +131,7 @@ unsafe fn resolve_symbols(frames: &[*mut c_void], out: &mut [ResolvedSymbol]) {
             }
             if end > start {
                 let mangled = &before_plus[start..end];
-                let demangle_opt = unsafe { cxa_demangle_fn };
+                let demangle_opt = CXA_DEMANGLE_FN.get().copied().flatten();
                 if let Some(demangle) = demangle_opt {
                     let mut status: c_int = 0;
                     let demangled = demangle(
@@ -274,7 +274,7 @@ unsafe fn resolve_symbols(frames: &[*mut c_void], out: &mut [ResolvedSymbol]) {
             }
 
             if !info.dli_sname.is_null() {
-                let demangle_opt = unsafe { cxa_demangle_fn };
+                let demangle_opt = CXA_DEMANGLE_FN.get().copied().flatten();
                 if let Some(demangle) = demangle_opt {
                     let mut status: c_int = 0;
                     let demangled = demangle(
