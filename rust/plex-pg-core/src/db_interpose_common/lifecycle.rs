@@ -36,8 +36,8 @@ pub extern "C" fn rust_common_atfork_child() {
         worker_request = EMPTY_WORKER_REQUEST;
         last_query_being_processed = ptr::null();
         last_column_being_accessed = ptr::null();
-        global_value_type_calls = 0;
-        global_column_type_calls = 0;
+        GLOBAL_VALUE_TYPE_CALLS.store(0, Ordering::Relaxed);
+        GLOBAL_COLUMN_TYPE_CALLS.store(0, Ordering::Relaxed);
 
         rust_reset_exception_tracking();
         rust_reset_symbol_verification();
@@ -68,11 +68,11 @@ pub extern "C" fn rust_common_check_fork() -> c_int {
             );
             libc::fflush(stderr_ptr());
 
-            shim_initialized = 0;
+            SHIM_INITIALIZED.store(0, Ordering::Release);
             last_query_being_processed = ptr::null();
             last_column_being_accessed = ptr::null();
-            global_value_type_calls = 0;
-            global_column_type_calls = 0;
+            GLOBAL_VALUE_TYPE_CALLS.store(0, Ordering::Relaxed);
+            GLOBAL_COLUMN_TYPE_CALLS.store(0, Ordering::Relaxed);
             rust_reset_exception_tracking();
 
             shim_init_pid = current_pid;

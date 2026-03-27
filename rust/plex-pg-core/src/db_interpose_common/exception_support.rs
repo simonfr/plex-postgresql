@@ -203,25 +203,25 @@ pub(super) fn write_box_line(left: &[u8], right: &[u8]) {
 }
 
 pub(super) fn trace_last_query_enabled() -> bool {
-    let cached = TRACE_LAST_QUERY_CACHED.load(Ordering::Acquire);
-    if cached != -1 {
-        return cached != 0;
-    }
-
-    let mut enabled = false;
-    unsafe {
-        let env = libc::getenv(b"PLEX_PG_TRACE_LAST_QUERY\0".as_ptr() as *const c_char);
-        if !env.is_null() && *env != 0 && *env != b'0' as c_char {
-            enabled = true;
-            let path = libc::getenv(b"PLEX_PG_TRACE_LAST_QUERY_FILE\0".as_ptr() as *const c_char);
-            if !path.is_null() && *path != 0 {
-                TRACE_LAST_QUERY_PATH = path;
+    // `get_or_init` is thread-safe; the old `TRACE_LAST_QUERY_CACHED` atomic
+    // is no longer needed because `OnceLock` provides the same semantics
+    // without a separate flag.
+    TRACE_LAST_QUERY_PATH
+        .get_or_init(|| unsafe {
+            let env = libc::getenv(b"PLEX_PG_TRACE_LAST_QUERY\0".as_ptr() as *const c_char);
+            if !env.is_null() && *env != 0 && *env != b'0' as c_char {
+                let path =
+                    libc::getenv(b"PLEX_PG_TRACE_LAST_QUERY_FILE\0".as_ptr() as *const c_char);
+                if !path.is_null() && *path != 0 {
+                    SendCharPtr(path)
+                } else {
+                    SendCharPtr(TRACE_LAST_QUERY_DEFAULT.as_ptr() as *const c_char)
+                }
             } else {
-                TRACE_LAST_QUERY_PATH = TRACE_LAST_QUERY_DEFAULT.as_ptr() as *const c_char;
+                // Feature disabled — store a null sentinel.
+                SendCharPtr(ptr::null())
             }
-        }
-    }
-
-    TRACE_LAST_QUERY_CACHED.store(if enabled { 1 } else { 0 }, Ordering::Release);
-    enabled
+        })
+        .0
+        != ptr::null()
 }

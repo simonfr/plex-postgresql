@@ -134,7 +134,7 @@ fn daemon_suppressed() -> bool {
 }
 
 unsafe fn likely_pms_primary_process() -> bool {
-    db_interpose_common::shim_passthrough_only == 0
+    db_interpose_common::SHIM_PASSTHROUGH_ONLY.load(std::sync::atomic::Ordering::Acquire) == 0
 }
 
 fn should_wrap_clone(flags: c_int) -> bool {
@@ -190,8 +190,8 @@ unsafe fn maybe_log_event(op: &'static [u8], rc: i64, err: c_int) {
         libc::getppid(),
         rc,
         err,
-        db_interpose_common::shim_passthrough_only,
-        db_interpose_common::shim_initialized,
+        db_interpose_common::SHIM_PASSTHROUGH_ONLY.load(std::sync::atomic::Ordering::Acquire),
+        db_interpose_common::SHIM_INITIALIZED.load(std::sync::atomic::Ordering::Acquire),
     );
     let _ = libc::fflush(stderr_ptr());
 }

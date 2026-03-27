@@ -108,12 +108,12 @@ pub extern "C" fn rust_worker_init() -> c_int {
 
 #[cfg(target_os = "linux")]
 pub(crate) unsafe fn fast_mark_fork_child_passthrough() {
-    shim_passthrough_only = 1;
+    SHIM_PASSTHROUGH_ONLY.store(1, Ordering::Release);
     shim_init_pid = libc::getpid();
     last_query_being_processed = ptr::null();
     last_column_being_accessed = ptr::null();
-    global_value_type_calls = 0;
-    global_column_type_calls = 0;
+    GLOBAL_VALUE_TYPE_CALLS.store(0, Ordering::Relaxed);
+    GLOBAL_COLUMN_TYPE_CALLS.store(0, Ordering::Relaxed);
     fake_value_next = 0;
     worker_thread = 0 as libc::pthread_t;
     worker_running = 0;

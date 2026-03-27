@@ -1,6 +1,6 @@
 use std::cell::{Cell, RefCell};
 use std::ffi::{CStr, CString};
-use std::os::raw::{c_char, c_int, c_long, c_uchar, c_uint, c_void};
+use std::os::raw::{c_char, c_int, c_uchar, c_uint, c_void};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, Once};
@@ -25,7 +25,7 @@ mod value_accessor;
 use crate::db_interpose_common::{
     fake_value_mutex, fake_value_next, fake_value_pool, tls_column_type_calls_ptr,
     tls_in_resolve_tables_ptr, tls_last_query_ptr, PgFakeValue, MAX_FAKE_VALUES,
-    PG_FAKE_VALUE_MAGIC,
+    PG_FAKE_VALUE_MAGIC, GLOBAL_COLUMN_TYPE_CALLS,
 };
 use crate::db_interpose_conn_utils::{
     cstr_prefix, cstr_to_string_or, log_debug, log_error, log_info, PthreadMutexGuard,
@@ -123,7 +123,6 @@ extern "C" {
 
     static mut last_query_being_processed: *const c_char;
     static mut last_column_being_accessed: *const c_char;
-    static mut global_column_type_calls: c_long;
 
     fn pg_find_any_stmt(stmt: *mut sqlite3_stmt) -> *mut PgStmt;
     fn pg_get_thread_connection(db_path: *const c_char) -> *mut PgConnection;

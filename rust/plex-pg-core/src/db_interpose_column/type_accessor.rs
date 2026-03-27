@@ -32,7 +32,7 @@ impl LiveTypeState {
 }
 
 unsafe fn bump_column_type_counters() {
-    global_column_type_calls = global_column_type_calls.wrapping_add(1);
+    GLOBAL_COLUMN_TYPE_CALLS.fetch_add(1, Ordering::Relaxed);
     let tls_calls = tls_column_type_calls_ptr();
     *tls_calls = (*tls_calls).wrapping_add(1);
 }

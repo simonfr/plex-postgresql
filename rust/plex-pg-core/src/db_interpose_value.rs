@@ -1,9 +1,9 @@
 use std::ffi::CStr;
-use std::os::raw::{c_char, c_int, c_long, c_uchar, c_void};
+use std::os::raw::{c_char, c_int, c_uchar, c_void};
 use std::ptr;
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 
-use crate::db_interpose_common::{tls_last_query_ptr, tls_value_type_calls_ptr};
+use crate::db_interpose_common::{tls_last_query_ptr, tls_value_type_calls_ptr, GLOBAL_VALUE_TYPE_CALLS};
 use crate::db_interpose_conn_utils::{
     cstr_prefix, cstr_to_string_or, log_error, PthreadMutexGuard,
 };
@@ -67,8 +67,6 @@ extern "C" {
 
     static mut last_query_being_processed: *const c_char;
     static mut last_column_being_accessed: *const c_char;
-    static mut global_value_type_calls: c_long;
-
     fn pg_check_fake_value(p_val: *mut sqlite3_value) -> *mut PgFakeValue;
     fn pg_exception_note_phase(
         phase: *const c_char,

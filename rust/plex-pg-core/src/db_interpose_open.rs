@@ -19,7 +19,6 @@ extern "C" {
     >;
     static mut orig_sqlite3_close: Option<unsafe extern "C" fn(*mut sqlite3) -> c_int>;
     static mut orig_sqlite3_close_v2: Option<unsafe extern "C" fn(*mut sqlite3) -> c_int>;
-    static mut shim_passthrough_only: c_int;
 }
 
 fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
@@ -30,7 +29,7 @@ fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
 }
 
 fn should_redirect(filename: *const c_char) -> bool {
-    let passthrough = unsafe { shim_passthrough_only };
+    let passthrough = crate::db_interpose_common::SHIM_PASSTHROUGH_ONLY.load(std::sync::atomic::Ordering::Acquire);
     crate::pg_config::pg_config_should_redirect(filename, passthrough) != 0
 }
 
