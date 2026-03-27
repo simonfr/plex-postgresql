@@ -176,11 +176,29 @@ pub extern "C" fn rust_step_conn_cancel_and_drain(
             return;
         }
 
-        crate::libpq_helpers::rust_pq_set_nonblocking((*conn).conn, 0);
-        while crate::libpq_helpers::rust_pq_is_busy((*conn).conn) != 0 {
-            crate::libpq_helpers::rust_pq_consume_input((*conn).conn);
+        // Fast path: if connection is idle (not busy), skip the expensive
+        // PQcancel + drain entirely. This saves a TCP roundtrip per call.
+        crate::libpq_helpers::rust_pq_consume_input((*conn).conn);
+        if crate::libpq_helpers::rust_pq_is_busy((*conn).conn) == 0 {
+            // Quick drain: clear any already-buffered results without cancel.
+            let pending = crate::libpq_helpers::rust_pq_get_result((*conn).conn);
+            if pending.is_null() {
+                return; // Nothing pending — skip entirely.
+            }
+            crate::libpq_helpers::rust_pq_clear(pending);
+            // Drain any remaining.
+            loop {
+                let more = crate::libpq_helpers::rust_pq_get_result((*conn).conn);
+                if more.is_null() {
+                    break;
+                }
+                crate::libpq_helpers::rust_pq_clear(more);
+            }
+            return;
         }
 
+        // Slow path: connection is busy — cancel and drain.
+        crate::libpq_helpers::rust_pq_set_nonblocking((*conn).conn, 0);
         let cancel: *mut PGcancel = crate::libpq_helpers::rust_pq_get_cancel((*conn).conn);
         if !cancel.is_null() {
             let mut errbuf = [0 as c_char; 256];
@@ -199,22 +217,8 @@ pub extern "C" fn rust_step_conn_cancel_and_drain(
                 break;
             }
             drain_count += 1;
-            if drain_count <= 3 {
-                let status = crate::libpq_helpers::rust_pq_result_status(pending);
-                let status_str = cstr_to_str(crate::libpq_helpers::rust_pq_res_status(status));
-                let tag = cstr_to_str(scope_tag);
-                log_info(&format!(
-                    "{}: Drained orphaned result from connection {:p} (status={}: {})",
-                    tag, conn, status, status_str
-                ));
-            }
             crate::libpq_helpers::rust_pq_clear(pending);
             if drain_count > 1000 {
-                let tag = cstr_to_str(scope_tag);
-                log_info(&format!(
-                    "{}: Drain loop exceeded 1000 on {:p} - aborting drain",
-                    tag, conn
-                ));
                 break;
             }
         }

@@ -29,6 +29,11 @@ pub(crate) fn validate_type_consistency(
     idx: c_int,
     accessor_name: &str,
 ) {
+    // Skip expensive validation unless debug logging is enabled.
+    if crate::pg_logging::LOG_LEVEL.load(std::sync::atomic::Ordering::Relaxed) < 2 {
+        return;
+    }
+
     let pg_stmt = unsafe { pg_find_any_stmt(p_stmt) };
     if pg_stmt.is_null() || unsafe { (*pg_stmt).is_pg == 0 } {
         return;

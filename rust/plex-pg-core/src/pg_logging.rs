@@ -43,7 +43,7 @@ pub const LEVEL_DEBUG: i32 = 2;
 // ─── Global state ─────────────────────────────────────────────────────────────
 
 /// The configured log level (0=ERROR, 1=INFO, 2=DEBUG).
-static LOG_LEVEL: AtomicI32 = AtomicI32::new(LEVEL_INFO);
+pub static LOG_LEVEL: AtomicI32 = AtomicI32::new(LEVEL_INFO);
 
 /// The configured max file size in bytes.
 static MAX_SIZE: AtomicU64 = AtomicU64::new(DEFAULT_MAX_SIZE);
