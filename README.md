@@ -6,7 +6,7 @@
 
 A small shim library that catches Plex SQLite calls and sends them to PostgreSQL. You do not need to change Plex source code.
 
-## 🎉 Latest Release: v1.1.0
+## 🎉 Latest Release: v1.2.0
 
 **100% Rust shim runtime** — the entire interpose layer is now pure Rust. All C runtime code has been eliminated. The shim compiles to a single static library linked into the dylib/so.
 
@@ -16,7 +16,7 @@ A small shim library that catches Plex SQLite calls and sends them to PostgreSQL
 - 🔧 **Stack safety:** heap-allocated thread-local buffers for Plex's 544K worker thread stacks
 - ✅ **712 tests passing** across unit, integration, and compatibility suites
 
-[📥 Download v1.1.0](https://github.com/cgnl/plex-postgresql/releases/tag/v1.1.0) | [📋 Full Changelog](CHANGELOG.md)
+[📥 Download v1.2.0](https://github.com/cgnl/plex-postgresql/releases/tag/v1.2.0) | [📋 Full Changelog](CHANGELOG.md)
 
 Linux and macOS release zips are built by GitHub Actions on tag push via `.github/workflows/release-linux-artifacts.yml` and `.github/workflows/release-macos-artifacts.yml`.
 Pull requests and `main`/`develop` pushes run `.github/workflows/ci.yml` (script validation + Linux amd64 build check + full test suite + FFI header verification).

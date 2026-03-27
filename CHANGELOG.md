@@ -5,6 +5,22 @@ All notable changes to plex-postgresql will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+
+## [1.2.0] - 2026-03-28
+
+### Changed
+- **92% unsafe reduction** — raw pointer dereferences 806→59. Internal functions use safe `&mut PgStmt` / `&mut PgConnection` references. Business logic is now Rust-safe; unsafe confined to FFI boundary.
+- **PgStmt Vec-based allocation** — inline `[T; 1024]` arrays replaced with `Vec<T>` that grow on-demand. 0-param SELECT uses 540 bytes (was 88KB). Allocated via `Box::new()`, freed via Drop.
+- **Rust Mutex on PgStmt** — `pthread_mutex_t` replaced with `std::sync::Mutex<()>`. Auto-initialized, no manual pthread calls.
+- **138 functions de-FFI'd** — removed `#[no_mangle] extern "C"` from Rust-only functions, enabling inlining and eliminating C ABI overhead.
+- **Safe orig_sqlite3 accessors** — 55 static mut function pointer reads encapsulated in safe accessor functions via macro-generated wrappers.
+
+### Fixed
+- **Memory leak (1.8GB→59MB)** — PGresult leak in re-execution path, transaction control routing mismatch (BEGIN/COMMIT sent to PG instead of skipped), cached_result ref_count not released on stmt free.
+- **3 deadlocks eliminated** — connection mutex self-deadlock (PTHREAD_MUTEX_RECURSIVE), ABBA deadlock (stmt→LOGGER mutex), connection mutex convoy (reduced lock hold time).
+- **Stack overflow** — 512KB thread-local buffers heap-allocated via `vec![].into_boxed_slice()` for Plex's 544K worker threads.
+- **11 data races fixed** — atomic counters/flags, seqlock on crash buffers, OnceLock for lazy config, eager hook resolution, AtomicPtr for fishhook linked list.
+- **All clippy warnings resolved** — zero warnings on Linux CI with `-D warnings`.
 ## [1.1.0] - 2026-03-26
 
 ### Changed
