@@ -19,6 +19,9 @@ const DEFAULT_LOG_BUDGET: i32 = 16;
 /// Eagerly resolve the real `setsockopt` via `dlsym(RTLD_NEXT, ...)`.
 /// Called once from the shim constructor so the interposition wrapper never
 /// races on a lazy write.
+///
+/// # Safety
+/// Must be called once during shim init (single-threaded `.init_array` context).
 #[allow(static_mut_refs)]
 pub unsafe fn init_net_compat_hooks() {
     let sym = libc::dlsym(libc::RTLD_NEXT, b"setsockopt\0".as_ptr() as *const c_char);
