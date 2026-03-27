@@ -10,6 +10,7 @@ unsafe fn store_sqlite_value_param(
 ) {
     let vtype = crate::db_interpose_value::rust_my_sqlite3_value_type(mutable_value);
     free_dynamic_param_value(pg_stmt, pg_idx);
+    let stmt = &mut *pg_stmt;
 
     match vtype {
         SQLITE_INTEGER => {
@@ -21,7 +22,7 @@ unsafe fn store_sqlite_value_param(
                 b"%lld\0".as_ptr() as *const c_char,
                 v as libc::c_longlong,
             );
-            (*pg_stmt).param_values[pg_idx] = libc::strdup(buf.as_ptr());
+            stmt.param_values[pg_idx] = libc::strdup(buf.as_ptr());
         }
         SQLITE_FLOAT => {
             let v = crate::db_interpose_value::rust_my_sqlite3_value_double(mutable_value);
@@ -32,22 +33,22 @@ unsafe fn store_sqlite_value_param(
                 b"%.17g\0".as_ptr() as *const c_char,
                 v,
             );
-            (*pg_stmt).param_values[pg_idx] = libc::strdup(buf.as_ptr());
+            stmt.param_values[pg_idx] = libc::strdup(buf.as_ptr());
         }
         SQLITE_TEXT => {
             let v = crate::db_interpose_value::rust_my_sqlite3_value_text(mutable_value);
             if !v.is_null() {
-                (*pg_stmt).param_values[pg_idx] = libc::strdup(v as *const c_char);
+                stmt.param_values[pg_idx] = libc::strdup(v as *const c_char);
             }
         }
         SQLITE_BLOB => {
             let len = crate::db_interpose_value::rust_my_sqlite3_value_bytes(mutable_value);
             let v = crate::db_interpose_value::rust_my_sqlite3_value_blob(mutable_value);
             if !v.is_null() && len > 0 {
-                (*pg_stmt).param_values[pg_idx] = libc::malloc(len as usize) as *mut c_char;
-                if !(*pg_stmt).param_values[pg_idx].is_null() {
+                stmt.param_values[pg_idx] = libc::malloc(len as usize) as *mut c_char;
+                if !stmt.param_values[pg_idx].is_null() {
                     libc::memcpy(
-                        (*pg_stmt).param_values[pg_idx] as *mut c_void,
+                        stmt.param_values[pg_idx] as *mut c_void,
                         v,
                         len as usize,
                     );
@@ -59,8 +60,8 @@ unsafe fn store_sqlite_value_param(
                         );
                     }
                 }
-                (*pg_stmt).param_lengths[pg_idx] = len;
-                (*pg_stmt).param_formats[pg_idx] = 1;
+                stmt.param_lengths[pg_idx] = len;
+                stmt.param_formats[pg_idx] = 1;
             }
         }
         SQLITE_NULL | _ => {}

@@ -28,7 +28,7 @@ pub(crate) fn pg_decode_bytea_cached_impl(
                 ptr::null_mut(),
                 (*pg_stmt).decoded_blobs.as_mut_ptr(),
                 (*pg_stmt).decoded_blob_lens.as_mut_ptr(),
-                MAX_PARAMS as c_int,
+                (*pg_stmt).decoded_blobs.len() as c_int,
                 ptr::null_mut(),
                 &mut (*pg_stmt).decoded_blob_row as *mut c_int,
             );

@@ -54,6 +54,7 @@ pub(super) unsafe fn streaming_fetch_result(
         (*pg_stmt).current_row = 0;
         (*pg_stmt).num_rows = 1;
         (*pg_stmt).num_cols = crate::libpq_helpers::rust_pq_nfields(first_res);
+        (*pg_stmt).ensure_column_capacity((*pg_stmt).num_cols as usize);
         resolve_column_tables(pg_stmt, exec_conn);
         trace_play_queue_result(pg_stmt, first_res, "STREAM FIRST");
         *exec_conn_io = exec_conn;

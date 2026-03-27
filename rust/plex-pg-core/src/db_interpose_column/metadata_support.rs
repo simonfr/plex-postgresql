@@ -181,6 +181,7 @@ pub(crate) fn ensure_pg_result_for_metadata(pg_stmt: *mut PgStmt) -> bool {
 
             if crate::libpq_helpers::rust_pq_result_status(desc) == PGRES_COMMAND_OK {
                 (*pg_stmt).num_cols = crate::libpq_helpers::rust_pq_nfields(desc);
+                (*pg_stmt).ensure_column_capacity((*pg_stmt).num_cols as usize);
                 if (*pg_stmt).num_cols > 0 {
                     let ncols = (*pg_stmt).num_cols as usize;
                     let col_names =
@@ -226,12 +227,14 @@ pub(crate) fn ensure_pg_result_for_metadata(pg_stmt: *mut PgStmt) -> bool {
         cstr_prefix(unsafe { (*pg_stmt).pg_sql }, 100, "?")
     );
 
-    let mut param_values: [*const c_char; MAX_PARAMS] = [ptr::null(); MAX_PARAMS];
-    unsafe {
-        for i in 0..(*pg_stmt).param_count as usize {
-            param_values[i] = (*pg_stmt).param_values[i] as *const c_char;
+    let param_values: Vec<*const c_char> = unsafe {
+        let count = ((*pg_stmt).param_count.max(0) as usize).min((*pg_stmt).param_values.len());
+        let mut pv = vec![ptr::null(); count];
+        for i in 0..count {
+            pv[i] = (*pg_stmt).param_values[i] as *const c_char;
         }
-    }
+        pv
+    };
 
     unsafe {
         (*pg_stmt).result = crate::libpq_helpers::rust_pq_exec_params(
@@ -251,6 +254,7 @@ pub(crate) fn ensure_pg_result_for_metadata(pg_stmt: *mut PgStmt) -> bool {
         unsafe {
             (*pg_stmt).num_rows = crate::libpq_helpers::rust_pq_ntuples((*pg_stmt).result);
             (*pg_stmt).num_cols = crate::libpq_helpers::rust_pq_nfields((*pg_stmt).result);
+            (*pg_stmt).ensure_column_capacity((*pg_stmt).num_cols as usize);
 
             set_metadata_result_state(
                 pg_stmt,

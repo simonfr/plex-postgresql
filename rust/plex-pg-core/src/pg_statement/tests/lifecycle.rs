@@ -8,6 +8,7 @@ fn stmt_free_sweeps_extra_param_values_without_crash() {
         assert!(!stmt.is_null());
 
         (*stmt).param_count = 1;
+        (*stmt).ensure_param_capacity(101); // need at least 101 for index [100]
 
         let a = libc::malloc(16) as *mut c_char;
         let b = libc::malloc(1024 * 1024) as *mut c_char;
@@ -30,6 +31,7 @@ fn stmt_unref_cleans_bind_index_mismatch_slots() {
         assert!(!stmt.is_null());
 
         (*stmt).param_count = 1;
+        (*stmt).ensure_param_capacity(16); // need at least 16 for index [15]
 
         for i in 1..16 {
             let buf = libc::malloc(256) as *mut c_char;

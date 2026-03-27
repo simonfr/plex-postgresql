@@ -3,7 +3,7 @@ use std::ptr;
 use std::sync::atomic::Ordering;
 
 use crate::db_interpose_conn_utils::{log_debug, log_info, PthreadMutexGuard};
-use crate::ffi_types::{sqlite3_stmt, PgStmt, MAX_PARAMS, PARAM_BUF_LEN};
+use crate::ffi_types::{sqlite3_stmt, PgStmt};
 
 use super::ring_tracker::{
     clear_finalized_entry, clear_prepared_stmt, is_prepared_stmt, is_recently_finalized_stmt,
@@ -13,22 +13,9 @@ use super::ring_tracker::{
 use super::*;
 use crate::log_debug_lazy;
 
-unsafe fn is_preallocated_buffer(stmt: *mut PgStmt, idx: usize) -> bool {
-    if stmt.is_null() || idx >= MAX_PARAMS {
-        return false;
-    }
-    let val = (*stmt).param_values[idx];
-    if val.is_null() {
-        return false;
-    }
-    let val_addr = val as usize;
-    let base = (*stmt).param_buffers[idx].as_ptr() as usize;
-    val_addr >= base && val_addr < base + PARAM_BUF_LEN
-}
-
 unsafe fn clear_dynamic_param_values(stmt: *mut PgStmt) {
-    for i in 0..MAX_PARAMS {
-        if !(*stmt).param_values[i].is_null() && !is_preallocated_buffer(stmt, i) {
+    for i in 0..(*stmt).param_values.len() {
+        if !(*stmt).param_values[i].is_null() && !(*stmt).is_preallocated_buffer(i) {
             libc::free((*stmt).param_values[i] as *mut c_void);
             (*stmt).param_values[i] = ptr::null_mut();
         }

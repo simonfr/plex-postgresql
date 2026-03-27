@@ -78,6 +78,7 @@ pub(super) fn streaming_next_impl(p_stmt: *mut sqlite3_stmt, stmt: *mut PgStmt) 
             (*stmt).current_row = 0;
             (*stmt).num_rows = 1;
             (*stmt).num_cols = crate::libpq_helpers::rust_pq_nfields(row_res);
+            (*stmt).ensure_column_capacity((*stmt).num_cols as usize);
             trace_play_queue_result(stmt, row_res, "STREAM NEXT");
             stmt_guard.unlock();
             return STEP_RESULT_ROW;

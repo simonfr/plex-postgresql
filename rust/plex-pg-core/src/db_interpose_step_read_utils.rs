@@ -13,7 +13,7 @@ use crate::db_interpose_conn_utils::{
     apply_pg_session_settings, connect_new, log_debug, log_error, log_info, PgConnConfig,
     PthreadMutexGuard, STATEMENT_TIMEOUT_SQL,
 };
-use crate::ffi_types::{sqlite3, sqlite3_stmt, PgConnection, PgStmt, MAX_PARAMS};
+use crate::ffi_types::{sqlite3, sqlite3_stmt, PgConnection, PgStmt};
 use crate::libpq_helpers::PGresult;
 use first_execute::first_execute_impl;
 use next_result::{

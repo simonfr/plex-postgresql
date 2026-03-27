@@ -15,18 +15,19 @@ unsafe fn store_text_param(
     label: &str,
 ) {
     free_dynamic_param_value(pg_stmt, pg_idx);
+    let stmt = &mut *pg_stmt;
 
     if contains_binary_bytes(val as *const u8, actual_len) {
         log_debug_lazy!(
             "{}: detected binary data at idx={}, len={}, converting to hex",
             label, idx, actual_len
         );
-        (*pg_stmt).param_values[pg_idx] = bytes_to_pg_hex(val as *const u8, actual_len);
+        stmt.param_values[pg_idx] = bytes_to_pg_hex(val as *const u8, actual_len);
         return;
     }
 
     if duplicate_input {
-        (*pg_stmt).param_values[pg_idx] = libc::strdup(val);
+        stmt.param_values[pg_idx] = libc::strdup(val);
         if crate::pg_mem_telemetry::rust_mem_telemetry_enabled() != 0 {
             crate::pg_mem_telemetry::rust_mem_telemetry_add(
                 PMT_BIND_TEXT_ALLOC,
@@ -37,14 +38,14 @@ unsafe fn store_text_param(
         return;
     }
 
-    (*pg_stmt).param_values[pg_idx] = libc::malloc(actual_len + 1) as *mut c_char;
-    if !(*pg_stmt).param_values[pg_idx].is_null() {
+    stmt.param_values[pg_idx] = libc::malloc(actual_len + 1) as *mut c_char;
+    if !stmt.param_values[pg_idx].is_null() {
         libc::memcpy(
-            (*pg_stmt).param_values[pg_idx] as *mut c_void,
+            stmt.param_values[pg_idx] as *mut c_void,
             val as *const c_void,
             actual_len,
         );
-        *(*pg_stmt).param_values[pg_idx].add(actual_len) = 0;
+        *stmt.param_values[pg_idx].add(actual_len) = 0;
         if crate::pg_mem_telemetry::rust_mem_telemetry_enabled() != 0 {
             crate::pg_mem_telemetry::rust_mem_telemetry_add(
                 PMT_BIND_TEXT_ALLOC,
@@ -64,13 +65,14 @@ unsafe fn store_blob_hex_param(
     label: &str,
 ) {
     free_dynamic_param_value(pg_stmt, pg_idx);
+    let stmt = &mut *pg_stmt;
     log_debug_lazy!(
         "{}: converting {} bytes to hex at idx={}",
         label, n_bytes, idx
     );
-    (*pg_stmt).param_values[pg_idx] = bytes_to_pg_hex(val as *const u8, n_bytes);
-    (*pg_stmt).param_lengths[pg_idx] = 0;
-    (*pg_stmt).param_formats[pg_idx] = 0;
+    stmt.param_values[pg_idx] = bytes_to_pg_hex(val as *const u8, n_bytes);
+    stmt.param_lengths[pg_idx] = 0;
+    stmt.param_formats[pg_idx] = 0;
 }
 
 pub(super) fn bind_text_impl(

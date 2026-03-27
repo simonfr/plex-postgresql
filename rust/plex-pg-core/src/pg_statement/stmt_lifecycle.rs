@@ -3,9 +3,7 @@ use std::sync::atomic::Ordering;
 
 use crate::db_interpose_conn_utils::{log_debug, log_error, PthreadMutexGuard};
 use crate::db_interpose_helpers::cstr_to_str_or_empty;
-use crate::ffi_types::{PgConnection, PgStmt, MAX_COLS, MAX_PARAMS};
-
-use super::is_preallocated_buffer;
+use crate::ffi_types::{PgConnection, PgStmt};
 use crate::log_debug_lazy;
 use crate::log_info_lazy;
 
@@ -93,8 +91,9 @@ unsafe fn safe_param_count(stmt: &PgStmt) -> usize {
     if count < 0 {
         count = 0;
     }
-    if count as usize > MAX_PARAMS {
-        count = MAX_PARAMS as c_int;
+    let cap = stmt.param_values.len();
+    if count as usize > cap {
+        count = cap as c_int;
     }
     count as usize
 }
@@ -190,9 +189,9 @@ pub extern "C" fn rust_stmt_free(stmt_ptr: *mut PgStmt) {
 
         let safe_param_count = safe_param_count(stmt);
 
-        for i in 0..MAX_PARAMS {
+        for i in 0..stmt.param_values.len() {
             let val = stmt.param_values[i];
-            if !val.is_null() && !is_preallocated_buffer(stmt, i) {
+            if !val.is_null() && !stmt.is_preallocated_buffer(i) {
                 log_debug_lazy!(
                     "pg_stmt_free: freeing param_values[{}]={:p}",
                     i, val
@@ -236,7 +235,7 @@ pub extern "C" fn rust_stmt_free(stmt_ptr: *mut PgStmt) {
             stmt.param_names = std::ptr::null_mut();
         }
 
-        for i in 0..MAX_PARAMS {
+        for i in 0..stmt.decoded_blobs.len() {
             let blob = stmt.decoded_blobs[i];
             if !blob.is_null() {
                 log_debug_lazy!(
@@ -248,7 +247,7 @@ pub extern "C" fn rust_stmt_free(stmt_ptr: *mut PgStmt) {
             }
         }
 
-        for i in 0..MAX_PARAMS {
+        for i in 0..stmt.cached_text.len() {
             let text = stmt.cached_text[i];
             if !text.is_null() {
                 log_debug_lazy!(
@@ -258,6 +257,8 @@ pub extern "C" fn rust_stmt_free(stmt_ptr: *mut PgStmt) {
                 libc::free(text as *mut c_void);
                 stmt.cached_text[i] = std::ptr::null_mut();
             }
+        }
+        for i in 0..stmt.cached_blob.len() {
             let blob = stmt.cached_blob[i];
             if !blob.is_null() {
                 log_debug_lazy!(
@@ -269,7 +270,7 @@ pub extern "C" fn rust_stmt_free(stmt_ptr: *mut PgStmt) {
             }
         }
 
-        for i in 0..MAX_COLS {
+        for i in 0..stmt.col_table_names.len() {
             let name = stmt.col_table_names[i];
             if !name.is_null() {
                 libc::free(name as *mut c_void);
@@ -284,7 +285,7 @@ pub extern "C" fn rust_stmt_free(stmt_ptr: *mut PgStmt) {
             stmt_ptr
         );
         libc::pthread_mutex_destroy(&mut stmt.mutex as *mut _);
-        libc::free(stmt_ptr as *mut c_void);
+        drop(Box::from_raw(stmt_ptr));
         log_debug("pg_stmt_free: DONE");
     }
 }
@@ -315,7 +316,7 @@ pub extern "C" fn rust_stmt_clear_result(stmt_ptr: *mut PgStmt) {
         stmt.write_executed = 0;
         stmt.read_done = 0;
 
-        for i in 0..MAX_PARAMS {
+        for i in 0..stmt.decoded_blobs.len() {
             let blob = stmt.decoded_blobs[i];
             if !blob.is_null() {
                 libc::free(blob as *mut c_void);
@@ -325,12 +326,14 @@ pub extern "C" fn rust_stmt_clear_result(stmt_ptr: *mut PgStmt) {
         }
         stmt.decoded_blob_row = -1;
 
-        for i in 0..MAX_PARAMS {
+        for i in 0..stmt.cached_text.len() {
             let text = stmt.cached_text[i];
             if !text.is_null() {
                 libc::free(text as *mut c_void);
                 stmt.cached_text[i] = std::ptr::null_mut();
             }
+        }
+        for i in 0..stmt.cached_blob.len() {
             let blob = stmt.cached_blob[i];
             if !blob.is_null() {
                 libc::free(blob as *mut c_void);

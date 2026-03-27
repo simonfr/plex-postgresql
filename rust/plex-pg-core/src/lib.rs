@@ -1,4 +1,5 @@
 #![allow(
+    dangerous_implicit_autorefs,
     static_mut_refs,
     clippy::cmp_null,
     clippy::collapsible_match,

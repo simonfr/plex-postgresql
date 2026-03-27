@@ -3,7 +3,7 @@ use std::sync::atomic::Ordering;
 
 use crate::db_interpose_common::tls_in_resolve_tables_ptr;
 use crate::db_interpose_conn_utils::{cstr_prefix, PthreadMutexGuard};
-use crate::ffi_types::{sqlite3, sqlite3_stmt, PgConnection, PgStmt, MAX_PARAMS};
+use crate::ffi_types::{sqlite3, sqlite3_stmt, PgConnection, PgStmt};
 use crate::log_debug_lazy;
 
 mod cached;
@@ -125,14 +125,16 @@ unsafe fn my_sqlite3_step_impl(p_stmt: *mut sqlite3_stmt) -> c_int {
         && !exec_conn.is_null()
         && !(*exec_conn).conn.is_null()
     {
-        let mut param_values: [*const c_char; MAX_PARAMS] = [std::ptr::null(); MAX_PARAMS];
-        let (stmt_is_pg, read_done, has_cached_result, write_executed, pg_sql) = {
+        let (param_values, stmt_is_pg, read_done, has_cached_result, write_executed, pg_sql) = {
             let _stmt_guard = PthreadMutexGuard::lock(&mut (*pg_stmt).mutex as *mut _);
-            let max_params = (*pg_stmt).param_count.min(MAX_PARAMS as c_int);
+            let max_params = (*pg_stmt).param_count.max(0) as usize;
+            let max_params = max_params.min((*pg_stmt).param_values.len());
+            let mut pv: Vec<*const c_char> = vec![std::ptr::null(); max_params];
             for i in 0..max_params {
-                param_values[i as usize] = (*pg_stmt).param_values[i as usize] as *const c_char;
+                pv[i] = (*pg_stmt).param_values[i] as *const c_char;
             }
             (
+                pv,
                 (*pg_stmt).is_pg,
                 (*pg_stmt).read_done != 0,
                 !(*pg_stmt).cached_result.is_null(),

@@ -4,9 +4,6 @@ use std::sync::atomic::AtomicI32;
 use crate::libpq_helpers::{PGconn, PGresult};
 use crate::pg_query_cache::CachedResult;
 
-pub const MAX_PARAMS: usize = 128;
-pub const MAX_COLS: usize = 128;
-pub const STMT_CACHE_SIZE: usize = 512;
 pub const DB_PATH_LEN: usize = 1024;
 pub const LAST_ERROR_LEN: usize = 1024;
 pub const STMT_NAME_LEN: usize = 32;
@@ -43,7 +40,10 @@ pub struct PgConnection {
     pub streaming_active: AtomicI32,
 }
 
-#[repr(C)]
+// PgStmt is no longer repr(C) — all access is from Rust.
+// Allocated via Box::new() + Box::into_raw(), freed via Box::from_raw().
+// Vec fields are empty by default; call ensure_param_capacity() / ensure_column_capacity()
+// before indexing.
 pub struct PgStmt {
     pub mutex: libc::pthread_mutex_t,
     pub ref_count: AtomicI32,
@@ -73,19 +73,120 @@ pub struct PgStmt {
     pub num_col_names: c_int,
     pub streaming_mode: c_int,
     pub streaming_conn: *mut PgConnection,
-    pub param_values: [*mut c_char; MAX_PARAMS],
-    pub param_lengths: [c_int; MAX_PARAMS],
-    pub param_formats: [c_int; MAX_PARAMS],
+    // Parameter arrays — sized to param_count via ensure_param_capacity()
+    pub param_values: Vec<*mut c_char>,
+    pub param_lengths: Vec<c_int>,
+    pub param_formats: Vec<c_int>,
+    pub param_buffers: Vec<[c_char; PARAM_BUF_LEN]>,
     pub param_count: c_int,
     pub param_names: *mut *mut c_char,
-    pub param_buffers: [[c_char; PARAM_BUF_LEN]; MAX_PARAMS],
-    pub decoded_blobs: [*mut c_void; MAX_PARAMS],
-    pub decoded_blob_lens: [c_int; MAX_PARAMS],
+    // Column result caches — sized to num_cols via ensure_column_capacity()
+    pub decoded_blobs: Vec<*mut c_void>,
+    pub decoded_blob_lens: Vec<c_int>,
     pub decoded_blob_row: c_int,
-    pub cached_text: [*mut c_char; MAX_PARAMS],
-    pub cached_blob: [*mut c_void; MAX_PARAMS],
-    pub cached_blob_len: [c_int; MAX_PARAMS],
+    pub cached_text: Vec<*mut c_char>,
+    pub cached_blob: Vec<*mut c_void>,
+    pub cached_blob_len: Vec<c_int>,
     pub cached_row: c_int,
-    pub col_table_names: [*mut c_char; MAX_COLS],
+    pub col_table_names: Vec<*mut c_char>,
     pub col_tables_resolved: c_int,
 }
+
+impl PgStmt {
+    /// Create a new PgStmt with all fields zeroed/empty.
+    /// The mutex must be initialized separately after creation.
+    pub fn new() -> Self {
+        Self {
+            mutex: unsafe { std::mem::zeroed() },
+            ref_count: AtomicI32::new(0),
+            conn: std::ptr::null_mut(),
+            shadow_stmt: std::ptr::null_mut(),
+            sql: std::ptr::null_mut(),
+            pg_sql: std::ptr::null_mut(),
+            result: std::ptr::null_mut(),
+            cached_result: std::ptr::null_mut(),
+            sql_hash: 0,
+            stmt_name: [0; STMT_NAME_LEN],
+            use_prepared: 0,
+            current_row: 0,
+            num_rows: 0,
+            num_cols: 0,
+            is_pg: 0,
+            is_cached: 0,
+            is_count_query: 0,
+            needs_requery: 0,
+            write_executed: 0,
+            read_done: 0,
+            metadata_only_result: 0,
+            in_step: AtomicI32::new(0),
+            executing_thread: 0 as libc::pthread_t,
+            result_conn: std::ptr::null_mut(),
+            col_names: std::ptr::null_mut(),
+            num_col_names: 0,
+            streaming_mode: 0,
+            streaming_conn: std::ptr::null_mut(),
+            param_values: Vec::new(),
+            param_lengths: Vec::new(),
+            param_formats: Vec::new(),
+            param_buffers: Vec::new(),
+            param_count: 0,
+            param_names: std::ptr::null_mut(),
+            decoded_blobs: Vec::new(),
+            decoded_blob_lens: Vec::new(),
+            decoded_blob_row: -1,
+            cached_text: Vec::new(),
+            cached_blob: Vec::new(),
+            cached_blob_len: Vec::new(),
+            cached_row: -1,
+            col_table_names: Vec::new(),
+            col_tables_resolved: 0,
+        }
+    }
+
+    /// Ensure param arrays are sized to at least `count` elements.
+    /// Called at prepare time when param_count is known.
+    pub fn ensure_param_capacity(&mut self, count: usize) {
+        if count > self.param_values.len() {
+            self.param_values.resize(count, std::ptr::null_mut());
+            self.param_lengths.resize(count, 0);
+            self.param_formats.resize(count, 0);
+            self.param_buffers.resize(count, [0; PARAM_BUF_LEN]);
+        }
+    }
+
+    /// Ensure column cache arrays are sized to at least `count` elements.
+    /// Called at first step when num_cols is known.
+    pub fn ensure_column_capacity(&mut self, count: usize) {
+        if count > self.decoded_blobs.len() {
+            self.decoded_blobs.resize(count, std::ptr::null_mut());
+            self.decoded_blob_lens.resize(count, 0);
+        }
+        if count > self.cached_text.len() {
+            self.cached_text.resize(count, std::ptr::null_mut());
+            self.cached_blob.resize(count, std::ptr::null_mut());
+            self.cached_blob_len.resize(count, 0);
+        }
+        if count > self.col_table_names.len() {
+            self.col_table_names.resize(count, std::ptr::null_mut());
+        }
+    }
+
+    /// Check if a param value pointer is into the preallocated param_buffers.
+    #[inline]
+    pub fn is_preallocated_buffer(&self, idx: usize) -> bool {
+        if idx >= self.param_values.len() || idx >= self.param_buffers.len() {
+            return false;
+        }
+        let val = self.param_values[idx];
+        if val.is_null() {
+            return false;
+        }
+        let buf_ptr = self.param_buffers[idx].as_ptr();
+        let buf_end = unsafe { buf_ptr.add(PARAM_BUF_LEN) };
+        val as *const c_char >= buf_ptr && (val as *const c_char) < buf_end
+    }
+}
+
+// Safety: PgStmt contains raw pointers used as opaque handles.
+// Thread safety is managed by the mutex field.
+unsafe impl Send for PgStmt {}
