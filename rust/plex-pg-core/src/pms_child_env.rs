@@ -131,6 +131,9 @@ unsafe fn resolve_symbol_into<T: Copy>(slot: *mut Option<T>, name: &'static [u8]
 /// Eagerly resolve all interposition hooks.  Called once from the shim
 /// constructor (`shim_init_wrapper`) so that the interposition wrappers below
 /// never race on a lazy write.
+///
+/// # Safety
+/// Must be called once during shim init (single-threaded `.init_array` context).
 #[allow(static_mut_refs)]
 pub unsafe fn init_child_env_hooks() {
     resolve_symbol_into(ptr::addr_of_mut!(ORIG_EXECVE), b"execve\0");
