@@ -1,4 +1,5 @@
 use super::*;
+use crate::log_info_lazy;
 
 pub(super) fn prepare_v2_impl(
     db: *mut sqlite3,
@@ -97,10 +98,10 @@ unsafe fn maybe_route_utf16_icu_root(
         return None;
     };
 
-    log_info(&format!(
+    log_info_lazy!(
         "UTF-16 query with icu_root, routing to UTF-8 handler: {}",
         cstr_prefix(cs.as_ptr(), 200, "NULL")
-    ));
+    );
     let mut tail8: *const c_char = ptr::null();
     let rc = prepare_v2_impl(db, cs.as_ptr(), -1, pp_stmt, &mut tail8);
     if !pz_tail.is_null() {
@@ -137,10 +138,10 @@ pub(super) fn prepare_v3_impl(
     pz_tail: *mut *const c_char,
 ) -> c_int {
     if !z_sql.is_null() && contains_icase_ptr(z_sql, "metadata_items") {
-        log_info(&format!(
+        log_info_lazy!(
             "PREPARE_V3 metadata_items query: {}",
             cstr_prefix(z_sql, 200, "NULL")
-        ));
+        );
     }
     let _ = prep_flags;
     prepare_v2_impl(db, z_sql, n_byte, pp_stmt, pz_tail)

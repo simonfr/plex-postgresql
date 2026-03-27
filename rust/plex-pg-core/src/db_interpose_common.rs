@@ -3,7 +3,7 @@ use std::os::raw::{c_char, c_int, c_long, c_uchar, c_uint, c_void};
 use std::ptr;
 use std::sync::atomic::{AtomicI32, Ordering};
 
-use crate::db_interpose_conn_utils::{log_debug, log_error, log_info, PthreadMutexGuard};
+use crate::db_interpose_conn_utils::{log_error, log_info, PthreadMutexGuard};
 use crate::env_utils;
 use crate::ffi_types::{sqlite3, sqlite3_stmt};
 

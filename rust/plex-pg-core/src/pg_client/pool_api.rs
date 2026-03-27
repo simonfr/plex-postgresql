@@ -9,10 +9,11 @@ use crate::libpq_helpers::{rust_pg_align_idle_timeout_with_server, rust_pg_probe
 use super::pool_lookup::find_any_library_connection;
 use super::pool_runtime::{pool_check_health_inner, pool_release_for_db_inner};
 use super::{
-    close_handle_connection, conn_config, destroy_pool_connection, log_error, log_info,
+    close_handle_connection, conn_config, destroy_pool_connection, log_error,
     parse_positive_env_or_default, pool, pool_find_connection_for_db, pool_get_connection_inner,
     pool_get_connection_inner_excluding, CLIENT_INIT, POOL, POOL_SIZE_DEFAULT,
 };
+use crate::log_info_lazy;
 
 #[no_mangle]
 pub extern "C" fn rust_pool_init(pool_size: i32, pool_max: i32, idle_timeout: i32) {
@@ -207,24 +208,24 @@ pub extern "C" fn rust_pg_client_init() {
 
         if db_max_connections > 0 {
             if pool_max != db_max_connections {
-                log_info(&format!(
+                log_info_lazy!(
                     "Pool max ({}) does not match database max_connections ({}); adjusting to {}",
                     pool_max, db_max_connections, db_max_connections
-                ));
+                );
                 pool_max = db_max_connections;
             }
         } else {
-            log_info(&format!(
+            log_info_lazy!(
                 "Pool init: could not read database max_connections; keeping pool max={}",
                 pool_max
-            ));
+            );
         }
 
         if pool_size > pool_max {
-            log_info(&format!(
+            log_info_lazy!(
                 "Pool size {} exceeds pool max {}; clamping",
                 pool_size, pool_max
-            ));
+            );
             pool_size = pool_max;
         }
 
@@ -256,10 +257,10 @@ pub extern "C" fn rust_pg_client_init() {
 
         rust_pool_init(pool_size, pool_max, idle_timeout);
 
-        log_info(&format!(
+        log_info_lazy!(
             "pg_client initialized (Rust pool): pool_size={}, pool_max={}, idle_timeout={}s",
             pool_size, pool_max, idle_timeout
-        ));
+        );
     });
 }
 

@@ -1,4 +1,5 @@
 use super::*;
+use crate::log_info_lazy;
 
 #[no_mangle]
 pub extern "C" fn rust_step_pick_thread_connection(
@@ -90,10 +91,10 @@ pub extern "C" fn rust_step_write_prepare_connection(
 
         if (*exec_conn).streaming_active.load(Ordering::SeqCst) != 0 {
             let alt_db_path = owned_db_path(exec_conn);
-            log_info(&format!(
+            log_info_lazy!(
                 "STEP WRITE: conn {:p} became streaming_active after lock, getting new connection",
                 exec_conn
-            ));
+            );
             conn_guard.unlock();
             let Some(alt_db_path) = alt_db_path else {
                 log_error("STEP WRITE: live db_path unavailable for alternate connection");

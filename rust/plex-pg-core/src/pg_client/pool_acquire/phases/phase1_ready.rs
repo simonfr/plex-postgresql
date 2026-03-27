@@ -1,7 +1,6 @@
 use std::os::raw::c_void;
 use std::sync::atomic::Ordering;
 
-use crate::db_interpose_conn_utils::log_debug;
 use crate::ffi_types::PgConnection;
 
 use super::super::super::connection_helpers::conn_is_streaming_active;
@@ -11,6 +10,7 @@ use super::super::super::tls_cache::{tls_pool_cache_clear, tls_pool_cache_get};
 use super::super::super::{rust_stmt_cache_clear, SLOT_READY};
 use super::super::shared::{AcquireCtx, AcquireDecision};
 use super::common::{cache_existing_ready_slot, mark_ready_and_cache_slot};
+use crate::log_debug_lazy;
 
 pub(crate) fn phase1_existing_ready(ctx: &AcquireCtx<'_>) -> AcquireDecision {
     if let Some((idx, generation)) = tls_pool_cache_get(0) {
@@ -24,16 +24,16 @@ pub(crate) fn phase1_existing_ready(ctx: &AcquireCtx<'_>) -> AcquireDecision {
                 if threads_equal(owner, ctx.current_thread) {
                     let conn = slot.conn.load(Ordering::Acquire);
                     if conn == ctx.exclude_conn as *mut c_void {
-                        log_debug(&format!(
+                        log_debug_lazy!(
                             "Pool FAST PATH: excluded slot {} for alternate acquisition",
                             idx
-                        ));
+                        );
                     } else if !conn.is_null() && check_conn_ok(conn) {
                         if conn_is_streaming_active(conn as *mut PgConnection) {
-                            log_debug(&format!(
+                            log_debug_lazy!(
                                 "Pool FAST PATH: streaming_active on slot {}, falling through",
                                 idx
-                            ));
+                            );
                         } else {
                             return cache_existing_ready_slot(ctx, idx, slot, conn);
                         }
@@ -57,18 +57,18 @@ pub(crate) fn phase1_existing_ready(ctx: &AcquireCtx<'_>) -> AcquireDecision {
 
         let conn = slot.conn.load(Ordering::Acquire);
         if conn == ctx.exclude_conn as *mut c_void {
-            log_debug(&format!(
+            log_debug_lazy!(
                 "Pool PHASE 1: slot {} excluded for alternate acquisition",
                 i
-            ));
+            );
             continue;
         }
         if !conn.is_null() && check_conn_ok(conn) {
             if conn_is_streaming_active(conn as *mut PgConnection) {
-                log_debug(&format!(
+                log_debug_lazy!(
                     "Pool: slot {} streaming_active, skipping for thread",
                     i
-                ));
+                );
                 continue;
             }
             return cache_existing_ready_slot(ctx, i, slot, conn);

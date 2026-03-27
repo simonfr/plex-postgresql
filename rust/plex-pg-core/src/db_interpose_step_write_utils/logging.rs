@@ -1,4 +1,5 @@
 use super::*;
+use crate::log_debug_lazy;
 
 #[no_mangle]
 pub extern "C" fn rust_step_write_log_debug_context(
@@ -14,11 +15,11 @@ pub extern "C" fn rust_step_write_log_debug_context(
         if !(*pg_stmt).pg_sql.is_null()
             && contains_bytes(cstr_bytes((*pg_stmt).pg_sql), b"play_queue_generators")
         {
-            log_debug(&format!(
+            log_debug_lazy!(
                 "INSERT play_queue_generators on thread {:p} conn {:p}",
                 libc::pthread_self() as *mut c_void,
                 exec_conn
-            ));
+            );
         }
 
         if !(*pg_stmt).sql.is_null()
@@ -49,18 +50,18 @@ pub extern "C" fn rust_step_write_log_debug_context(
             } else {
                 std::ptr::null()
             };
-            log_debug(&format!(
+            log_debug_lazy!(
                 "STEP metadata_items INSERT: param_count={}",
                 (*pg_stmt).param_count
-            ));
-            log_debug(&format!(
+            );
+            log_debug_lazy!(
                 "  PARAMS: [0]={} [1]={} [2]={} [8]={} [9]={}",
                 cstr_to_string_or(p0, "NULL"),
                 cstr_to_string_or(p1, "NULL"),
                 cstr_to_string_or(p2, "NULL"),
                 cstr_to_string_or(p8, "NULL"),
                 cstr_to_string_or(p9, "NULL")
-            ));
+            );
         }
 
         if !(*pg_stmt).sql.is_null()
@@ -86,21 +87,21 @@ pub extern "C" fn rust_step_write_log_debug_context(
             } else {
                 std::ptr::null()
             };
-            log_debug(&format!(
+            log_debug_lazy!(
                 "STEP play_queue_generators INSERT: param_count={}",
                 (*pg_stmt).param_count
-            ));
-            log_debug(&format!(
+            );
+            log_debug_lazy!(
                 "  PARAMS: [0]={} [1]={} [2]={} [3]={}",
                 cstr_to_string_or(p0, "NULL"),
                 cstr_to_string_or(p1, "NULL"),
                 cstr_to_string_or(p2, "NULL"),
                 cstr_to_string_or(p3, "NULL")
-            ));
-            log_debug(&format!(
+            );
+            log_debug_lazy!(
                 "  SQL: {}",
                 cstr_prefix((*pg_stmt).pg_sql, 300, "NULL")
-            ));
+            );
         }
     }
 }
@@ -118,12 +119,12 @@ pub extern "C" fn rust_step_log_step_exit_trace(pg_stmt: *mut PgStmt) {
         let is_playqueue = contains_bytes(sql_bytes, b"play_queue");
 
         if is_count || is_playqueue {
-            log_debug(&format!(
+            log_debug_lazy!(
                 "DEBUG_TRACE: STEP_EXIT - rows={} cols={} sql={}",
                 (*pg_stmt).num_rows,
                 (*pg_stmt).num_cols,
                 cstr_prefix((*pg_stmt).pg_sql, 100, "NULL")
-            ));
+            );
         }
     }
 }

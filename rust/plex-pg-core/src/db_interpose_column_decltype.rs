@@ -1,4 +1,6 @@
 use super::*;
+use crate::log_debug_lazy;
+use crate::log_info_lazy;
 
 const DECLTYPE_MAX_KEY_LEN: usize = 128;
 
@@ -27,10 +29,10 @@ fn preload_decltype_cache(pg_conn: *mut PgConnection) {
     let mut cache_conn = pg_conn;
     let streaming_active = unsafe { (*pg_conn).streaming_active.load(Ordering::SeqCst) != 0 };
     if streaming_active {
-        log_debug(&format!(
+        log_debug_lazy!(
             "DECLTYPE_CACHE: Connection {:p} is streaming_active, getting alternate",
             pg_conn
-        ));
+        );
         let alt = unsafe {
             crate::pg_client::pg_get_thread_connection_excluding(
                 (*pg_conn).db_path.as_ptr(),
@@ -43,10 +45,10 @@ fn preload_decltype_cache(pg_conn: *mut PgConnection) {
             && unsafe { (*alt).streaming_active.load(Ordering::SeqCst) == 0 }
         {
             cache_conn = alt;
-            log_debug(&format!(
+            log_debug_lazy!(
                 "DECLTYPE_CACHE: Using alternate connection {:p}",
                 cache_conn
-            ));
+            );
         } else {
             log_error("DECLTYPE_CACHE: No alternate connection available, deferring load");
             return;
@@ -152,10 +154,10 @@ fn preload_decltype_cache(pg_conn: *mut PgConnection) {
     crate::libpq_helpers::rust_pq_clear(res);
     DECLTYPE_CACHE_LOADED.store(true, Ordering::Release);
 
-    log_info(&format!(
+    log_info_lazy!(
         "DECLTYPE_CACHE: Loaded {} column types from PG ({} skipped)",
         loaded, skipped
-    ));
+    );
 }
 
 pub(super) fn lookup_decltype_direct(pg_conn: *mut PgConnection, cache_key: &str) -> *const c_char {
@@ -171,14 +173,14 @@ pub(super) fn lookup_decltype_direct(pg_conn: *mut PgConnection, cache_key: &str
     };
     let cached = crate::db_interpose_helpers::rust_decltype_cache_lookup(key_cs.as_ptr());
     if !cached.is_null() {
-        log_debug(&format!(
+        log_debug_lazy!(
             "DECLTYPE_DIRECT: found '{}' -> '{}'",
             cache_key,
             cstr_to_string_or(cached, "?")
-        ));
+        );
         return cached;
     }
-    log_debug(&format!("DECLTYPE_DIRECT: '{}' not in cache", cache_key));
+    log_debug_lazy!("DECLTYPE_DIRECT: '{}' not in cache", cache_key);
     ptr::null()
 }
 
@@ -194,10 +196,10 @@ pub(super) fn lookup_sqlite_decltype(
     }
     let cached = crate::db_interpose_helpers::rust_decltype_cache_lookup_alias(col_alias);
     if cached.is_null() {
-        log_debug(&format!(
+        log_debug_lazy!(
             "DECLTYPE_LOOKUP: no match for '{}'",
             cstr_to_string_or(col_alias, "?")
-        ));
+        );
     }
     cached
 }

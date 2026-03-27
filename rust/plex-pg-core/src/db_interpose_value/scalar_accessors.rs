@@ -2,6 +2,7 @@ use super::*;
 use crate::db_interpose_value::support::{
     fake_value_has_result, helpers_result_ptr, load_fake_value_context,
 };
+use crate::log_debug_lazy;
 
 pub(super) fn value_int_impl(p_val: *mut sqlite3_value) -> c_int {
     unsafe {
@@ -53,7 +54,7 @@ pub(super) fn value_int_impl(p_val: *mut sqlite3_value) -> c_int {
             if raw_len >= 0 {
                 raw_val = cstr_to_string_or(raw_buf.as_ptr(), "?");
             }
-            log_debug(&format!(
+            log_debug_lazy!(
                 "TYPE_DEBUG_VALUE_INT: col='{}' idx={} row={} raw_val='{}' result={} sql={}",
                 cstr_to_string_or(col_name, "?"),
                 ctx.col,
@@ -61,7 +62,7 @@ pub(super) fn value_int_impl(p_val: *mut sqlite3_value) -> c_int {
                 raw_val,
                 result,
                 cstr_prefix(unsafe { (*ctx.pg_stmt).pg_sql }, 200, "?")
-            ));
+            );
         }
     }
 

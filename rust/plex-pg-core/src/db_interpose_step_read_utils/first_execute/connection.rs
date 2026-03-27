@@ -1,4 +1,5 @@
 use super::*;
+use crate::log_info_lazy;
 
 pub(super) unsafe fn acquire_exec_connection(
     pg_stmt: *mut PgStmt,
@@ -55,10 +56,10 @@ pub(super) unsafe fn lock_exec_connection(
 
     if (**exec_conn).streaming_active.load(Ordering::SeqCst) != 0 {
         let alt_db_path = owned_db_path(*exec_conn);
-        log_info(&format!(
+        log_info_lazy!(
             "STEP SELECT: conn {:p} became streaming_active after lock, getting new connection",
             *exec_conn
-        ));
+        );
         conn_guard.unlock();
         let Some(alt_db_path) = alt_db_path else {
             log_error("STEP SELECT: live db_path unavailable for alternate connection");

@@ -13,7 +13,7 @@ use crate::byte_utils::{
     contains_bytes, contains_icase_bytes, cstr_bytes, starts_with_icase_bytes,
 };
 use crate::db_interpose_conn_utils::{
-    apply_pg_session_settings, connect_new, cstr_prefix, cstr_to_string_or, log_debug, log_error,
+    apply_pg_session_settings, connect_new, cstr_prefix, cstr_to_string_or, log_error,
     log_info, PgConnConfig, PthreadMutexGuard,
 };
 use crate::env_utils;

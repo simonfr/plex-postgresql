@@ -1,15 +1,17 @@
 #[cfg(target_os = "linux")]
 use super::fake_values::fake_value_next;
 use super::*;
+use crate::log_debug_lazy;
+use crate::log_info_lazy;
 
 const WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
 
 extern "C" fn worker_thread_func(_arg: *mut c_void) -> *mut c_void {
     unsafe {
-        log_info(&format!(
+        log_info_lazy!(
             "WORKER: Thread started with {} MB stack",
             WORKER_STACK_SIZE / (1024 * 1024)
-        ));
+        );
 
         loop {
             let mut worker_guard = PthreadMutexGuard::lock(ptr::addr_of_mut!(worker_mutex));
@@ -95,10 +97,10 @@ pub extern "C" fn rust_worker_init() -> c_int {
         }
 
         libc::pthread_attr_destroy(&mut attr as *mut _);
-        log_info(&format!(
+        log_info_lazy!(
             "WORKER: Initialized with {} MB stack",
             WORKER_STACK_SIZE / (1024 * 1024)
-        ));
+        );
     }
 
     0
@@ -164,7 +166,7 @@ pub extern "C" fn rust_delegate_prepare_to_worker(
             let slice = &bytes[..bytes.len().min(100)];
             String::from_utf8_lossy(slice).into_owned()
         };
-        log_debug(&format!("WORKER: Delegating query ({})", preview));
+        log_debug_lazy!("WORKER: Delegating query ({})", preview);
 
         let mut worker_guard = PthreadMutexGuard::lock(ptr::addr_of_mut!(worker_mutex));
 
@@ -197,7 +199,7 @@ pub extern "C" fn rust_delegate_prepare_to_worker(
 
         worker_guard.unlock();
 
-        log_debug(&format!("WORKER: Delegation complete, rc={}", result));
+        log_debug_lazy!("WORKER: Delegation complete, rc={}", result);
         result
     }
 }

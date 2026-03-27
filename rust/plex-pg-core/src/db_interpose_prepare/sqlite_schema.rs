@@ -1,4 +1,5 @@
 use super::*;
+use crate::log_info_lazy;
 
 unsafe fn column_exists_in_sqlite(
     db: *mut sqlite3,
@@ -141,11 +142,11 @@ pub(super) unsafe fn maybe_skip_alter_table_add(
     }
 
     if column_exists_in_sqlite(db, table_name.as_ptr(), column_name.as_ptr()) {
-        log_info(&format!(
+        log_info_lazy!(
             "ALTER TABLE ADD COLUMN skipped (column '{}' already exists in '{}')",
             cstr_to_string_or(column_name.as_ptr(), ""),
             cstr_to_string_or(table_name.as_ptr(), "")
-        ));
+        );
         if let Some(prepare) = shim_sqlite3_prepare_v2 {
             let rc = prepare(
                 db,

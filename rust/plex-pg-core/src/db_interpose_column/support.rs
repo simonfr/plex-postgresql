@@ -1,4 +1,5 @@
 use super::*;
+use crate::log_debug_lazy;
 
 #[inline]
 pub(crate) fn helpers_result_ptr(result: *mut PgResultLibpq) -> *const PgResultHelpers {
@@ -79,7 +80,7 @@ pub(crate) fn validate_type_consistency(
 
     // Log AFTER releasing pg_stmt.mutex to avoid ABBA deadlock with LOGGER mutex.
     let (oid, col_name, expected, current_row, pg_sql, should_trace) = mismatch_ctx;
-    log_debug(&format!(
+    log_debug_lazy!(
         "TYPE_MISMATCH: accessor={} col='{}' idx={} decltype='{}' expects {} but column_type returned {} (OID={})",
         accessor_name,
         cstr_to_string_or(col_name, "?"),
@@ -88,7 +89,7 @@ pub(crate) fn validate_type_consistency(
         sqlite_type_name(expected),
         sqlite_type_name(col_type),
         oid
-    ));
+    );
 
     if should_trace {
         trace_badcast_log_ctx(
@@ -102,7 +103,7 @@ pub(crate) fn validate_type_consistency(
             oid,
             col_name,
         );
-        log_debug(&format!(
+        log_debug_lazy!(
             "TRACE_BADCAST_MISMATCH: accessor={} col='{}' idx={} oid={} decltype='{}' expected={} actual={} sql={}",
             accessor_name,
             cstr_to_string_or(col_name, "?"),
@@ -112,6 +113,6 @@ pub(crate) fn validate_type_consistency(
             sqlite_type_name(expected),
             sqlite_type_name(col_type),
             cstr_prefix(pg_sql, 200, "?")
-        ));
+        );
     }
 }

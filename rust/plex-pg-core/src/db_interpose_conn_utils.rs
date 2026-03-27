@@ -4,6 +4,28 @@ use std::os::raw::{c_char, c_int};
 use crate::ffi_types::PgConnection;
 use crate::libpq_helpers::{PGcancel, PGconn, PGresult};
 
+/// Lazy-evaluating debug log macro: checks LOG_LEVEL before calling format!().
+/// At production log level ERROR, this avoids the heap allocation entirely.
+#[macro_export]
+macro_rules! log_debug_lazy {
+    ($($arg:tt)*) => {
+        if $crate::pg_logging::LOG_LEVEL.load(::std::sync::atomic::Ordering::Relaxed) >= 2 {
+            $crate::db_interpose_conn_utils::log_debug(&format!($($arg)*));
+        }
+    }
+}
+
+/// Lazy-evaluating info log macro: checks LOG_LEVEL before calling format!().
+/// At production log level ERROR, this avoids the heap allocation entirely.
+#[macro_export]
+macro_rules! log_info_lazy {
+    ($($arg:tt)*) => {
+        if $crate::pg_logging::LOG_LEVEL.load(::std::sync::atomic::Ordering::Relaxed) >= 1 {
+            $crate::db_interpose_conn_utils::log_info(&format!($($arg)*));
+        }
+    }
+}
+
 pub(crate) const STATEMENT_TIMEOUT_SQL: &str = "SET statement_timeout = '5min'";
 
 #[repr(C)]
@@ -224,10 +246,10 @@ pub extern "C" fn rust_step_conn_cancel_and_drain(
         }
         if drain_count > 3 {
             let tag = cstr_to_str(scope_tag);
-            log_info(&format!(
+            log_info_lazy!(
                 "{}: Drained {} orphaned results total from connection {:p}",
                 tag, drain_count, conn
-            ));
+            );
         }
     }
 }

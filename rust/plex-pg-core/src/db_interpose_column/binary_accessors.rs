@@ -1,4 +1,5 @@
 use super::*;
+use crate::log_debug_lazy;
 
 struct LiveBinaryState {
     row: c_int,
@@ -180,19 +181,19 @@ pub(super) fn column_blob_impl(p_stmt: *mut sqlite3_stmt, idx: c_int) -> *const 
     };
     // Log AFTER releasing pg_stmt.mutex to avoid ABBA deadlock with LOGGER mutex.
     let (blob_result, state) = result;
-    log_debug(&format!(
+    log_debug_lazy!(
         "column_blob called: col={} name={} type={} row={}",
         idx,
         cstr_to_string_or(state.col_name, "?"),
         state.oid_u,
         state.row
-    ));
+    );
 
     blob_result
 }
 
 pub(super) fn column_bytes_impl(p_stmt: *mut sqlite3_stmt, idx: c_int) -> c_int {
-    log_debug(&format!("COLUMN_BYTES: stmt={:p} idx={}", p_stmt, idx));
+    log_debug_lazy!("COLUMN_BYTES: stmt={:p} idx={}", p_stmt, idx);
     let pg_stmt = unsafe { pg_find_any_stmt(p_stmt) };
 
     if pg_stmt.is_null() || unsafe { (*pg_stmt).is_pg == 0 } {

@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 
 use crate::db_interpose_common::{tls_in_interpose_call_ptr, tls_prepare_v2_depth_ptr};
 use crate::db_interpose_conn_utils::{
-    cstr_prefix, cstr_to_string_or, log_debug, log_error, log_info,
+    cstr_prefix, cstr_to_string_or, log_error, log_info,
 };
 use crate::db_interpose_prepare_utils::{
     contains_ascii_icase, contains_icase_ptr, starts_with_ascii_icase,

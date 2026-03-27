@@ -1,4 +1,5 @@
 use super::*;
+use crate::log_debug_lazy;
 
 #[no_mangle]
 pub extern "C" fn rust_step_write_should_skip_special_insert(
@@ -28,11 +29,11 @@ pub extern "C" fn rust_step_write_should_skip_special_insert(
                 duration_val.is_null() || CStr::from_ptr(duration_val).to_bytes() == b"0";
 
             if count_empty && duration_empty {
-                log_debug(&format!(
+                log_debug_lazy!(
                     "SKIP statistics_media INSERT: count={} duration={} (empty)",
                     cstr_to_string_or(count_val, "NULL"),
                     cstr_to_string_or(duration_val, "NULL")
-                ));
+                );
 
                 if !exec_conn.is_null() && !(*exec_conn).conn.is_null() {
                     let _conn_guard = PthreadMutexGuard::lock(&mut (*exec_conn).mutex as *mut _);
@@ -61,10 +62,10 @@ pub extern "C" fn rust_step_write_should_skip_special_insert(
                             {
                                 seq_val = seq_buf.as_ptr();
                             }
-                            log_debug(&format!(
+                            log_debug_lazy!(
                                 "SKIP: Advanced sequence to {}",
                                 cstr_to_string_or(seq_val, "?")
-                            ));
+                            );
                         }
                         crate::libpq_helpers::rust_pq_clear(seq_res);
                     }
@@ -134,10 +135,10 @@ pub extern "C" fn rust_step_write_should_skip_special_insert(
                                 {
                                     seq_val = seq_buf.as_ptr();
                                 }
-                                log_debug(&format!(
+                                log_debug_lazy!(
                                     "GUARD: Advanced metadata_items sequence to {}",
                                     cstr_to_string_or(seq_val, "?")
-                                ));
+                                );
                             }
                             crate::libpq_helpers::rust_pq_clear(seq_res);
                         }

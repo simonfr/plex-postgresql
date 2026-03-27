@@ -1,10 +1,6 @@
 use std::os::raw::{c_char, c_int};
+use crate::log_info_lazy;
 
-fn log_info(msg: &str) {
-    if let Ok(cs) = std::ffi::CString::new(msg) {
-        crate::pg_logging::rust_logging_write(1, cs.as_ptr());
-    }
-}
 
 #[repr(C)]
 pub struct PGconn {
@@ -636,10 +632,10 @@ pub extern "C" fn rust_pg_align_idle_timeout_with_server(
         &mut in_tx_s as *mut c_int,
     );
     if ok == 0 {
-        log_info(&format!(
+        log_info_lazy!(
             "Pool init: could not read PostgreSQL idle timeout settings; keeping pool idle_timeout={}s",
             idle_timeout
-        ));
+        );
         return idle_timeout;
     }
 
@@ -661,10 +657,10 @@ pub extern "C" fn rust_pg_align_idle_timeout_with_server(
     }
 
     if idle_timeout >= cutoff {
-        log_info(&format!(
+        log_info_lazy!(
             "Pool idle timeout ({}s) >= PostgreSQL idle cutoff ({}s, session={}s, in_tx={}s); adjusting to {}s",
             idle_timeout, cutoff, session_s, in_tx_s, target
-        ));
+        );
         return target;
     }
     idle_timeout

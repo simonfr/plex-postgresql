@@ -1,4 +1,5 @@
 use super::*;
+use crate::log_debug_lazy;
 
 unsafe fn clear_streaming_state(pg_stmt: *mut PgStmt) {
     (*pg_stmt).streaming_mode = 0;
@@ -61,10 +62,10 @@ pub(super) unsafe fn streaming_fetch_result(
     }
 
     if first_status == PGRES_TUPLES_OK {
-        log_debug(&format!(
+        log_debug_lazy!(
             "STREAM: zero rows returned for sql={:.200}",
             cstr_to_str((*pg_stmt).pg_sql)
-        ));
+        );
         crate::libpq_helpers::rust_pq_clear(first_res);
         let final_null = crate::libpq_helpers::rust_pq_get_result((*exec_conn).conn);
         if !final_null.is_null() {

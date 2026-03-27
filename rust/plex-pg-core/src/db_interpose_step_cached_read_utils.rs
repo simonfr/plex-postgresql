@@ -1,9 +1,10 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
 
-use crate::db_interpose_conn_utils::{log_debug, log_error, PthreadMutexGuard};
+use crate::db_interpose_conn_utils::{log_error, PthreadMutexGuard};
 use crate::ffi_types::{sqlite3_stmt, PgConnection, PgStmt};
 use crate::libpq_helpers::PGresult;
+use crate::log_debug_lazy;
 
 const STEP_RESULT_FALLBACK: c_int = -1;
 const SQLITE_DONE: c_int = 101;
@@ -172,11 +173,11 @@ pub extern "C" fn rust_step_cached_read_execute(
             &mut cached_read_stmt_name,
         ) != 0
         {
-            log_debug(&format!(
+            log_debug_lazy!(
                 "CACHED READ (prepared): stmt={} sql={:.60}",
                 cstr_to_str(cached_read_stmt_name),
                 translated_str
-            ));
+            );
             (*stmt).result = crate::libpq_helpers::rust_pq_exec_prepared(
                 (*conn).conn,
                 cached_read_stmt_name,
@@ -204,11 +205,11 @@ pub extern "C" fn rust_step_cached_read_execute(
                     0,
                 );
                 crate::libpq_helpers::rust_pq_clear(prep_res);
-                log_debug(&format!(
+                log_debug_lazy!(
                     "CACHED READ (new prepared): stmt={} sql={:.60}",
                     cstr_to_str(c_read_stmt_name.as_ptr()),
                     translated_str
-                ));
+                );
                 (*stmt).result = crate::libpq_helpers::rust_pq_exec_prepared(
                     (*conn).conn,
                     c_read_stmt_name.as_ptr(),
@@ -237,10 +238,10 @@ pub extern "C" fn rust_step_cached_read_execute(
                 );
             } else {
                 let err = cstr_to_str(crate::libpq_helpers::rust_pq_error_message((*conn).conn));
-                log_debug(&format!(
+                log_debug_lazy!(
                     "CACHED READ prepare failed, using PQexec: {}",
                     err
-                ));
+                );
                 crate::libpq_helpers::rust_pq_clear(prep_res);
                 (*stmt).result = crate::libpq_helpers::rust_pq_exec((*conn).conn, translated_sql);
             }

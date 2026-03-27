@@ -1,7 +1,7 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_void};
 
-use crate::db_interpose_conn_utils::{log_debug, log_error, log_info, PthreadMutexGuard};
+use crate::db_interpose_conn_utils::{log_error, log_info, PthreadMutexGuard};
 use crate::db_interpose_helpers::cstr_to_str_or_empty;
 use crate::ffi_types::{sqlite3, PgConnection};
 use crate::libpq_helpers::{
@@ -14,6 +14,8 @@ use super::{
     conn_config, is_library_db, pool, rust_stmt_cache_clear, rust_stmt_cache_drop,
     write_str_to_cbuf, ConnConfig,
 };
+use crate::log_debug_lazy;
+use crate::log_info_lazy;
 
 fn conn_error_string(pg_conn: *mut PGconn) -> String {
     if pg_conn.is_null() {
@@ -89,10 +91,10 @@ pub(super) fn destroy_connection_struct(conn: *mut PgConnection) {
 
 pub(super) fn create_pool_connection(db_path: *const c_char) -> *mut c_void {
     let cfg = conn_config();
-    log_debug(&format!(
+    log_debug_lazy!(
         "create_pool_connection: host='{}' port={} db='{}' user='{}' schema='{}'",
         cfg.host, cfg.port, cfg.database, cfg.user, cfg.schema
-    ));
+    );
 
     if cfg.host.is_empty() || cfg.port == 0 {
         log_error(&format!(
@@ -282,10 +284,10 @@ pub extern "C" fn rust_pg_connect(
             (*conn_ptr).conn = std::ptr::null_mut();
             (*conn_ptr).is_pg_active = 1;
         }
-        log_info(&format!(
+        log_info_lazy!(
             "PostgreSQL pool-only connection for: {}",
             db_path_str
-        ));
+        );
         return conn_ptr;
     }
 
@@ -308,7 +310,7 @@ pub extern "C" fn rust_pg_connect(
             }
             (*conn_ptr).conn = std::ptr::null_mut();
         } else {
-            log_info(&format!("PostgreSQL connected for: {}", db_path_str));
+            log_info_lazy!("PostgreSQL connected for: {}", db_path_str);
             pg_set_socket_timeout((*conn_ptr).conn);
             apply_session_settings((*conn_ptr).conn, &cfg.schema, false);
             (*conn_ptr).is_pg_active = 1;

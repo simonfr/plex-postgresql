@@ -1,4 +1,5 @@
 use super::*;
+use crate::log_info_lazy;
 
 fn should_route_via_pg(pg_conn: *mut PgConnection, is_read: bool, is_write: bool) -> bool {
     !pg_conn.is_null()
@@ -86,11 +87,11 @@ unsafe fn replace_stmt_sql_with_suffix(
         suffix,
     );
     if let Some(label) = log_label {
-        log_info(&format!(
+        log_info_lazy!(
             "{}: {}",
             label,
             cstr_prefix(replaced, 200, "NULL")
-        ));
+        );
     }
     libc::free((*pg_stmt).pg_sql as *mut c_void);
     (*pg_stmt).pg_sql = replaced;

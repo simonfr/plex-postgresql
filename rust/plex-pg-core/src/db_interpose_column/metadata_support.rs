@@ -1,4 +1,6 @@
 use super::*;
+use crate::log_debug_lazy;
+use crate::log_info_lazy;
 
 pub(crate) fn mask_collection_metadata_type(
     pg_stmt: *const PgStmt,
@@ -20,10 +22,10 @@ pub(crate) fn mask_collection_metadata_type(
         return false;
     }
     let row = unsafe { (*pg_stmt).current_row };
-    log_debug(&format!(
+    log_debug_lazy!(
         "COMPAT_TYPE18: masking metadata_type 18 -> 0 for related-items query, row {}",
         row
-    ));
+    );
     *out = 0;
     true
 }
@@ -85,20 +87,20 @@ pub(crate) fn ensure_pg_result_for_metadata(pg_stmt: *mut PgStmt) -> bool {
     }
 
     if unsafe { (*exec_conn).streaming_active.load(Ordering::SeqCst) != 0 } {
-        log_debug(&format!(
+        log_debug_lazy!(
             "METADATA: skipping — connection {:p} is streaming_active",
             exec_conn
-        ));
+        );
         return false;
     }
 
     let _conn_guard = unsafe { PthreadMutexGuard::lock(&mut (*exec_conn).mutex as *mut _) };
 
     if unsafe { (*exec_conn).streaming_active.load(Ordering::SeqCst) != 0 } {
-        log_debug(&format!(
+        log_debug_lazy!(
             "METADATA: skipping after lock — connection {:p} is streaming_active",
             exec_conn
-        ));
+        );
         return false;
     }
 
@@ -131,10 +133,10 @@ pub(crate) fn ensure_pg_result_for_metadata(pg_stmt: *mut PgStmt) -> bool {
 
     unsafe {
         if has_unbound_params && (*pg_stmt).stmt_name[0] != 0 {
-            log_info(&format!(
+            log_info_lazy!(
                 "METADATA_DESCRIBE: Using prepared-statement describe for: {}",
                 cstr_prefix((*pg_stmt).pg_sql, 100, "?")
-            ));
+            );
 
             let mut cached_name: *const c_char = ptr::null();
             let cached = pg_stmt_cache_lookup(
@@ -199,11 +201,11 @@ pub(crate) fn ensure_pg_result_for_metadata(pg_stmt: *mut PgStmt) -> bool {
                     }
                 }
                 set_metadata_result_state(pg_stmt, desc, exec_conn, 0, 0);
-                log_info(&format!(
+                log_info_lazy!(
                     "METADATA_DESCRIBE: Success - {} cols for: {}",
                     (*pg_stmt).num_cols,
                     cstr_prefix((*pg_stmt).pg_sql, 100, "?")
-                ));
+                );
                 return true;
             }
 
@@ -219,10 +221,10 @@ pub(crate) fn ensure_pg_result_for_metadata(pg_stmt: *mut PgStmt) -> bool {
         }
     }
 
-    log_info(&format!(
+    log_info_lazy!(
         "METADATA_EXEC: Executing query for column metadata access: {}",
         cstr_prefix(unsafe { (*pg_stmt).pg_sql }, 100, "?")
-    ));
+    );
 
     let mut param_values: [*const c_char; MAX_PARAMS] = [ptr::null(); MAX_PARAMS];
     unsafe {

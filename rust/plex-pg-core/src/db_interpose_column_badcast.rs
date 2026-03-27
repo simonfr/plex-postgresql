@@ -1,4 +1,5 @@
 use super::*;
+use crate::log_debug_lazy;
 
 static TRACE_DEFAULT_IDX: &[u8] = b"5,6\0";
 static TRACE_DEFAULT_THREAD: &[u8] = b"any\0";
@@ -201,8 +202,8 @@ pub(super) fn trace_badcast_log_ctx(
     let col = cstr_to_string_or(col_name, "?");
     let num_rows = unsafe { (*pg_stmt).num_rows };
     let num_cols = unsafe { (*pg_stmt).num_cols };
-    log_debug(&format!(
+    log_debug_lazy!(
         "TRACE_BADCAST_CTX: fn={} phase={} stmt={:p} pg_stmt={:p} idx={} col='{}' oid={} row={}/{} cols={} is_null={} sql={}",
         fn_name, phase, stmt, pg_stmt, idx, col, oid, row, num_rows, num_cols, is_null, sql
-    ));
+    );
 }

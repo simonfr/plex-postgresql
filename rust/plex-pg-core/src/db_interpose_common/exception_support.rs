@@ -1,4 +1,5 @@
 use super::*;
+use crate::log_info_lazy;
 
 pub(super) const BOX_INNER_WIDTH: usize = 78;
 pub(super) const BOX_TL: &[u8] = b"\xE2\x95\x94"; // ╔
@@ -41,17 +42,17 @@ pub(super) fn log_exception_object_dump(thrown_exception: *mut c_void, bytes: us
     let mut buf = vec![0u8; max_bytes];
     let n = unsafe { read_process_memory(thrown_exception, &mut buf) };
     if n <= 0 {
-        log_info(&format!(
+        log_info_lazy!(
             "EXC_META_DUMP: read failed addr=0x{:x} bytes={}",
             thrown_exception as usize, max_bytes
-        ));
+        );
         return Vec::new();
     }
     let used = n as usize;
-    log_info(&format!(
+    log_info_lazy!(
         "EXC_META_DUMP: addr=0x{:x} bytes={}",
         thrown_exception as usize, used
-    ));
+    );
 
     let data = &buf[..used];
     let mut pointers: Vec<usize> = Vec::new();
@@ -87,12 +88,12 @@ pub(super) fn log_exception_object_dump(thrown_exception: *mut c_void, bytes: us
             };
             ascii.push(ch);
         }
-        log_info(&format!(
+        log_info_lazy!(
             "EXC_META_DUMP: +0x{:04x} {:<48} |{}|",
             i * 16,
             hex.trim_end(),
             ascii
-        ));
+        );
     }
 
     let mut sequences = 0usize;
@@ -107,7 +108,7 @@ pub(super) fn log_exception_object_dump(thrown_exception: *mut c_void, bytes: us
             let len = idx - s;
             if len >= 8 {
                 let seq = String::from_utf8_lossy(&data[s..idx]).to_string();
-                log_info(&format!("EXC_META_STR: +0x{:04x} len={} '{}'", s, len, seq));
+                log_info_lazy!("EXC_META_STR: +0x{:04x} len={} '{}'", s, len, seq);
                 sequences += 1;
                 if sequences >= 8 {
                     log_info("EXC_META_STR: truncated (limit 8)");
@@ -121,7 +122,7 @@ pub(super) fn log_exception_object_dump(thrown_exception: *mut c_void, bytes: us
             let len = data.len().saturating_sub(s);
             if len >= 8 {
                 let seq = String::from_utf8_lossy(&data[s..]).to_string();
-                log_info(&format!("EXC_META_STR: +0x{:04x} len={} '{}'", s, len, seq));
+                log_info_lazy!("EXC_META_STR: +0x{:04x} len={} '{}'", s, len, seq);
             }
         }
     }
@@ -143,10 +144,10 @@ pub(super) fn log_exception_string_scan(base: *mut c_void, bytes: usize) {
     let mut buf = vec![0u8; max_bytes];
     let n = unsafe { read_process_memory(base, &mut buf) };
     if n <= 0 {
-        log_info(&format!(
+        log_info_lazy!(
             "EXC_META_SCAN: read failed addr=0x{:x} bytes={}",
             base as usize, max_bytes
-        ));
+        );
         return;
     }
     let used = n as usize;
@@ -163,10 +164,10 @@ pub(super) fn log_exception_string_scan(base: *mut c_void, bytes: usize) {
             let len = idx - s;
             if len >= 12 {
                 let seq = String::from_utf8_lossy(&data[s..idx]).to_string();
-                log_info(&format!(
+                log_info_lazy!(
                     "EXC_META_SCAN: +0x{:04x} len={} '{}'",
                     s, len, seq
-                ));
+                );
                 sequences += 1;
                 if sequences >= 12 {
                     log_info("EXC_META_SCAN: truncated (limit 12)");
@@ -180,10 +181,10 @@ pub(super) fn log_exception_string_scan(base: *mut c_void, bytes: usize) {
             let len = data.len().saturating_sub(s);
             if len >= 12 {
                 let seq = String::from_utf8_lossy(&data[s..]).to_string();
-                log_info(&format!(
+                log_info_lazy!(
                     "EXC_META_SCAN: +0x{:04x} len={} '{}'",
                     s, len, seq
-                ));
+                );
             }
         }
     }

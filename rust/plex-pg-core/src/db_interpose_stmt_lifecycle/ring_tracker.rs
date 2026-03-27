@@ -2,6 +2,7 @@ use std::ffi::CString;
 use std::os::raw::{c_char, c_int};
 use std::ptr;
 use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
+use std::sync::{LazyLock, Mutex};
 
 use crate::db_interpose_conn_utils::{cstr_to_string_or, log_error};
 use crate::ffi_types::sqlite3_stmt;
@@ -29,6 +30,11 @@ struct FinalizedEntry {
     sql: [c_char; 256],
 }
 
+// SAFETY: FinalizedEntry is only accessed while the FINALIZED_RING mutex is held.
+// The raw pointer `stmt` is used as an opaque identifier (compared by address),
+// never dereferenced through this ring.
+unsafe impl Send for FinalizedEntry {}
+
 impl FinalizedEntry {
     const fn empty() -> Self {
         Self {
@@ -50,6 +56,10 @@ struct PreparedEntry {
     sql: [c_char; 256],
 }
 
+// SAFETY: Same as FinalizedEntry — accessed only under PREPARED_RING mutex,
+// raw pointer used as opaque key.
+unsafe impl Send for PreparedEntry {}
+
 impl PreparedEntry {
     const fn empty() -> Self {
         Self {
@@ -61,10 +71,11 @@ impl PreparedEntry {
     }
 }
 
-static mut FINALIZED_RING: [FinalizedEntry; FINALIZED_RING_SIZE] =
-    [FinalizedEntry::empty(); FINALIZED_RING_SIZE];
-static mut PREPARED_RING: [PreparedEntry; PREPARED_RING_SIZE] =
-    [PreparedEntry::empty(); PREPARED_RING_SIZE];
+static FINALIZED_RING: LazyLock<Mutex<Box<[FinalizedEntry; FINALIZED_RING_SIZE]>>> =
+    LazyLock::new(|| Mutex::new(Box::new([FinalizedEntry::empty(); FINALIZED_RING_SIZE])));
+
+static PREPARED_RING: LazyLock<Mutex<Box<[PreparedEntry; PREPARED_RING_SIZE]>>> =
+    LazyLock::new(|| Mutex::new(Box::new([PreparedEntry::empty(); PREPARED_RING_SIZE])));
 
 pub(super) fn skip_clear_bindings_on_finalized() -> bool {
     let cached = SKIP_CLEAR_BINDINGS_CACHED.load(Ordering::Relaxed);
@@ -130,12 +141,13 @@ pub(super) unsafe fn remember_finalized_stmt(
         return;
     }
     let idx = FINALIZED_RING_IDX.fetch_add(1, Ordering::Relaxed) as usize % FINALIZED_RING_SIZE;
-    let entry = finalized_ring_ptr().add(idx);
-    (*entry).stmt = stmt;
-    (*entry).ts_ns = now_monotonic_ns();
-    (*entry).tid = libc::pthread_self() as u64;
-    (*entry).is_pg = is_pg;
-    write_sql_buf(&mut (*entry).sql, sql);
+    let mut ring = FINALIZED_RING.lock().unwrap_or_else(|e| e.into_inner());
+    let entry = &mut ring[idx];
+    entry.stmt = stmt;
+    entry.ts_ns = now_monotonic_ns();
+    entry.tid = libc::pthread_self() as u64;
+    entry.is_pg = is_pg;
+    write_sql_buf(&mut entry.sql, sql);
 }
 
 pub(super) unsafe fn remember_prepared_stmt(stmt: *mut sqlite3_stmt, sql: *const c_char) {
@@ -143,20 +155,21 @@ pub(super) unsafe fn remember_prepared_stmt(stmt: *mut sqlite3_stmt, sql: *const
         return;
     }
     let idx = PREPARED_RING_IDX.fetch_add(1, Ordering::Relaxed) as usize % PREPARED_RING_SIZE;
-    let entry = prepared_ring_ptr().add(idx);
-    (*entry).stmt = stmt;
-    (*entry).ts_ns = now_monotonic_ns();
-    (*entry).tid = libc::pthread_self() as u64;
-    write_sql_buf(&mut (*entry).sql, sql);
+    let mut ring = PREPARED_RING.lock().unwrap_or_else(|e| e.into_inner());
+    let entry = &mut ring[idx];
+    entry.stmt = stmt;
+    entry.ts_ns = now_monotonic_ns();
+    entry.tid = libc::pthread_self() as u64;
+    write_sql_buf(&mut entry.sql, sql);
 }
 
 pub(super) unsafe fn is_prepared_stmt(stmt: *mut sqlite3_stmt) -> bool {
     if stmt.is_null() {
         return false;
     }
-    let base = prepared_ring_ptr();
+    let ring = PREPARED_RING.lock().unwrap_or_else(|e| e.into_inner());
     for i in 0..PREPARED_RING_SIZE {
-        if (*base.add(i)).stmt == stmt {
+        if ring[i].stmt == stmt {
             return true;
         }
     }
@@ -167,10 +180,10 @@ pub(super) unsafe fn clear_prepared_stmt(stmt: *mut sqlite3_stmt) {
     if stmt.is_null() {
         return;
     }
-    let base = prepared_ring_ptr();
+    let mut ring = PREPARED_RING.lock().unwrap_or_else(|e| e.into_inner());
     for i in 0..PREPARED_RING_SIZE {
-        if (*base.add(i)).stmt == stmt {
-            *base.add(i) = PreparedEntry::empty();
+        if ring[i].stmt == stmt {
+            ring[i] = PreparedEntry::empty();
             return;
         }
     }
@@ -180,23 +193,23 @@ pub(super) unsafe fn clear_finalized_entry(stmt: *mut sqlite3_stmt) {
     if stmt.is_null() {
         return;
     }
-    let base = finalized_ring_ptr();
+    let mut ring = FINALIZED_RING.lock().unwrap_or_else(|e| e.into_inner());
     for i in 0..FINALIZED_RING_SIZE {
-        if (*base.add(i)).stmt == stmt {
-            *base.add(i) = FinalizedEntry::empty();
+        if ring[i].stmt == stmt {
+            ring[i] = FinalizedEntry::empty();
             return;
         }
     }
 }
 
-unsafe fn find_finalized_entry(stmt: *mut sqlite3_stmt) -> Option<FinalizedEntry> {
+fn find_finalized_entry(stmt: *mut sqlite3_stmt) -> Option<FinalizedEntry> {
     if stmt.is_null() {
         return None;
     }
-    let base = finalized_ring_ptr();
+    let ring = FINALIZED_RING.lock().unwrap_or_else(|e| e.into_inner());
     for i in 0..FINALIZED_RING_SIZE {
-        if (*base.add(i)).stmt == stmt {
-            return Some(*base.add(i));
+        if ring[i].stmt == stmt {
+            return Some(ring[i]);
         }
     }
     None
@@ -267,14 +280,6 @@ pub(super) unsafe fn is_recently_finalized_stmt(stmt: *mut sqlite3_stmt) -> bool
     age_ms <= FINALIZED_RECENT_MS
 }
 
-unsafe fn finalized_ring_ptr() -> *mut FinalizedEntry {
-    ptr::addr_of_mut!(FINALIZED_RING) as *mut FinalizedEntry
-}
-
-unsafe fn prepared_ring_ptr() -> *mut PreparedEntry {
-    ptr::addr_of_mut!(PREPARED_RING) as *mut PreparedEntry
-}
-
 #[cfg(test)]
 pub(super) unsafe fn reset_test_state() {
     FINALIZED_RING_IDX.store(0, Ordering::Relaxed);
@@ -283,10 +288,16 @@ pub(super) unsafe fn reset_test_state() {
     SKIP_CLEAR_BINDINGS_CACHED.store(1, Ordering::Relaxed);
     TRACE_CLEAR_BINDINGS_CACHED.store(0, Ordering::Relaxed);
 
-    for i in 0..FINALIZED_RING_SIZE {
-        *finalized_ring_ptr().add(i) = FinalizedEntry::empty();
+    {
+        let mut ring = FINALIZED_RING.lock().unwrap_or_else(|e| e.into_inner());
+        for i in 0..FINALIZED_RING_SIZE {
+            ring[i] = FinalizedEntry::empty();
+        }
     }
-    for i in 0..PREPARED_RING_SIZE {
-        *prepared_ring_ptr().add(i) = PreparedEntry::empty();
+    {
+        let mut ring = PREPARED_RING.lock().unwrap_or_else(|e| e.into_inner());
+        for i in 0..PREPARED_RING_SIZE {
+            ring[i] = PreparedEntry::empty();
+        }
     }
 }

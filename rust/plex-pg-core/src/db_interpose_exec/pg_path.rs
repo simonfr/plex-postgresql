@@ -3,6 +3,7 @@ use super::support::{
     parse_positive_returning_rowid,
 };
 use super::*;
+use crate::log_info_lazy;
 
 pub(crate) fn exec_via_postgres(
     pg_conn: *mut crate::ffi_types::PgConnection,
@@ -128,10 +129,10 @@ pub(crate) fn exec_via_postgres(
                     if !owned_insert.is_null() {
                         exec_pg_sql = owned_insert;
                         if contains_bytes(sql_bytes, b"play_queue_generators") {
-                            log_info(&format!(
+                            log_info_lazy!(
                                 "EXEC play_queue_generators INSERT with RETURNING: {}",
                                 cstr_prefix(exec_pg_sql, 300, "NULL")
-                            ));
+                            );
                         }
                     }
                 }
@@ -256,10 +257,10 @@ pub(crate) fn exec_via_postgres(
                                 crate::pg_client::rust_set_global_last_insert_rowid(rowid);
                             }
                             if contains_bytes(sql_bytes, b"play_queue_generators") {
-                                log_info(&format!(
+                                log_info_lazy!(
                                     "EXEC play_queue_generators: RETURNING id = {}",
                                     cstr_to_string_or(id_str, "?")
-                                ));
+                                );
                             }
                             let meta_id = crate::pg_statement::rust_extract_metadata_id(exec_sql);
                             if meta_id > 0 {

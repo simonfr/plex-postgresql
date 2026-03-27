@@ -1,4 +1,5 @@
 use super::*;
+use crate::log_debug_lazy;
 
 fn lookup_pg_stmt(p_stmt: *mut sqlite3_stmt) -> *mut PgStmt {
     crate::pg_statement::rust_stmt_find(p_stmt as usize) as *mut PgStmt
@@ -20,7 +21,7 @@ fn normalized_bind_name(name: *const c_char) -> *const c_char {
 }
 
 pub(super) fn db_handle_impl(p_stmt: *mut sqlite3_stmt) -> *mut sqlite3 {
-    log_debug(&format!("DB_HANDLE: pStmt={:p}", p_stmt));
+    log_debug_lazy!("DB_HANDLE: pStmt={:p}", p_stmt);
     if p_stmt.is_null() {
         return std::ptr::null_mut();
     }
@@ -31,15 +32,15 @@ pub(super) fn db_handle_impl(p_stmt: *mut sqlite3_stmt) -> *mut sqlite3 {
             if !(*pg_stmt).shadow_stmt.is_null() {
                 if let Some(f) = orig_sqlite3_db_handle {
                     let db = f((*pg_stmt).shadow_stmt);
-                    log_debug(&format!("DB_HANDLE: returning from shadow_stmt={:p}", db));
+                    log_debug_lazy!("DB_HANDLE: returning from shadow_stmt={:p}", db);
                     return db;
                 }
             }
             if !(*pg_stmt).conn.is_null() && !(*(*pg_stmt).conn).shadow_db.is_null() {
-                log_debug(&format!(
+                log_debug_lazy!(
                     "DB_HANDLE: returning shadow_db={:p}",
                     (*(*pg_stmt).conn).shadow_db
-                ));
+                );
                 return (*(*pg_stmt).conn).shadow_db;
             }
         }
@@ -50,7 +51,7 @@ pub(super) fn db_handle_impl(p_stmt: *mut sqlite3_stmt) -> *mut sqlite3 {
     unsafe {
         if let Some(f) = orig_sqlite3_db_handle {
             let db = f(p_stmt);
-            log_debug(&format!("DB_HANDLE: returning orig={:p}", db));
+            log_debug_lazy!("DB_HANDLE: returning orig={:p}", db);
             return db;
         }
     }
@@ -121,7 +122,7 @@ pub(super) fn stmt_readonly_impl(p_stmt: *mut sqlite3_stmt) -> c_int {
 }
 
 pub(super) fn stmt_busy_impl(p_stmt: *mut sqlite3_stmt) -> c_int {
-    log_debug(&format!("STMT_BUSY: stmt={:p}", p_stmt));
+    log_debug_lazy!("STMT_BUSY: stmt={:p}", p_stmt);
     if p_stmt.is_null() {
         return 0;
     }
@@ -130,13 +131,13 @@ pub(super) fn stmt_busy_impl(p_stmt: *mut sqlite3_stmt) -> c_int {
     if is_interposed_pg_stmt(pg_stmt) {
         unsafe {
             let busy = !(*pg_stmt).result.is_null() && (*pg_stmt).current_row < (*pg_stmt).num_rows;
-            log_debug(&format!(
+            log_debug_lazy!(
                 "STMT_BUSY: pg_stmt, result={:p} current_row={} num_rows={} -> busy={}",
                 (*pg_stmt).result,
                 (*pg_stmt).current_row,
                 (*pg_stmt).num_rows,
                 busy as i32
-            ));
+            );
             return busy as c_int;
         }
     }
@@ -150,10 +151,10 @@ pub(super) fn stmt_busy_impl(p_stmt: *mut sqlite3_stmt) -> c_int {
 }
 
 pub(super) fn stmt_status_impl(p_stmt: *mut sqlite3_stmt, op: c_int, reset: c_int) -> c_int {
-    log_debug(&format!(
+    log_debug_lazy!(
         "STMT_STATUS: stmt={:p} op={} reset={}",
         p_stmt, op, reset
-    ));
+    );
     if p_stmt.is_null() {
         return 0;
     }
@@ -173,7 +174,7 @@ pub(super) fn stmt_status_impl(p_stmt: *mut sqlite3_stmt, op: c_int, reset: c_in
 }
 
 pub(super) fn bind_parameter_name_impl(p_stmt: *mut sqlite3_stmt, idx: c_int) -> *const c_char {
-    log_debug(&format!("BIND_PARAM_NAME: stmt={:p} idx={}", p_stmt, idx));
+    log_debug_lazy!("BIND_PARAM_NAME: stmt={:p} idx={}", p_stmt, idx);
     if p_stmt.is_null() {
         return std::ptr::null();
     }
@@ -183,10 +184,10 @@ pub(super) fn bind_parameter_name_impl(p_stmt: *mut sqlite3_stmt, idx: c_int) ->
         unsafe {
             if idx > 0 && idx <= (*pg_stmt).param_count && !(*pg_stmt).param_names.is_null() {
                 let name = *(*pg_stmt).param_names.add((idx - 1) as usize);
-                log_debug(&format!(
+                log_debug_lazy!(
                     "BIND_PARAM_NAME: pg_stmt returning '{}'",
                     cstr_to_string_or(name, "NULL")
-                ));
+                );
                 return name;
             }
         }
@@ -211,10 +212,10 @@ pub(super) fn bind_parameter_index_impl(p_stmt: *mut sqlite3_stmt, name: *const 
     if is_interposed_pg_stmt(pg_stmt) {
         unsafe {
             if (*pg_stmt).param_names.is_null() || (*pg_stmt).param_count == 0 {
-                log_debug(&format!(
+                log_debug_lazy!(
                     "BIND_PARAM_INDEX: pg_stmt has no params, falling through to SQLite for '{}'",
                     cstr_to_string_or(name, "")
-                ));
+                );
             } else {
                 let name_to_find = normalized_bind_name(name);
                 for i in 0..(*pg_stmt).param_count {
@@ -223,19 +224,19 @@ pub(super) fn bind_parameter_index_impl(p_stmt: *mut sqlite3_stmt, name: *const 
                         && !name_to_find.is_null()
                         && libc::strcmp(cur, name_to_find) == 0
                     {
-                        log_debug(&format!(
+                        log_debug_lazy!(
                             "BIND_PARAM_INDEX: found '{}' at index {}",
                             cstr_to_string_or(name, ""),
                             i + 1
-                        ));
+                        );
                         return i + 1;
                     }
                 }
-                log_debug(&format!(
+                log_debug_lazy!(
                     "BIND_PARAM_INDEX: '{}' not found in pg_stmt (param_count={})",
                     cstr_to_string_or(name, ""),
                     (*pg_stmt).param_count
-                ));
+                );
                 return 0;
             }
         }

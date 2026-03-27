@@ -1,4 +1,5 @@
 use super::*;
+use crate::log_debug_lazy;
 
 pub(crate) fn should_clear_cross_thread_result(
     stmt: *const PgStmt,
@@ -68,18 +69,18 @@ pub extern "C" fn rust_step_read_prepare_reexecution_state(
         let _stmt_guard = PthreadMutexGuard::lock(&mut (*stmt).mutex as *mut _);
         if should_clear_cross_thread_result(stmt, exec_conn) {
             (*stmt).needs_requery = 1;
-            log_debug(&format!(
+            log_debug_lazy!(
                 "STEP: Streaming stmt crossed threads; forcing eager requery (result_conn={:p} exec_conn={:p})",
                 (*stmt).result_conn,
                 exec_conn
-            ));
+            );
             crate::pg_statement::rust_stmt_clear_result(stmt);
         } else if adopt_materialized_result_owner(stmt, exec_conn) {
-            log_debug(&format!(
+            log_debug_lazy!(
                 "STEP: Reusing materialized eager result across threads (result_conn={:p} exec_conn={:p})",
                 (*stmt).result_conn,
                 exec_conn
-            ));
+            );
         }
 
         if !(*stmt).result.is_null() && (*stmt).metadata_only_result != 0 {

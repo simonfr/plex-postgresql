@@ -1,4 +1,5 @@
 use super::*;
+use crate::log_debug_lazy;
 
 pub(super) unsafe fn pg_map_param_index(
     pg_stmt: *mut PgStmt,
@@ -6,23 +7,23 @@ pub(super) unsafe fn pg_map_param_index(
     sqlite_idx: c_int,
 ) -> c_int {
     if pg_stmt.is_null() {
-        log_debug(&format!(
+        log_debug_lazy!(
             "pg_map_param_index: no pg_stmt, using direct mapping idx={} -> {}",
             sqlite_idx,
             sqlite_idx - 1
-        ));
+        );
         return sqlite_idx - 1;
     }
 
     if !(*pg_stmt).param_names.is_null() && (*pg_stmt).param_count > 0 {
         let param_name =
             crate::db_interpose_metadata::rust_my_sqlite3_bind_parameter_name(p_stmt, sqlite_idx);
-        log_debug(&format!(
+        log_debug_lazy!(
             "pg_map_param_index: sqlite_idx={}, param_name={}, param_count={}",
             sqlite_idx,
             cstr_to_string_or(param_name, "NULL"),
             (*pg_stmt).param_count
-        ));
+        );
 
         if !param_name.is_null() {
             let mut clean_name = param_name;
@@ -34,35 +35,35 @@ pub(super) unsafe fn pg_map_param_index(
             let max_debug = param_count.min(5);
             for i in 0..max_debug {
                 let cur = *(*pg_stmt).param_names.add(i);
-                log_debug(&format!(
+                log_debug_lazy!(
                     "  param_names[{}] = {}",
                     i,
                     cstr_to_string_or(cur, "NULL")
-                ));
+                );
             }
 
             for i in 0..param_count {
                 let cur = *(*pg_stmt).param_names.add(i);
                 if !cur.is_null() && libc::strcmp(cur, clean_name) == 0 {
-                    log_debug(&format!("  -> Found match at pg_idx={}", i));
+                    log_debug_lazy!("  -> Found match at pg_idx={}", i);
                     return i as c_int;
                 }
             }
-            log_debug(&format!(
+            log_debug_lazy!(
                 "Named parameter '{}' not found in translation (sqlite_idx={})",
                 cstr_to_string_or(clean_name, "NULL"),
                 sqlite_idx
-            ));
+            );
         } else {
             log_debug("  -> No parameter name, using direct mapping");
         }
     } else {
-        log_debug(&format!(
+        log_debug_lazy!(
             "pg_map_param_index: no param_names (count={}), using direct mapping idx={} -> {}",
             (*pg_stmt).param_count,
             sqlite_idx,
             sqlite_idx - 1
-        ));
+        );
     }
 
     sqlite_idx - 1

@@ -41,6 +41,8 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::LazyLock;
 
 use crate::env_utils;
+use crate::log_debug_lazy;
+use crate::log_info_lazy;
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -451,10 +453,10 @@ pub extern "C" fn rust_query_cache_init() {
         log_info("QUERY_CACHE disabled via PLEX_PG_DISABLE_QUERY_CACHE");
         return;
     }
-    log_info(&format!(
+    log_info_lazy!(
         "Query result cache initialized (size={}, ttl={}ms) [Rust]",
         QUERY_CACHE_SIZE, QUERY_CACHE_TTL_MS
-    ));
+    );
 }
 
 /// Cleanup the query cache. No-op — cleanup happens via TLS Drop.
@@ -617,11 +619,11 @@ pub extern "C" fn rust_query_cache_store(
         for (i, entry) in cache.entries.iter().enumerate() {
             if entry.cache_key == cache_key {
                 if entry.is_referenced() {
-                    log_debug(&format!(
+                    log_debug_lazy!(
                         "QUERY_CACHE STORE: skip overwrite of live entry key={:x} refs={}",
                         cache_key,
                         entry.ref_count.load(Ordering::Acquire)
-                    ));
+                    );
                     return;
                 }
                 exact_match_slot = Some(i);
@@ -649,10 +651,10 @@ pub extern "C" fn rust_query_cache_store(
             .or(expired_slot)
             .or(oldest_reclaimable_slot);
         let Some(slot) = slot else {
-            log_debug(&format!(
+            log_debug_lazy!(
                 "QUERY_CACHE STORE: no reclaimable slot for key={:x}, skipping",
                 cache_key
-            ));
+            );
             return;
         };
 
@@ -662,10 +664,10 @@ pub extern "C" fn rust_query_cache_store(
         if slot_was_active {
             let reclaimed = unsafe { cache.entries[slot].free_data() };
             if !reclaimed {
-                log_debug(&format!(
+                log_debug_lazy!(
                     "QUERY_CACHE STORE: slot {} became busy before reclaim, skipping key={:x}",
                     slot, cache_key
-                ));
+                );
                 return;
             }
             cache.count = cache.count.saturating_sub(1);
@@ -808,10 +810,10 @@ pub extern "C" fn rust_query_cache_store(
             } else {
                 String::from("?")
             };
-            log_debug(&format!(
+            log_debug_lazy!(
                 "QUERY_CACHE STORE: key={:x} rows={} cols={} size={} sql={}",
                 cache_key, num_rows, num_cols, total_size, sql_preview
-            ));
+            );
         }
     });
 }
@@ -875,10 +877,10 @@ pub extern "C" fn rust_query_cache_release(entry: *mut CachedResult) {
         let e = &*entry;
         let old = e.ref_count.fetch_sub(1, Ordering::AcqRel);
         if old <= 1 {
-            log_debug(&format!(
+            log_debug_lazy!(
                 "CACHE_RELEASE: entry {:p} now has 0 refs, eligible for eviction",
                 entry
-            ));
+            );
         }
     }
 }

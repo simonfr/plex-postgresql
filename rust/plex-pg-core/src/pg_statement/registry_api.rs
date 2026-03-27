@@ -1,6 +1,7 @@
 use std::sync::atomic::Ordering;
 
 use crate::db_interpose_conn_utils::{log_debug, log_error};
+use crate::log_debug_lazy;
 use crate::db_interpose_helpers::cstr_to_str_or_empty;
 use crate::ffi_types::PgStmt;
 use crate::sync_utils::{rwlock_read, rwlock_write};
@@ -26,10 +27,37 @@ pub extern "C" fn rust_stmt_unref(pg_stmt: *mut PgStmt) {
     if pg_stmt.is_null() {
         return;
     }
-    let old = unsafe {
+
+    // Atomically decrement, rejecting any transition that would go below 0.
+    let result = unsafe {
         let stmt = &*pg_stmt;
-        stmt.ref_count.fetch_sub(1, Ordering::AcqRel)
+        stmt.ref_count.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            if current <= 0 {
+                None // reject: already at 0 or below
+            } else {
+                Some(current - 1)
+            }
+        })
     };
+
+    let old = match result {
+        Ok(prev) => prev,
+        Err(observed) => {
+            // The ref_count was already 0 (or below). The object may be freed —
+            // do NOT dereference any fields. Log only the raw pointer.
+            log_error(&format!(
+                "pg_stmt_unref: CRITICAL BUG - ref_count was {}, refusing decrement. \
+                 stmt={:p} (not dereferencing freed memory)",
+                observed, pg_stmt
+            ));
+            return;
+        }
+    };
+
+    // At this point we successfully decremented from `old` to `old - 1`.
+    // If old > 1 the object is still alive (other refs exist) — safe to read fields.
+    // If old == 1 we did the 1 -> 0 transition atomically; we are the sole owner
+    // and can safely read fields before freeing.
     let new = old - 1;
     let sql = unsafe {
         let stmt = &*pg_stmt;
@@ -39,27 +67,13 @@ pub extern "C" fn rust_stmt_unref(pg_stmt: *mut PgStmt) {
             cstr_to_str_or_empty(stmt.sql)
         }
     };
-    log_debug(&format!(
+    log_debug_lazy!(
         "pg_stmt_unref: stmt={:p} old_ref={} new_ref={} sql={:.40}",
         pg_stmt, old, new, sql
-    ));
-
-    if old <= 0 {
-        log_error(&format!(
-            "pg_stmt_unref: CRITICAL BUG - ref_count was {} before decrement! stmt={:p} sql={:.40}",
-            old, pg_stmt, sql
-        ));
-        log_error(
-            "pg_stmt_unref: This indicates double-unref or missing ref. RESTORING to prevent negative.",
-        );
-        unsafe {
-            let stmt = &*pg_stmt;
-            stmt.ref_count.store(0, Ordering::Release);
-        }
-        return;
-    }
+    );
 
     if old == 1 {
+        // We performed the 1 -> 0 transition — sole owner, free the statement.
         if leak_enabled() {
             log_error(&format!(
                 "pg_stmt_unref: leak enabled via PLEX_PG_LEAK_STMTS, skipping free stmt={:p} sql={:.40}",
@@ -71,10 +85,10 @@ pub extern "C" fn rust_stmt_unref(pg_stmt: *mut PgStmt) {
             }
             return;
         }
-        log_debug(&format!(
+        log_debug_lazy!(
             "pg_stmt_unref: last reference, freeing stmt={:p}",
             pg_stmt
-        ));
+        );
         rust_stmt_free(pg_stmt);
     }
 }

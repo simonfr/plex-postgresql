@@ -11,6 +11,7 @@ use super::ring_tracker::{
     skip_clear_bindings_on_finalized,
 };
 use super::*;
+use crate::log_debug_lazy;
 
 unsafe fn is_preallocated_buffer(stmt: *mut PgStmt, idx: usize) -> bool {
     if stmt.is_null() || idx >= MAX_PARAMS {
@@ -122,10 +123,10 @@ pub(super) fn finalize_impl(p_stmt: *mut sqlite3_stmt) -> c_int {
                         (*cached).sql
                     };
                 }
-                log_debug(&format!(
+                log_debug_lazy!(
                     "finalize: stmt only in TLS (ref_count={}), clearing",
                     (*cached).ref_count.load(Ordering::Relaxed)
-                ));
+                );
                 pg_clear_cached_stmt(p_stmt);
                 pg_stmt_unref(cached);
             }

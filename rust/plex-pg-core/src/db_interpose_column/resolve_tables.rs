@@ -1,4 +1,6 @@
 use super::*;
+use crate::log_debug_lazy;
+use crate::log_info_lazy;
 
 pub(super) fn resolve_column_tables_impl(
     pg_stmt: *mut PgStmt,
@@ -86,10 +88,10 @@ pub(super) fn resolve_column_tables_impl(
     if num_uncached == 0 {
         unsafe { (*pg_stmt).col_tables_resolved = 1 };
         if cache_hits > 0 {
-            log_debug(&format!(
+            log_debug_lazy!(
                 "RESOLVE_TABLES: All {} columns resolved from cache (0 queries)",
                 cache_hits
-            ));
+            );
         }
         return 0;
     }
@@ -102,10 +104,10 @@ pub(super) fn resolve_column_tables_impl(
 
     let mut resolve_conn = pg_conn;
     if unsafe { (*pg_conn).streaming_active.load(Ordering::SeqCst) != 0 } {
-        log_debug(&format!(
+        log_debug_lazy!(
             "RESOLVE_TABLES: Connection {:p} is streaming_active",
             pg_conn
-        ));
+        );
         if !env_utils::env_truthy_str("PLEX_PG_ENABLE_RESOLVE_TABLES_ALT_CONN") {
             log_debug(
                 "RESOLVE_TABLES: skipping OID lookup while streaming to avoid reentrant alternate connection acquisition",
@@ -134,10 +136,10 @@ pub(super) fn resolve_column_tables_impl(
         }
 
         resolve_conn = alt_conn;
-        log_debug(&format!(
+        log_debug_lazy!(
             "RESOLVE_TABLES: Using alternate connection {:p} for OID lookup",
             resolve_conn
-        ));
+        );
     }
 
     let mut query = String::from("SELECT oid, relname FROM pg_class WHERE oid IN (");
@@ -232,7 +234,7 @@ pub(super) fn resolve_column_tables_impl(
                     let dup = unsafe { libc::strdup(result_names[j].as_ptr()) };
                     if !dup.is_null() {
                         unsafe { (*pg_stmt).col_table_names[i] = dup };
-                        log_debug(&format!(
+                        log_debug_lazy!(
                             "RESOLVE_TABLES: col[{}] '{}' -> table '{}'",
                             i,
                             cstr_to_string_or(
@@ -245,7 +247,7 @@ pub(super) fn resolve_column_tables_impl(
                                 "?",
                             ),
                             cstr_to_string_or(result_names[j].as_ptr(), "?")
-                        ));
+                        );
                     }
                     break;
                 }
@@ -254,9 +256,9 @@ pub(super) fn resolve_column_tables_impl(
     }
 
     unsafe { (*pg_stmt).col_tables_resolved = 1 };
-    log_info(&format!(
+    log_info_lazy!(
         "RESOLVE_TABLES: Resolved {} columns ({} from cache, {} from query)",
         num_cols, cache_hits, num_unique_tables
-    ));
+    );
     0
 }
