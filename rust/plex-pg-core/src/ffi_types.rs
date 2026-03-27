@@ -4,7 +4,8 @@ use std::sync::atomic::AtomicI32;
 use crate::libpq_helpers::{PGconn, PGresult};
 use crate::pg_query_cache::CachedResult;
 
-pub const MAX_PARAMS: usize = 1024;
+pub const MAX_PARAMS: usize = 128;
+pub const MAX_COLS: usize = 128;
 pub const STMT_CACHE_SIZE: usize = 512;
 pub const DB_PATH_LEN: usize = 1024;
 pub const LAST_ERROR_LEN: usize = 1024;
@@ -27,21 +28,6 @@ pub struct sqlite3_value {
 }
 
 #[repr(C)]
-pub struct PreparedStmtCacheEntry {
-    pub sql_hash: u64,
-    pub stmt_name: [c_char; STMT_NAME_LEN],
-    pub param_count: c_int,
-    pub prepared: c_int,
-    pub last_used: libc::time_t,
-}
-
-#[repr(C)]
-pub struct StmtCache {
-    pub entries: [PreparedStmtCacheEntry; STMT_CACHE_SIZE],
-    pub count: c_int,
-}
-
-#[repr(C)]
 pub struct PgConnection {
     pub conn: *mut PGconn,
     pub shadow_db: *mut sqlite3,
@@ -55,7 +41,6 @@ pub struct PgConnection {
     pub last_error: [c_char; LAST_ERROR_LEN],
     pub last_error_code: c_int,
     pub streaming_active: AtomicI32,
-    pub stmt_cache: StmtCache,
 }
 
 #[repr(C)]
@@ -101,6 +86,6 @@ pub struct PgStmt {
     pub cached_blob: [*mut c_void; MAX_PARAMS],
     pub cached_blob_len: [c_int; MAX_PARAMS],
     pub cached_row: c_int,
-    pub col_table_names: [*mut c_char; MAX_PARAMS],
+    pub col_table_names: [*mut c_char; MAX_COLS],
     pub col_tables_resolved: c_int,
 }

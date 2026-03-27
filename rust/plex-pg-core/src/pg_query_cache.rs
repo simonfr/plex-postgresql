@@ -58,8 +58,8 @@ const QUERY_CACHE_MAX_ROWS: i32 = 5;
 /// Max total cached bytes per entry (1 MB).
 const QUERY_CACHE_MAX_BYTES: usize = 1024 * 1024;
 
-/// Max parameters per statement (must match C MAX_PARAMS).
-const MAX_PARAMS: usize = 256;
+/// Max parameters per statement (must match ffi_types::MAX_PARAMS).
+const MAX_PARAMS: usize = 128;
 
 // ─── FNV-1a constants ────────────────────────────────────────────────────────
 

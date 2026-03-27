@@ -33,7 +33,7 @@ unsafe fn lookup_cached_decltype(
 ) -> *const c_char {
     let mut cached_type = lookup_sqlite_decltype((*pg_stmt).conn, col_name);
 
-    if cached_type.is_null() && idx >= 0 && (idx as usize) < MAX_PARAMS {
+    if cached_type.is_null() && idx >= 0 && (idx as usize) < MAX_COLS {
         let table_ptr = (*pg_stmt).col_table_names[idx as usize];
         if !table_ptr.is_null() {
             let table = CStr::from_ptr(table_ptr).to_string_lossy();

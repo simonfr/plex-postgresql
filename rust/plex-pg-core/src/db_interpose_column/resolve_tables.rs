@@ -38,13 +38,13 @@ pub(super) fn resolve_column_tables_impl(
     }
 
     let num_cols = unsafe { (*pg_stmt).num_cols };
-    if num_cols <= 0 || num_cols as usize > MAX_PARAMS {
+    if num_cols <= 0 || num_cols as usize > MAX_COLS {
         unsafe { (*pg_stmt).col_tables_resolved = 1 };
         return 0;
     }
 
-    let mut table_oids = [0u32; MAX_PARAMS];
-    let mut uncached_oids = [0usize; MAX_PARAMS];
+    let mut table_oids = [0u32; MAX_COLS];
+    let mut uncached_oids = [0usize; MAX_COLS];
     let mut num_unique_tables = 0usize;
     let mut num_uncached = 0usize;
     let mut cache_hits = 0usize;
@@ -77,7 +77,7 @@ pub(super) fn resolve_column_tables_impl(
                 break;
             }
         }
-        if !found && num_unique_tables < MAX_PARAMS {
+        if !found && num_unique_tables < MAX_COLS {
             table_oids[num_unique_tables] = table_oid;
             uncached_oids[num_uncached] = num_unique_tables;
             num_unique_tables += 1;
@@ -183,10 +183,10 @@ pub(super) fn resolve_column_tables_impl(
     }
 
     let num_results = crate::libpq_helpers::rust_pq_ntuples(res);
-    let mut result_oids = vec![0u32; MAX_PARAMS];
-    let mut result_names: Vec<[c_char; 64]> = vec![[0 as c_char; 64]; MAX_PARAMS];
+    let mut result_oids = vec![0u32; MAX_COLS];
+    let mut result_names: Vec<[c_char; 64]> = vec![[0 as c_char; 64]; MAX_COLS];
 
-    for i in 0..(num_results as usize).min(MAX_PARAMS) {
+    for i in 0..(num_results as usize).min(MAX_COLS) {
         let mut oid_buf = [0 as c_char; 64];
         let ok_oid = crate::db_interpose_helpers::rust_pg_result_text_copy(
             helpers_result_ptr(res),
@@ -218,7 +218,7 @@ pub(super) fn resolve_column_tables_impl(
 
     crate::libpq_helpers::rust_pq_clear(res);
 
-    for i in 0..(num_cols as usize).min(MAX_PARAMS) {
+    for i in 0..(num_cols as usize).min(MAX_COLS) {
         if unsafe { (*pg_stmt).col_table_names[i] }.is_null() {
             let table_oid = unsafe {
                 crate::db_interpose_helpers::rust_pg_result_col_table_oid(
@@ -229,7 +229,7 @@ pub(super) fn resolve_column_tables_impl(
             if table_oid == INVALID_OID {
                 continue;
             }
-            for j in 0..(num_results as usize).min(MAX_PARAMS) {
+            for j in 0..(num_results as usize).min(MAX_COLS) {
                 if result_oids[j] == table_oid {
                     let dup = unsafe { libc::strdup(result_names[j].as_ptr()) };
                     if !dup.is_null() {

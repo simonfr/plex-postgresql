@@ -36,7 +36,7 @@ use crate::db_interpose_value_helpers::{
     pg_oid_to_sqlite_type_impl, pg_text_to_double_impl, pg_text_to_int64_impl, pg_text_to_int_impl,
 };
 use crate::env_utils;
-use crate::ffi_types::{sqlite3, sqlite3_stmt, sqlite3_value, PgConnection, PgStmt, MAX_PARAMS};
+use crate::ffi_types::{sqlite3, sqlite3_stmt, sqlite3_value, PgConnection, PgStmt, MAX_COLS, MAX_PARAMS};
 use crate::libpq_helpers::PGresult as PgResultLibpq;
 use badcast::{trace_badcast_log_ctx, trace_badcast_should_log, trace_badcast_should_log_col};
 use binary_accessors::{column_blob_impl, column_bytes_impl};

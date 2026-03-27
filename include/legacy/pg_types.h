@@ -17,7 +17,8 @@
 // ============================================================================
 
 #define MAX_CONNECTIONS 512
-#define MAX_PARAMS 1024
+#define MAX_PARAMS 128
+#define MAX_COLS 128
 #define MAX_STATEMENTS 1024
 #define MAX_CACHED_STMTS_PER_THREAD 64
 #define PG_VALUE_MAGIC 0x50475641  // "PGVA" - identifies our fake sqlite3_value
@@ -213,7 +214,7 @@ typedef struct pg_stmt {
 
     // Resolved table names for each column (for decltype lookup of bare columns)
     // Populated at query execution time via table OID lookups
-    char *col_table_names[MAX_PARAMS]; // Source table name for each column (NULL if unknown)
+    char *col_table_names[MAX_COLS]; // Source table name for each column (NULL if unknown)
     int col_tables_resolved;           // 1 if table names have been resolved
 } pg_stmt_t;
 

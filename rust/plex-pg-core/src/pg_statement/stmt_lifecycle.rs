@@ -3,7 +3,7 @@ use std::sync::atomic::Ordering;
 
 use crate::db_interpose_conn_utils::{log_debug, log_error, PthreadMutexGuard};
 use crate::db_interpose_helpers::cstr_to_str_or_empty;
-use crate::ffi_types::{PgConnection, PgStmt, MAX_PARAMS};
+use crate::ffi_types::{PgConnection, PgStmt, MAX_COLS, MAX_PARAMS};
 
 use super::is_preallocated_buffer;
 use crate::log_debug_lazy;
@@ -269,7 +269,7 @@ pub extern "C" fn rust_stmt_free(stmt_ptr: *mut PgStmt) {
             }
         }
 
-        for i in 0..MAX_PARAMS {
+        for i in 0..MAX_COLS {
             let name = stmt.col_table_names[i];
             if !name.is_null() {
                 libc::free(name as *mut c_void);

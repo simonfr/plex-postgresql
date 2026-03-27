@@ -15,7 +15,7 @@ fn stmt_free_sweeps_extra_param_values_without_crash() {
         assert!(!b.is_null());
 
         (*stmt).param_values[0] = a;
-        (*stmt).param_values[200] = b;
+        (*stmt).param_values[100] = b;
 
         (*stmt).ref_count.store(0, Ordering::Release);
         rust_stmt_free(stmt);
