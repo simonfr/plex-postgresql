@@ -19,13 +19,14 @@ pub(super) fn bind_int_impl(p_stmt: *mut sqlite3_stmt, idx: c_int, val: c_int) -
 
     if let Some(pg_idx) = unsafe { mapped_param_index(pg_stmt, p_stmt, idx) } {
         unsafe {
+            let stmt = &mut *pg_stmt;
             libc::snprintf(
-                (*pg_stmt).param_buffers[pg_idx].as_mut_ptr(),
+                stmt.param_buffers[pg_idx].as_mut_ptr(),
                 PARAM_BUF_LEN,
                 b"%d\0".as_ptr() as *const c_char,
                 val,
             );
-            (*pg_stmt).param_values[pg_idx] = (*pg_stmt).param_buffers[pg_idx].as_mut_ptr();
+            stmt.param_values[pg_idx] = stmt.param_buffers[pg_idx].as_mut_ptr();
         }
     }
 
@@ -51,13 +52,14 @@ pub(super) fn bind_int64_impl(p_stmt: *mut sqlite3_stmt, idx: c_int, val: i64) -
 
     if let Some(pg_idx) = unsafe { mapped_param_index(pg_stmt, p_stmt, idx) } {
         unsafe {
+            let stmt = &mut *pg_stmt;
             libc::snprintf(
-                (*pg_stmt).param_buffers[pg_idx].as_mut_ptr(),
+                stmt.param_buffers[pg_idx].as_mut_ptr(),
                 PARAM_BUF_LEN,
                 b"%lld\0".as_ptr() as *const c_char,
                 val as libc::c_longlong,
             );
-            (*pg_stmt).param_values[pg_idx] = (*pg_stmt).param_buffers[pg_idx].as_mut_ptr();
+            stmt.param_values[pg_idx] = stmt.param_buffers[pg_idx].as_mut_ptr();
         }
     }
 
@@ -83,13 +85,14 @@ pub(super) fn bind_double_impl(p_stmt: *mut sqlite3_stmt, idx: c_int, val: f64) 
 
     if let Some(pg_idx) = unsafe { mapped_param_index(pg_stmt, p_stmt, idx) } {
         unsafe {
+            let stmt = &mut *pg_stmt;
             libc::snprintf(
-                (*pg_stmt).param_buffers[pg_idx].as_mut_ptr(),
+                stmt.param_buffers[pg_idx].as_mut_ptr(),
                 PARAM_BUF_LEN,
                 b"%.17g\0".as_ptr() as *const c_char,
                 val,
             );
-            (*pg_stmt).param_values[pg_idx] = (*pg_stmt).param_buffers[pg_idx].as_mut_ptr();
+            stmt.param_values[pg_idx] = stmt.param_buffers[pg_idx].as_mut_ptr();
         }
     }
 

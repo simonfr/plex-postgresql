@@ -62,13 +62,14 @@ pub(crate) fn step_read_clear_row_caches(stmt: *mut PgStmt) {
         return;
     }
     unsafe {
+        let num_slots = (*stmt).cached_text.len().max((*stmt).decoded_blobs.len()) as c_int;
         crate::db_interpose_helpers::rust_step_clear_row_caches(
             (*stmt).cached_text.as_mut_ptr(),
             (*stmt).cached_blob.as_mut_ptr(),
             (*stmt).cached_blob_len.as_mut_ptr(),
             (*stmt).decoded_blobs.as_mut_ptr(),
             (*stmt).decoded_blob_lens.as_mut_ptr(),
-            MAX_PARAMS as c_int,
+            num_slots,
             &mut (*stmt).cached_row as *mut c_int,
             &mut (*stmt).decoded_blob_row as *mut c_int,
         );

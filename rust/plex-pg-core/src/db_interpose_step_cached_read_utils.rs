@@ -249,6 +249,7 @@ pub extern "C" fn rust_step_cached_read_execute(
         if crate::libpq_helpers::rust_pq_result_status((*stmt).result) == PGRES_TUPLES_OK {
             (*stmt).num_rows = crate::libpq_helpers::rust_pq_ntuples((*stmt).result);
             (*stmt).num_cols = crate::libpq_helpers::rust_pq_nfields((*stmt).result);
+            (*stmt).ensure_column_capacity((*stmt).num_cols as usize);
             (*stmt).current_row = 0;
             (*stmt).result_conn = conn;
 

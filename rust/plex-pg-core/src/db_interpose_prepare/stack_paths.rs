@@ -106,6 +106,7 @@ pub(super) unsafe fn maybe_handle_ondeck_low_stack(
                     };
                     (*pg_stmt).pg_sql = pg_sql_ptr;
                     (*pg_stmt).param_count = trans.param_count;
+                    (*pg_stmt).ensure_param_capacity(trans.param_count as usize);
                     trace_prepare_pgsql_if_enabled(z_sql, (*pg_stmt).pg_sql);
                     log_info_lazy!(
                         "STACK LOW OnDeck: routed to PG: {}",
@@ -186,6 +187,7 @@ pub(super) unsafe fn maybe_handle_low_stack_prepare_path(
 
                     (*pg_stmt).pg_sql = pg_sql_ptr;
                     (*pg_stmt).param_count = trans.param_count;
+                    (*pg_stmt).ensure_param_capacity(trans.param_count as usize);
                     trace_prepare_pgsql_if_enabled(z_sql, (*pg_stmt).pg_sql);
 
                     copy_param_names(pg_stmt, &trans);

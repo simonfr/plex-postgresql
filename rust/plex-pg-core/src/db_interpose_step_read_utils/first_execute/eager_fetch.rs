@@ -24,6 +24,7 @@ pub(super) unsafe fn eager_fetch_result(
     {
         (*pg_stmt).num_rows = crate::libpq_helpers::rust_pq_ntuples((*pg_stmt).result);
         (*pg_stmt).num_cols = crate::libpq_helpers::rust_pq_nfields((*pg_stmt).result);
+        (*pg_stmt).ensure_column_capacity((*pg_stmt).num_cols as usize);
         (*pg_stmt).current_row = 0;
         (*pg_stmt).result_conn = exec_conn;
         (*pg_stmt).metadata_only_result = 0;

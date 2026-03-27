@@ -47,7 +47,7 @@ unsafe fn load_live_binary_state(
     if idx < 0 || idx >= (*pg_stmt).num_cols {
         return None;
     }
-    if require_param_slot && (idx as usize) >= MAX_PARAMS {
+    if require_param_slot && (idx as usize) >= (*pg_stmt).decoded_blobs.len() {
         return None;
     }
 
@@ -93,7 +93,7 @@ unsafe fn refresh_cached_blob_row(pg_stmt: *mut PgStmt, row: c_int) {
         (*pg_stmt).cached_blob_len.as_mut_ptr(),
         ptr::null_mut(),
         ptr::null_mut(),
-        MAX_PARAMS as c_int,
+        (*pg_stmt).cached_text.len() as c_int,
         &mut (*pg_stmt).cached_row as *mut c_int,
         ptr::null_mut(),
     );

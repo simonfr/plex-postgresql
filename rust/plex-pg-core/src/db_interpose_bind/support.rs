@@ -171,16 +171,10 @@ pub(super) unsafe fn clear_metadata_result_if_needed(pg_stmt: *mut PgStmt) {
 }
 
 pub(super) unsafe fn is_preallocated_buffer(stmt: *mut PgStmt, idx: usize) -> bool {
-    if stmt.is_null() || idx >= MAX_PARAMS {
+    if stmt.is_null() {
         return false;
     }
-    let val = (*stmt).param_values[idx];
-    if val.is_null() {
-        return false;
-    }
-    let val_addr = val as usize;
-    let base = (*stmt).param_buffers[idx].as_ptr() as usize;
-    val_addr >= base && val_addr < base + PARAM_BUF_LEN
+    (*stmt).is_preallocated_buffer(idx)
 }
 
 pub(super) unsafe fn retry_on_misuse<F>(
@@ -217,7 +211,7 @@ pub(super) unsafe fn begin_bind(
     note_bind_phase(phase, p_stmt, pg_stmt);
 
     let guard = if !pg_stmt.is_null() {
-        Some(PthreadMutexGuard::lock(&mut (*pg_stmt).mutex as *mut _))
+        Some(PthreadMutexGuard::lock(&raw mut (*pg_stmt).mutex))
     } else {
         None
     };
@@ -232,19 +226,30 @@ pub(super) unsafe fn mapped_param_index(
     p_stmt: *mut sqlite3_stmt,
     idx: c_int,
 ) -> Option<usize> {
-    if pg_stmt.is_null() || idx <= 0 || idx > MAX_PARAMS as c_int {
+    if pg_stmt.is_null() || idx <= 0 {
+        return None;
+    }
+    let stmt = &*pg_stmt;
+    let param_len = stmt.param_values.len();
+    if param_len == 0 {
+        log_debug("mapped_param_index: param_values Vec is empty (not sized yet)");
         return None;
     }
     let pg_idx = pg_map_param_index(pg_stmt, p_stmt, idx);
-    if pg_idx < 0 || (pg_idx as usize) >= MAX_PARAMS {
+    if pg_idx < 0 || (pg_idx as usize) >= param_len {
         return None;
     }
     Some(pg_idx as usize)
 }
 
 pub(super) unsafe fn free_dynamic_param_value(pg_stmt: *mut PgStmt, pg_idx: usize) {
-    if !(*pg_stmt).param_values[pg_idx].is_null() && !is_preallocated_buffer(pg_stmt, pg_idx) {
-        libc::free((*pg_stmt).param_values[pg_idx] as *mut c_void);
-        (*pg_stmt).param_values[pg_idx] = ptr::null_mut();
+    let stmt = &mut *pg_stmt;
+    if pg_idx >= stmt.param_values.len() {
+        log_debug("free_dynamic_param_value: pg_idx out of bounds");
+        return;
+    }
+    if !stmt.param_values[pg_idx].is_null() && !stmt.is_preallocated_buffer(pg_idx) {
+        libc::free(stmt.param_values[pg_idx] as *mut c_void);
+        stmt.param_values[pg_idx] = ptr::null_mut();
     }
 }

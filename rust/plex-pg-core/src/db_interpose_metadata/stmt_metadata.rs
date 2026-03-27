@@ -279,7 +279,7 @@ pub(super) fn expanded_sql_impl(p_stmt: *mut sqlite3_stmt) -> *mut c_char {
             }
 
             let mut estimated = base_len + 1;
-            for i in 0..(*pg_stmt).param_count.min(MAX_PARAMS as c_int) {
+            for i in 0..(*pg_stmt).param_count.min((*pg_stmt).param_values.len() as c_int) {
                 let val = (*pg_stmt).param_values[i as usize];
                 if !val.is_null() {
                     estimated += CStr::from_ptr(val).to_bytes().len() + 3;
@@ -308,7 +308,7 @@ pub(super) fn expanded_sql_impl(p_stmt: *mut sqlite3_stmt) -> *mut c_char {
                         p += 1;
                     }
                     let param_idx = param_num.saturating_sub(1);
-                    if param_idx < (*pg_stmt).param_count as usize && param_idx < MAX_PARAMS {
+                    if param_idx < (*pg_stmt).param_count as usize && param_idx < (*pg_stmt).param_values.len() {
                         let val = (*pg_stmt).param_values[param_idx];
                         if !val.is_null() {
                             if dst < end {

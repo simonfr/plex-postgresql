@@ -3,7 +3,7 @@ use std::ptr;
 use std::sync::atomic::{AtomicI32, Ordering};
 
 use crate::db_interpose_conn_utils::{cstr_to_string_or, log_debug, PthreadMutexGuard};
-use crate::ffi_types::{sqlite3, sqlite3_stmt, sqlite3_value, PgStmt, MAX_PARAMS, PARAM_BUF_LEN};
+use crate::ffi_types::{sqlite3, sqlite3_stmt, sqlite3_value, PgStmt, PARAM_BUF_LEN};
 
 mod numeric_binds;
 mod support;

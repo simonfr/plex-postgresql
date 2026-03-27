@@ -4,7 +4,7 @@ use std::os::raw::{c_char, c_int, c_void};
 use crate::byte_utils::contains_icase_bytes;
 use crate::db_interpose_common::tls_in_interpose_call_ptr;
 use crate::db_interpose_conn_utils::{cstr_to_string_or, log_debug, PthreadMutexGuard};
-use crate::ffi_types::{sqlite3, sqlite3_stmt, PgStmt, MAX_PARAMS};
+use crate::ffi_types::{sqlite3, sqlite3_stmt, PgStmt};
 
 mod collation_alloc;
 mod connection_state;

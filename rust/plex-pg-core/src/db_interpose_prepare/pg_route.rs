@@ -168,6 +168,7 @@ pub(super) unsafe fn maybe_register_pg_stmt(
     }
 
     (*pg_stmt).param_count = trans.param_count;
+    (*pg_stmt).ensure_param_capacity(trans.param_count as usize);
     copy_param_names(pg_stmt, &trans);
 
     if trans.success != 0 && !trans.sql.is_null() {
