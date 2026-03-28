@@ -2,7 +2,7 @@
 
 **Run Plex Media Server with PostgreSQL instead of SQLite.**
 
-[Lees in het Nederlands](README.nl.md) | [Léigh as Gaeilge](README.ga.md) | [Leer en Espa&ntilde;ol](README.es.md)
+[Lees in het Nederlands](README.nl.md) | [Léigh as Gaeilge](README.ga.md) | [Legu en Esperanto](README.eo.md) | [Leer en Espa&ntilde;ol](README.es.md)
 
 A small shim library that catches Plex SQLite calls and sends them to PostgreSQL. You do not need to change Plex source code.
 
