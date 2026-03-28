@@ -34,6 +34,7 @@ pub(crate) fn oid_to_sqlite_decltype(oid: u32) -> &'static CStr {
     let bytes: &'static [u8] = match oid {
         16 | 21 | 23 | 26 => DECLTYPE_INTEGER,
         20 => DECLTYPE_BIGINT,
+        1114 | 1184 => DECLTYPE_INTEGER, // timestamp, timestamptz → epoch int
         700 | 701 | 1700 => DECLTYPE_REAL,
         17 => DECLTYPE_BLOB,
         _ => DECLTYPE_TEXT,

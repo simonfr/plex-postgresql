@@ -116,13 +116,34 @@ fn decltype_text_is_text() {
 }
 
 #[test]
-fn decltype_timestamp_is_text() {
-    assert_eq!(oid_to_sqlite_decltype(1114).to_str().unwrap(), "TEXT");
+fn decltype_timestamp_is_integer() {
+    // TIMESTAMP → INTEGER (epoch), matching C shim preload_decltype_cache
+    assert_eq!(oid_to_sqlite_decltype(1114).to_str().unwrap(), "INTEGER");
 }
 
 #[test]
-fn decltype_timestamptz_is_text() {
-    assert_eq!(oid_to_sqlite_decltype(1184).to_str().unwrap(), "TEXT");
+fn decltype_timestamptz_is_integer() {
+    // TIMESTAMPTZ → INTEGER (epoch), matching C shim preload_decltype_cache
+    assert_eq!(oid_to_sqlite_decltype(1184).to_str().unwrap(), "INTEGER");
+}
+
+#[test]
+fn column_type_and_decltype_are_consistent() {
+    // Invariant: column_type and decltype must agree on the SOCI type class.
+    // If decltype says INTEGER, column_type must return SQLITE_INTEGER.
+    use crate::db_interpose_value_helpers::pg_oid_to_sqlite_type_impl;
+    let oids = [16, 20, 21, 23, 26, 700, 701, 1700, 17, 25, 1043, 1114, 1184, 1082];
+    for oid in oids {
+        let ty = pg_oid_to_sqlite_type_impl(oid);
+        let decl = oid_to_sqlite_decltype(oid).to_str().unwrap();
+        let expected_ty = match decl {
+            "INTEGER" | "BIGINT" => 1, // SQLITE_INTEGER
+            "REAL" => 2,               // SQLITE_FLOAT
+            "BLOB" => 4,               // SQLITE_BLOB
+            _ => 3,                    // SQLITE_TEXT
+        };
+        assert_eq!(ty, expected_ty, "OID {oid}: column_type={ty} but decltype='{decl}' expects {expected_ty}");
+    }
 }
 
 #[test]
