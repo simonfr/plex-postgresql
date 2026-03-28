@@ -26,7 +26,7 @@ A living map of SQLite surface area vs. translator support, with direct pointers
 | FTS MATCH rewrite | Partial | `subset/fts` | `rust/plex-pg-core/src/db_interpose_helpers_tests.rs` | Limited to known Plex queries. |
 | DDL-lite (CREATE TABLE/INDEX IF NOT EXISTS) | Partial | `subset/ddl-lite` | `rust/plex-pg-core/src/quotes.rs`, `rust/plex-pg-core/src/db_interpose_helpers_tests.rs`, `rust/plex-pg-core/src/emit.rs` | Only patterns used by Plex. |
 | PRAGMA / extension hooks | Skipped/No-op | `subset/pragma` | `rust/plex-pg-core/src/keywords_tests.rs`, `rust/plex-pg-core/src/pg_config.rs` | Explicit skip list and prefix checks. |
-| Transaction control (BEGIN/COMMIT/ROLLBACK) | Partial | `subset/txn` | `rust/plex-pg-core/src/keywords_tests.rs` | Routed through PG path; semantics differ. |
+| Transaction control (BEGIN/COMMIT/ROLLBACK) | Skipped/No-op | `subset/txn` | `rust/plex-pg-core/src/pg_config.rs` | Skip-SQL (not routed to PG), matches C shim. |
 | Type affinity / decltype mapping | Supported | `subset/core` | `rust/plex-pg-core/src/types.rs`, `rust/plex-pg-core/src/pg_statement.rs` | SQLite decltype → PG types. |
 | Output validation (PG parser check) | Supported | `validation/output` | `rust/plex-pg-core/src/lib.rs` tests | Optional validation gate. |
 
