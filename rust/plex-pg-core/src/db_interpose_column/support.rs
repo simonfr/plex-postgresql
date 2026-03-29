@@ -30,11 +30,6 @@ pub(crate) fn validate_type_consistency(
     idx: c_int,
     accessor_name: &str,
 ) {
-    // Skip expensive validation unless debug logging is enabled.
-    if crate::pg_logging::LOG_LEVEL.load(std::sync::atomic::Ordering::Relaxed) < 2 {
-        return;
-    }
-
     let raw_pg_stmt = pg_find_any_stmt(p_stmt);
     if raw_pg_stmt.is_null() || unsafe { (&*raw_pg_stmt).is_pg == 0 } {
         return;
@@ -67,7 +62,7 @@ pub(crate) fn validate_type_consistency(
         let expected =
             crate::db_interpose_helpers::rust_expected_sqlite_type_for_decltype(col_decltype);
         if expected == -1 || col_type == SQLITE_NULL || col_type == expected {
-            return;
+            return; // No mismatch — fast path
         }
 
         let current_row = pg_stmt.current_row;
@@ -76,18 +71,20 @@ pub(crate) fn validate_type_consistency(
         (oid, col_name, expected, current_row, pg_sql, should_trace)
     };
 
-    // Log AFTER releasing pg_stmt.mutex to avoid ABBA deadlock with LOGGER mutex.
+    // MISMATCH DETECTED — always log at ERROR level so we can diagnose bad_cast.
     let (oid, col_name, expected, current_row, pg_sql, should_trace) = mismatch_ctx;
-    log_debug_lazy!(
-        "TYPE_MISMATCH: accessor={} col='{}' idx={} decltype='{}' expects {} but column_type returned {} (OID={})",
+    log_error(&format!(
+        "TYPE_MISMATCH: accessor={} col='{}' idx={} row={} decltype='{}' expects {} but column_type={} (OID={}) sql={}",
         accessor_name,
         cstr_to_string_or(col_name, "?"),
         idx,
+        current_row,
         cstr_to_string_or(col_decltype, "?"),
         sqlite_type_name(expected),
         sqlite_type_name(col_type),
-        oid
-    );
+        oid,
+        cstr_prefix(pg_sql, 200, "?")
+    ));
 
     if should_trace {
         trace_badcast_log_ctx(
@@ -100,17 +97,6 @@ pub(crate) fn validate_type_consistency(
             if col_type == SQLITE_NULL { 1 } else { 0 },
             oid,
             col_name,
-        );
-        log_debug_lazy!(
-            "TRACE_BADCAST_MISMATCH: accessor={} col='{}' idx={} oid={} decltype='{}' expected={} actual={} sql={}",
-            accessor_name,
-            cstr_to_string_or(col_name, "?"),
-            idx,
-            oid,
-            cstr_to_string_or(col_decltype, "?"),
-            sqlite_type_name(expected),
-            sqlite_type_name(col_type),
-            cstr_prefix(pg_sql, 200, "?")
         );
     }
 }
