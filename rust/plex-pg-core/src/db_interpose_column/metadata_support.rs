@@ -153,11 +153,13 @@ pub(crate) fn ensure_pg_result_for_metadata(pg_stmt: *mut PgStmt) -> bool {
                 if crate::libpq_helpers::rust_pq_result_status(prep) != PGRES_COMMAND_OK {
                     if pg_is_duplicate_prepared_stmt(prep) == 0 {
                         log_error(&format!(
-                            "METADATA_DESCRIBE: PQprepare failed: {}",
+                            "METADATA_DESCRIBE: PQprepare failed: {}\n  Original SQL: {}\n  Translated SQL: {}",
                             cstr_to_string_or(
                                 crate::libpq_helpers::rust_pq_error_message(ec.conn),
                                 "?"
-                            )
+                            ),
+                            cstr_to_string_or(pg_stmt_ref.sql, "?"),
+                            cstr_to_string_or(pg_stmt_ref.pg_sql, "?")
                         ));
                         crate::libpq_helpers::rust_pq_clear(prep);
                         return false;
