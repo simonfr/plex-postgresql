@@ -138,6 +138,17 @@ unsafe fn resolve_cached_column_type(
     ctx.trace_col = trace_col;
 
     if state.is_null {
+        // For integer-typed columns (OID 20=bigint, 23=int4, etc.), return
+        // SQLITE_INTEGER instead of SQLITE_NULL when the value is NULL.
+        // SOCI pre-allocates a typed holder from column_decltype before step().
+        // If decltype says "dt_integer(8)" but column_type returns SQLITE_NULL,
+        // SOCI's dynamic_cast fails with std::bad_cast. This happens on LEFT JOIN
+        // queries where STRM files have NULL directory_id → NULL timestamp columns.
+        let oid_type = pg_oid_to_sqlite_type_impl(state.oid);
+        if oid_type == SQLITE_INTEGER {
+            ctx.result = SQLITE_INTEGER;
+            return (SQLITE_INTEGER, ctx);
+        }
         ctx.is_null = true;
         return (SQLITE_NULL, ctx);
     }
@@ -268,6 +279,12 @@ unsafe fn resolve_live_column_type(
     // --- seqlock: end CRASH_LAST_COLUMN write ---
 
     if state.is_null {
+        // Same fix as cached path: for integer-typed NULL columns, return
+        // SQLITE_INTEGER to prevent SOCI's std::bad_cast on holder mismatch.
+        if state.sqlite_type == SQLITE_INTEGER {
+            ctx.result = SQLITE_INTEGER;
+            return (SQLITE_INTEGER, ctx);
+        }
         ctx.is_null = true;
         return (SQLITE_NULL, ctx);
     }
