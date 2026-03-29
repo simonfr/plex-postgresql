@@ -63,7 +63,7 @@ fn transform_query(q: &mut Query) {
             sel.group_by = GroupByExpr::Expressions(vec![], vec![]);
         } else if has_group_by {
             // Collect missing non-aggregate columns from SELECT projection
-            let missing = collect_missing_cols(&sel.projection, &gb_exprs);
+            let missing = collect_missing_cols(&sel.projection, &gb_exprs, &sel.from);
             if let GroupByExpr::Expressions(ref mut exprs, _) = sel.group_by {
                 exprs.extend(missing);
             }
@@ -221,11 +221,19 @@ fn expr_in_group_by(expr: &Expr, group_by: &[Expr]) -> bool {
         }
         // Match by column key: handle "t.name" vs "name"
         if let (Some(ref k), Some(ref gbk)) = (&key, expr_column_key(gb)) {
-            // Both are "name" == "name" or "t.name" == "name" etc.
-            let k_bare = k.rsplit('.').next().unwrap_or(k);
-            let gbk_bare = gbk.rsplit('.').next().unwrap_or(gbk);
-            if k_bare == gbk_bare {
-                return true;
+            // When both are fully qualified (have dots), compare full keys
+            // to avoid false matches like "a.id" == "b.id"
+            if k.contains('.') && gbk.contains('.') {
+                if k == gbk {
+                    return true;
+                }
+            } else {
+                // At least one is unqualified: compare bare column names
+                let k_bare = k.rsplit('.').next().unwrap_or(k);
+                let gbk_bare = gbk.rsplit('.').next().unwrap_or(gbk);
+                if k_bare == gbk_bare {
+                    return true;
+                }
             }
         }
     }
@@ -238,25 +246,96 @@ fn exprs_equivalent(a: &Expr, b: &Expr) -> bool {
     format!("{}", a).to_lowercase() == format!("{}", b).to_lowercase()
 }
 
+/// Extract table names (or aliases) from the FROM clause.
+fn collect_table_names_from_from(from: &[TableWithJoins]) -> Vec<String> {
+    let mut names = Vec::new();
+    for twj in from {
+        if let Some(name) = table_factor_name(&twj.relation) {
+            names.push(name);
+        }
+        for join in &twj.joins {
+            if let Some(name) = table_factor_name(&join.relation) {
+                names.push(name);
+            }
+        }
+    }
+    names
+}
+
+/// Get the effective name (alias or table name) from a TableFactor.
+fn table_factor_name(tf: &TableFactor) -> Option<String> {
+    match tf {
+        TableFactor::Table { name, alias, .. } => {
+            if let Some(a) = alias {
+                Some(a.name.value.to_lowercase())
+            } else {
+                name.0.last().and_then(|p| match p {
+                    ObjectNamePart::Identifier(i) => Some(i.value.to_lowercase()),
+                    _ => None,
+                })
+            }
+        }
+        TableFactor::Derived { alias, .. } => {
+            alias.as_ref().map(|a| a.name.value.to_lowercase())
+        }
+        _ => None,
+    }
+}
+
+/// Build a `table.id` compound identifier expression.
+fn make_table_dot_id(table: &str) -> Expr {
+    Expr::CompoundIdentifier(vec![
+        Ident::new(table),
+        Ident::new("id"),
+    ])
+}
+
 /// Collect SELECT projection columns that are not aggregates and not in GROUP BY.
-fn collect_missing_cols(projection: &[SelectItem], group_by: &[Expr]) -> Vec<Expr> {
+/// When wildcards are present alongside GROUP BY, adds `table.id` for each
+/// wildcarded table so PostgreSQL's strict GROUP BY is satisfied.
+fn collect_missing_cols(
+    projection: &[SelectItem],
+    group_by: &[Expr],
+    from: &[TableWithJoins],
+) -> Vec<Expr> {
     let mut missing = Vec::new();
     for item in projection {
-        let expr = match item {
-            SelectItem::UnnamedExpr(e) => e,
-            SelectItem::ExprWithAlias { expr: e, .. } => e,
-            SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(_, _) => continue,
-        };
-
-        if should_skip(expr) {
-            continue;
+        match item {
+            SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } => {
+                if should_skip(e) {
+                    continue;
+                }
+                if expr_in_group_by(e, group_by) {
+                    continue;
+                }
+                missing.push(e.clone());
+            }
+            SelectItem::QualifiedWildcard(kind, _) => {
+                // Extract table name from `table.*` and add `table.id` to GROUP BY
+                if let SelectItemQualifiedWildcardKind::ObjectName(ref name) = kind {
+                    if let Some(last) = name.0.last() {
+                        let table_name = match last {
+                            ObjectNamePart::Identifier(i) => i.value.to_lowercase(),
+                            _ => continue,
+                        };
+                        let id_expr = make_table_dot_id(&table_name);
+                        if !expr_in_group_by(&id_expr, group_by) {
+                            missing.push(id_expr);
+                        }
+                    }
+                }
+            }
+            SelectItem::Wildcard(_) => {
+                // Bare `*`: add `table.id` for every table in FROM
+                let table_names = collect_table_names_from_from(from);
+                for table_name in &table_names {
+                    let id_expr = make_table_dot_id(table_name);
+                    if !expr_in_group_by(&id_expr, group_by) {
+                        missing.push(id_expr);
+                    }
+                }
+            }
         }
-
-        if expr_in_group_by(expr, group_by) {
-            continue;
-        }
-
-        missing.push(expr.clone());
     }
     missing
 }
@@ -488,6 +567,71 @@ mod tests {
         assert!(
             !r.sql.to_uppercase().contains("GROUP BY"),
             "Should not add GROUP BY, got: {}",
+            r.sql
+        );
+    }
+
+    #[test]
+    fn rewrite_groupby__qualified_wildcard_adds_table_id() {
+        // Real Plex pattern: SELECT table.* with GROUP BY from another table's column
+        let r = translate(
+            "SELECT metadata_items.*, metadata_item_settings.* \
+             FROM metadata_items \
+             LEFT JOIN metadata_item_settings ON metadata_item_settings.id = metadata_items.id \
+             GROUP BY metadata_items.id",
+        )
+        .unwrap();
+        let sql = r.sql.to_lowercase();
+        let gb_pos = sql.find("group by").unwrap();
+        let after_gb = &sql[gb_pos..];
+        // metadata_item_settings.id should be added to GROUP BY
+        assert!(
+            after_gb.contains("metadata_item_settings.id"),
+            "metadata_item_settings.id should be in GROUP BY, got: {}",
+            r.sql
+        );
+        // metadata_items.id should already be there (it was in original GROUP BY)
+        assert!(
+            after_gb.contains("metadata_items.id"),
+            "metadata_items.id should be in GROUP BY, got: {}",
+            r.sql
+        );
+    }
+
+    #[test]
+    fn rewrite_groupby__bare_wildcard_adds_all_table_ids() {
+        // Bare * with GROUP BY should add table.id for all FROM tables
+        let r = translate(
+            "SELECT * FROM metadata_items \
+             LEFT JOIN metadata_item_settings ON metadata_item_settings.id = metadata_items.id \
+             GROUP BY metadata_items.id",
+        )
+        .unwrap();
+        let sql = r.sql.to_lowercase();
+        let gb_pos = sql.find("group by").unwrap();
+        let after_gb = &sql[gb_pos..];
+        assert!(
+            after_gb.contains("metadata_item_settings.id"),
+            "metadata_item_settings.id should be in GROUP BY for bare *, got: {}",
+            r.sql
+        );
+    }
+
+    #[test]
+    fn rewrite_groupby__qualified_wildcard_no_dup_when_already_in_groupby() {
+        // If table.id is already in GROUP BY, don't duplicate it
+        let r = translate(
+            "SELECT t.* FROM t GROUP BY t.id",
+        )
+        .unwrap();
+        let sql = r.sql.to_lowercase();
+        let gb_pos = sql.find("group by").unwrap();
+        let after_gb = &sql[gb_pos..];
+        // Count occurrences of "id" in GROUP BY — should be exactly 1
+        let id_count = after_gb.matches("id").count();
+        assert!(
+            id_count == 1,
+            "t.id should appear exactly once in GROUP BY, got: {}",
             r.sql
         );
     }
