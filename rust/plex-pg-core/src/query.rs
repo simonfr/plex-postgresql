@@ -11,7 +11,7 @@ use sqlparser::ast::helpers::attached_token::AttachedToken;
 ///   7. min(a,b) multi-arg  — → LEAST(a,b)
 ///   8. COLLATE ICU strip   — remove icu_* collations
 ///   9. COLLATE NOCASE      — `x COLLATE NOCASE = y` → `LOWER(x) = LOWER(y)`
-///  10. FTS4 MATCH          — `col MATCH 'term'` → `col_fts @@ to_tsquery('simple', E'term')`
+///  10. FTS4 MATCH          — `col MATCH 'term'` → `to_tsvector('simple', col) @@ to_tsquery('simple', E'term')`
 ///  11. Collections filter  — remove `metadata_type=18` from OR conditions
 ///  12. Int/text mismatch   — cast integer to ::text for known text columns
 ///                            and cast string literal to integer for known int columns
@@ -481,7 +481,7 @@ fn transform_expr(expr: &mut Expr) {
             }
         }
 
-        // Fix FTS4: col MATCH 'term' → col_fts @@ to_tsquery('simple', E'converted_term')
+        // Fix FTS4: col MATCH 'term' → to_tsvector('simple', col) @@ to_tsquery('simple', E'converted_term')
         Expr::BinaryOp {
             op: BinaryOperator::PGCustomBinaryOperator(ref custom_ops),
             ..
@@ -1264,20 +1264,46 @@ fn fix_int_text_mismatch(mut left: Expr, op: BinaryOperator, mut right: Expr) ->
 
 // ─── Fix FTS4: MATCH → @@ to_tsquery ──────────────────────────────────────────
 
-/// Transform `col MATCH 'term'` → `col_fts @@ to_tsquery('simple', E'converted_term')`
+/// Transform `col MATCH 'term'` → `to_tsvector('simple', col) @@ to_tsquery('simple', E'converted_term')`
+///
+/// The old strategy of appending `_fts` to the column name (e.g. `title_sort` →
+/// `title_sort_fts`) created nonexistent column references.  The PostgreSQL FTS
+/// views (`fts4_metadata_titles`, `fts4_metadata_titles_icu`) expose the source
+/// text columns (`title`, `title_sort`, `original_title`) but only a single
+/// pre-computed tsvector column (`title_fts`).  Columns like `title_sort` have
+/// no corresponding `title_sort_fts` tsvector column, so the `_fts` suffix
+/// approach fails.
+///
+/// The correct approach is to wrap the source column with `to_tsvector` at
+/// query time.  This works for any column name, matches the `'simple'`
+/// dictionary used by the schema's tsvector triggers, and does not require a
+/// pre-computed tsvector column to exist.
 fn transform_fts_match(left: Expr, right: Expr) -> Expr {
-    // Get the FTS column name and append _fts
-    let fts_col = match &left {
-        Expr::Identifier(ident) => Expr::Identifier(Ident::new(format!("{}_fts", ident.value))),
-        Expr::CompoundIdentifier(parts) => {
-            let mut new_parts = parts.clone();
-            if let Some(last) = new_parts.last_mut() {
-                last.value = format!("{}_fts", last.value);
-            }
-            Expr::CompoundIdentifier(new_parts)
-        }
-        _ => left,
+    // Build: to_tsvector('simple', col)
+    let make_fn = |fn_name: &str, col: Expr| -> Expr {
+        Expr::Function(Function {
+            name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new(fn_name))]),
+            uses_odbc_syntax: false,
+            parameters: FunctionArguments::None,
+            args: FunctionArguments::List(FunctionArgumentList {
+                duplicate_treatment: None,
+                args: vec![
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(ValueWithSpan {
+                        value: Value::SingleQuotedString("simple".to_string()),
+                        span: Span::empty(),
+                    }))),
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(col)),
+                ],
+                clauses: vec![],
+            }),
+            filter: None,
+            null_treatment: None,
+            over: None,
+            within_group: vec![],
+        })
     };
+
+    let tsvector_call = make_fn("to_tsvector", left);
 
     // Convert the match term to tsquery syntax
     let term_str = match &right {
@@ -1287,14 +1313,14 @@ fn transform_fts_match(left: Expr, right: Expr) -> Expr {
         }) => convert_fts_term(s),
         _ => {
             return Expr::BinaryOp {
-                left: Box::new(fts_col),
+                left: Box::new(tsvector_call),
                 op: BinaryOperator::AtAt,
                 right: Box::new(right),
             }
         }
     };
 
-    // Build: col_fts @@ to_tsquery('simple', E'term')
+    // Build: to_tsvector('simple', col) @@ to_tsquery('simple', E'term')
     let tsquery_call = Expr::Function(Function {
         name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("to_tsquery"))]),
         uses_odbc_syntax: false,
@@ -1320,7 +1346,7 @@ fn transform_fts_match(left: Expr, right: Expr) -> Expr {
     });
 
     Expr::BinaryOp {
-        left: Box::new(fts_col),
+        left: Box::new(tsvector_call),
         op: BinaryOperator::AtAt,
         right: Box::new(tsquery_call),
     }
@@ -1591,6 +1617,86 @@ mod tests {
         assert!(
             sql.contains("jsonb_extract_path_text") && sql.contains("'status'"),
             "Expected $.status operator path rewrite, got: {}",
+            r.sql
+        );
+    }
+
+    // FTS MATCH tests
+    //
+    // The old strategy appended `_fts` to the matched column name (e.g.
+    // `title_sort` → `title_sort_fts`), which produced nonexistent column
+    // references.  The correct strategy wraps the source column with
+    // `to_tsvector('simple', col)` so any column name is valid.
+
+    #[test]
+    fn subset_fts__match_simple_col_uses_to_tsvector_wrapper() {
+        let r =
+            translate("SELECT * FROM fts4_metadata_titles WHERE title MATCH 'Plex'").unwrap();
+        let sql = r.sql.to_lowercase();
+        assert!(
+            sql.contains("to_tsvector("),
+            "Expected to_tsvector() wrapper, got: {}",
+            r.sql
+        );
+        assert!(
+            !sql.contains("title_fts"),
+            "Should not produce _fts suffix column, got: {}",
+            r.sql
+        );
+        assert!(
+            sql.contains("to_tsquery("),
+            "Expected to_tsquery() call, got: {}",
+            r.sql
+        );
+        assert!(
+            sql.contains("@@"),
+            "Expected @@ operator, got: {}",
+            r.sql
+        );
+    }
+
+    #[test]
+    fn subset_fts__match_compound_title_sort_no_nonexistent_suffix() {
+        // Regression: `fts4_metadata_titles_icu.title_sort MATCH 'Straf*'`
+        // must NOT produce `title_sort_fts` (nonexistent column).
+        let r = translate(
+            "SELECT rowid FROM fts4_metadata_titles_icu \
+             WHERE fts4_metadata_titles_icu.title_sort match 'Straf*'",
+        )
+        .unwrap();
+        let sql = r.sql.to_lowercase();
+        assert!(
+            !sql.contains("title_sort_fts"),
+            "Must not produce nonexistent title_sort_fts column, got: {}",
+            r.sql
+        );
+        assert!(
+            sql.contains("to_tsvector("),
+            "Expected to_tsvector() wrapper, got: {}",
+            r.sql
+        );
+        assert!(
+            sql.contains("title_sort"),
+            "Expected original title_sort column inside to_tsvector, got: {}",
+            r.sql
+        );
+        assert!(
+            sql.contains("@@"),
+            "Expected @@ operator, got: {}",
+            r.sql
+        );
+    }
+
+    #[test]
+    fn subset_fts__match_prefix_query_converts_star_to_colon_star() {
+        let r = translate(
+            "SELECT rowid FROM fts4_metadata_titles WHERE title MATCH 'War*'",
+        )
+        .unwrap();
+        let sql = r.sql.to_lowercase();
+        assert!(
+            sql.contains("war:*") || sql.contains("war"),
+            "Expected prefix tsquery token, got: {}",
             r.sql
         );
     }
