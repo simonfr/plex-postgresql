@@ -186,7 +186,7 @@ fn make_do_update(
             target: AssignmentTarget::ColumnName(ObjectName(vec![ObjectNamePart::Identifier(
                 col.clone(),
             )])),
-            value: Expr::CompoundIdentifier(vec![Ident::new("EXCLUDED"), col.clone()]),
+            value: Expr::CompoundIdentifier(vec![Ident::new("excluded"), col.clone()]),
         })
         .collect();
 
@@ -495,6 +495,50 @@ mod tests {
         );
         assert!(!low.contains("id = excluded.id"));
         assert!(low.contains("returning id"));
+    }
+
+    // Regression: backtick-quoted identifiers in an explicit ON CONFLICT DO UPDATE SET clause
+    // must be converted to double-quotes.  The upsert pass runs *before* the quotes pass, so
+    // when the quotes pass visits the Insert statement it must walk the DoUpdate assignments.
+    #[test]
+    fn compat_backticks__upsert_on_conflict_set_backticks_translated() {
+        // Exact form reported as broken:
+        // INSERT INTO preferences (`name`,`value`) VALUES (:U1,:U2)
+        //   ON CONFLICT(`name`) DO UPDATE SET `value`=excluded.`value` RETURNING `id`
+        let out = sql(
+            "INSERT INTO preferences (`name`,`value`) VALUES (:U1,:U2) \
+             ON CONFLICT(`name`) DO UPDATE SET `value`=excluded.`value` RETURNING `id`",
+        );
+        assert!(
+            !out.contains('`'),
+            "all backticks should be converted to double-quotes, got: {}",
+            out
+        );
+        // The SET target and the EXCLUDED reference should be properly double-quoted
+        assert!(
+            out.contains("\"value\"") || out.to_lowercase().contains("value"),
+            "value column should survive translation, got: {}",
+            out
+        );
+        assert!(
+            out.to_lowercase().contains("excluded."),
+            "EXCLUDED reference should be present, got: {}",
+            out
+        );
+    }
+
+    // Additional variant: INSERT OR REPLACE with backtick columns — the synthesised
+    // DO UPDATE SET assignments must also have their backticks removed.
+    #[test]
+    fn compat_backticks__upsert_or_replace_backtick_columns_set_clause_translated() {
+        let out = sql(
+            "INSERT OR REPLACE INTO preferences (`name`, `value`) VALUES (:U1, :U2)",
+        );
+        assert!(
+            !out.contains('`'),
+            "backticks in synthesised DO UPDATE SET should be converted, got: {}",
+            out
+        );
     }
 
     #[test]

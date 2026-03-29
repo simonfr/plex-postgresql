@@ -25,6 +25,43 @@ pub fn transform(stmt: &mut Statement) {
                         col.quote_style = None;
                     }
                 }
+                // Fix backtick-quoted identifiers in DO UPDATE SET assignments.
+                // The upsert pass (which runs before quotes) clones column Idents
+                // directly from the INSERT column list — they still carry their
+                // original backtick quote_style at this point.
+                if let OnConflictAction::DoUpdate(ref mut du) = oc.action {
+                    for assign in &mut du.assignments {
+                        match &mut assign.target {
+                            AssignmentTarget::ColumnName(name) => fix_object_name(name),
+                            AssignmentTarget::Tuple(names) => {
+                                for name in names {
+                                    fix_object_name(name);
+                                }
+                            }
+                        }
+                        fix_expr(&mut assign.value);
+                    }
+                    if let Some(sel) = &mut du.selection {
+                        fix_expr(sel);
+                    }
+                }
+            }
+            // Fix backtick-quoted identifiers in RETURNING list.
+            if let Some(returning) = &mut ins.returning {
+                for item in returning {
+                    match item {
+                        SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } => {
+                            fix_expr(e);
+                        }
+                        SelectItem::QualifiedWildcard(kind, _) => {
+                            if let SelectItemQualifiedWildcardKind::ObjectName(ref mut name) = kind
+                            {
+                                fix_object_name(name);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
 
