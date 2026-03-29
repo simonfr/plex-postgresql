@@ -5,7 +5,11 @@ fn text_decltype() -> *const c_char {
 }
 
 fn passthrough_decltype(p_stmt: *mut sqlite3_stmt, idx: c_int) -> *const c_char {
-    get_orig_sqlite3_column_decltype().map(|f| unsafe { f(p_stmt, idx) }).unwrap_or(ptr::null())
+    let result = get_orig_sqlite3_column_decltype().map(|f| unsafe { f(p_stmt, idx) }).unwrap_or(ptr::null());
+    // Never return NULL — SOCI pre-allocates typed holders from decltype.
+    // If decltype is NULL, SOCI's holder allocation becomes inconsistent
+    // with column_type, causing std::bad_cast. Default to TEXT.
+    if result.is_null() { text_decltype() } else { result }
 }
 
 /// Check whether we have no result or idx is out of bounds.
@@ -80,7 +84,9 @@ unsafe fn resolve_special_case_decltype(
         return Some(DECLTYPE_DT_INTEGER_8.as_ptr() as *const c_char);
     }
     if special_case == PG_DECLTYPE_CASE_NULL {
-        return Some(ptr::null());
+        // Never return NULL decltype — default to TEXT to prevent
+        // SOCI std::bad_cast on holder type mismatch.
+        return Some(text_decltype());
     }
     None
 }
@@ -140,5 +146,7 @@ pub(super) fn column_decltype_impl(p_stmt: *mut sqlite3_stmt, idx: c_int) -> *co
         return result;
     }
 
-    unsafe { oid_decltype(oid) }
+    let result = unsafe { oid_decltype(oid) };
+    // Final guard: never return NULL decltype
+    if result.is_null() { text_decltype() } else { result }
 }
