@@ -127,6 +127,13 @@ unsafe fn resolve_cached_column_type(
 
     let Some(state) = load_cached_type_state(pg_stmt, idx) else {
         ctx.out_of_bounds = true;
+        let decl = crate::db_interpose_helpers::rust_expected_sqlite_type_for_decltype(
+            rust_my_sqlite3_column_decltype(_p_stmt, idx),
+        );
+        if decl > 0 {
+            ctx.result = decl;
+            return (decl, ctx);
+        }
         return (SQLITE_NULL, ctx);
     };
     ctx.row = state.row;
@@ -241,7 +248,17 @@ unsafe fn resolve_live_column_type(
     };
 
     let Some(state) = load_live_type_state(pg_stmt, idx) else {
+        // No result or out-of-bounds. Fall back to decltype to infer the
+        // SQLite type, preventing SOCI's std::bad_cast when it pre-allocated
+        // a typed holder from column_decltype but column_type returns NULL.
         ctx.out_of_bounds = true;
+        let decl = crate::db_interpose_helpers::rust_expected_sqlite_type_for_decltype(
+            rust_my_sqlite3_column_decltype(_p_stmt, idx),
+        );
+        if decl > 0 {
+            ctx.result = decl;
+            return (decl, ctx);
+        }
         return (SQLITE_NULL, ctx);
     };
     ctx.row = state.row;
