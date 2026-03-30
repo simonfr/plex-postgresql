@@ -32,6 +32,7 @@ fi
 
 echo "Step 1: Creating schema..."
 $PSQL -c "CREATE SCHEMA IF NOT EXISTS $PG_SCHEMA;"
+$PSQL -c "CREATE EXTENSION IF NOT EXISTS pg_trgm;" 2>/dev/null || true
 
 echo "Step 2: Applying schema..."
 $PSQL -f "$(dirname "$0")/../schema/plex_schema.sql"
@@ -52,8 +53,10 @@ for TABLE in $TABLES; do
 
     # Use Python bridge for data transfer (avoids CSV truncation of large TEXT fields)
     $PSQL -c "TRUNCATE $PG_SCHEMA.$TABLE CASCADE;" 2>/dev/null || true
+    MIGRATE_LOG="${LOG_DIR:-/tmp}/migration_errors.log"
+    mkdir -p "$(dirname "$MIGRATE_LOG")" 2>/dev/null || true
     python3 "$(dirname "$0")/migrate_table.py" \
-        "$SQLITE_DB" "$TABLE" "*" "$COLUMNS" "$PG_SCHEMA" 2>/dev/null || true
+        "$SQLITE_DB" "$TABLE" "*" "$COLUMNS" "$PG_SCHEMA" 2>>"$MIGRATE_LOG" || true
 done
 
 echo ""
