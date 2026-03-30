@@ -87,7 +87,10 @@ const PMT_COLUMN_CACHED_BLOB_ALLOC: c_int = 3;
 const PMT_COLUMN_DECODED_BLOB_ALLOC: c_int = 4;
 
 static DECLTYPE_TEXT: &[u8] = b"TEXT\0";
-static DECLTYPE_DT_INTEGER_8: &[u8] = b"dt_integer(8)\0";
+// SOCI's describe_column strips non-alphanumeric chars and looks up in its
+// type map. "dt_integer(8)" → "dt_integer" is NOT recognized, causing a
+// step+probe fallback → bad_cast. Use "BIGINT" which maps to db_int64.
+static DECLTYPE_DT_INTEGER_8: &[u8] = b"BIGINT\0";
 static _DECLTYPE_INTEGER: &[u8] = b"INTEGER\0";
 static _DECLTYPE_BIGINT: &[u8] = b"BIGINT\0";
 static _NEEDLE_TYPE: &[u8] = b"type\0";

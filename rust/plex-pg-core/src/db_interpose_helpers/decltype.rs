@@ -7,7 +7,10 @@ static TYPE_REAL: &[u8] = b"REAL\0";
 static TYPE_TEXT: &[u8] = b"TEXT\0";
 static TYPE_BLOB: &[u8] = b"BLOB\0";
 static TYPE_NUMERIC: &[u8] = b"NUMERIC\0";
-static TYPE_DT_INTEGER_8: &[u8] = b"dt_integer(8)\0";
+// Use "BIGINT" — SOCI's describe_column strips non-alnum chars, so
+// "dt_integer(8)" → "dt_integer" which is NOT in SOCI's type map.
+// "BIGINT" maps to db_int64 directly, no step+probe fallback.
+static TYPE_DT_INTEGER_8: &[u8] = b"BIGINT\0";
 
 pub(crate) fn normalize_sqlite_decltype_impl(input: Option<&str>) -> *const c_char {
     let t = input.unwrap_or("");
