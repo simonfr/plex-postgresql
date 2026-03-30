@@ -310,6 +310,19 @@ migrate_sqlite_to_pg() {
     local pg_total=$(psql -t -c "SELECT COUNT(*) FROM $schema.metadata_items;" 2>/dev/null | tr -d ' ')
     echo "  Total items in PostgreSQL: $pg_total"
 
+    # Always clear Flags.dat after migration — it contains stale SQLite
+    # state that causes "Invalid uuid length" segfaults on first PG startup.
+    local flags_dat
+    for flags_dat in \
+        "/config/Library/Application Support/Plex Media Server/Cache/Flags.dat" \
+        "${PLEX_MEDIA_SERVER_APPLICATION_SUPPORT_DIR:-}/Plex Media Server/Cache/Flags.dat"; do
+        if [[ -f "$flags_dat" ]]; then
+            rm -f "$flags_dat"
+            echo "  Cleared Flags.dat (stale SQLite cache)"
+            break
+        fi
+    done
+
     # Verify JSON integrity in extra_data columns (catches truncation bugs)
     echo ""
     echo "Verifying data integrity..."
