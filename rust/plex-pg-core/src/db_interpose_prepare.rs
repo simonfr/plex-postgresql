@@ -95,14 +95,6 @@ extern "C" {
         ) -> c_int,
     >;
 
-    fn sqlite3_prepare16_v2(
-        db: *mut sqlite3,
-        sql: *const c_void,
-        n: c_int,
-        stmt: *mut *mut sqlite3_stmt,
-        tail: *mut *const c_void,
-    ) -> c_int;
-
     fn ensure_real_sqlite_loaded();
     fn delegate_prepare_to_worker(
         db: *mut sqlite3,
