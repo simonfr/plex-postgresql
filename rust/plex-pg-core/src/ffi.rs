@@ -92,10 +92,8 @@ fn cache_lookup_and_fill(sql: &str, hash: u64, result: &mut SqlTranslation) -> b
                     // ── Copy param_names directly to C array ──
                     if !entry.param_names.is_empty() {
                         let arr = unsafe {
-                            libc::calloc(
-                                entry.param_names.len(),
-                                size_of::<*mut c_char>(),
-                            ) as *mut *mut c_char
+                            libc::calloc(entry.param_names.len(), size_of::<*mut c_char>())
+                                as *mut *mut c_char
                         };
                         if arr.is_null() {
                             unsafe {

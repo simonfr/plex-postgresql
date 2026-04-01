@@ -13,8 +13,8 @@ const SQLITE_OK: c_int = 0;
 const SQLITE_ERROR: c_int = 1;
 
 use crate::pg_statement::c_abi::{
-    pg_find_any_stmt, pg_find_stmt, pg_find_cached_stmt,
-    pg_clear_cached_stmt, pg_unregister_stmt, pg_stmt_unref, pg_stmt_clear_result,
+    pg_clear_cached_stmt, pg_find_any_stmt, pg_find_cached_stmt, pg_find_stmt,
+    pg_stmt_clear_result, pg_stmt_unref, pg_unregister_stmt,
 };
 
 extern "C" {

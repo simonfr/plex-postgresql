@@ -459,24 +459,14 @@ pub fn rust_shim_ensure_ready() -> c_int {
             if cfg!(target_os = "macos") {
                 let sh = ptr::read(ptr::addr_of!(sqlite_handle));
                 if !sh.is_null() {
-                    load_sym!(
-                        orig_sqlite3_open,
-                        sh,
-                        b"sqlite3_open\0",
-                        Sqlite3OpenFn
-                    );
+                    load_sym!(orig_sqlite3_open, sh, b"sqlite3_open\0", Sqlite3OpenFn);
                     load_sym!(
                         orig_sqlite3_prepare_v2,
                         sh,
                         b"sqlite3_prepare_v2\0",
                         Sqlite3PrepareFn
                     );
-                    load_sym!(
-                        orig_sqlite3_step,
-                        sh,
-                        b"sqlite3_step\0",
-                        Sqlite3StmtToIntFn
-                    );
+                    load_sym!(orig_sqlite3_step, sh, b"sqlite3_step\0", Sqlite3StmtToIntFn);
                 }
             } else {
                 load_sym!(

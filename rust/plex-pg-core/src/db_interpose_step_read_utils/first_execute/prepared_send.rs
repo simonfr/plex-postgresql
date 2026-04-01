@@ -16,8 +16,7 @@ unsafe fn send_prepared_or_params(
 ) -> c_int {
     let s = &*pg_stmt;
     let ec = &*exec_conn;
-    if s.use_prepared != 0 && s.stmt_name[0] != 0 && !s.pg_sql.is_null()
-    {
+    if s.use_prepared != 0 && s.stmt_name[0] != 0 && !s.pg_sql.is_null() {
         let mut cached_name: *const c_char = std::ptr::null();
         let is_cached = crate::pg_client::rust_stmt_cache_lookup(
             exec_conn as *mut c_void,
@@ -49,9 +48,7 @@ unsafe fn send_prepared_or_params(
                 log_error(&format!(
                     "PQprepare failed for {}: {}",
                     cstr_to_str(s.stmt_name.as_ptr()),
-                    cstr_to_str(crate::libpq_helpers::rust_pq_error_message(
-                        ec.conn
-                    ))
+                    cstr_to_str(crate::libpq_helpers::rust_pq_error_message(ec.conn))
                 ));
             }
             crate::libpq_helpers::rust_pq_clear(prep_res);

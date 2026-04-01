@@ -4,15 +4,12 @@ use std::ptr;
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 
 use crate::db_interpose_common::{
-    tls_last_query_ptr, tls_value_type_calls_ptr, GLOBAL_VALUE_TYPE_CALLS,
-    get_orig_sqlite3_value_type, get_orig_sqlite3_value_text,
-    get_orig_sqlite3_value_int, get_orig_sqlite3_value_int64,
-    get_orig_sqlite3_value_double, get_orig_sqlite3_value_bytes,
-    get_orig_sqlite3_value_blob,
+    get_orig_sqlite3_value_blob, get_orig_sqlite3_value_bytes, get_orig_sqlite3_value_double,
+    get_orig_sqlite3_value_int, get_orig_sqlite3_value_int64, get_orig_sqlite3_value_text,
+    get_orig_sqlite3_value_type, tls_last_query_ptr, tls_value_type_calls_ptr,
+    GLOBAL_VALUE_TYPE_CALLS,
 };
-use crate::db_interpose_conn_utils::{
-    cstr_prefix, cstr_to_string_or, log_error,
-};
+use crate::db_interpose_conn_utils::{cstr_prefix, cstr_to_string_or, log_error};
 use crate::db_interpose_helpers::PGresult as PgResultHelpers;
 use crate::ffi_types::{sqlite3, sqlite3_stmt, sqlite3_value, PgStmt};
 use crate::libpq_helpers::PGresult as PgResultLibpq;

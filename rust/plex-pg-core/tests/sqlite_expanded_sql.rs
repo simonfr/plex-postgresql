@@ -5,10 +5,7 @@ use std::ffi::CString;
 use std::ptr;
 
 /// Helper: prepare via FFI and return raw stmt pointer (caller must finalize).
-unsafe fn prepare_raw(
-    conn: &Connection,
-    sql: &str,
-) -> *mut ffi::sqlite3_stmt {
+unsafe fn prepare_raw(conn: &Connection, sql: &str) -> *mut ffi::sqlite3_stmt {
     let c_sql = CString::new(sql).unwrap();
     let mut raw: *mut ffi::sqlite3_stmt = ptr::null_mut();
     let mut tail: *const std::os::raw::c_char = ptr::null();

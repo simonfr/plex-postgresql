@@ -221,8 +221,7 @@ pub fn rust_print_exception_info(
         // signal-safe context, so a simple copy is fine).
         let mut exc_col_buf: [c_char; CRASH_COLUMN_MAX_LEN] = [0; CRASH_COLUMN_MAX_LEN];
         let exc_col_len = CRASH_LAST_COLUMN_LEN.load(Ordering::SeqCst);
-        let has_crash_column =
-            exc_col_len > 0 && (exc_col_len as usize) < CRASH_COLUMN_MAX_LEN;
+        let has_crash_column = exc_col_len > 0 && (exc_col_len as usize) < CRASH_COLUMN_MAX_LEN;
         if has_crash_column {
             ptr::copy_nonoverlapping(
                 ptr::addr_of!(CRASH_LAST_COLUMN) as *const c_char,
@@ -416,10 +415,17 @@ pub fn rust_common_handle_exception(
         let tid = unsafe { libc::pthread_self() };
         log_info_lazy!(
             "EXC_META: pid={} tid=0x{:x} thrown=0x{:x} tinfo=0x{:x} total={}",
-            pid, tid as usize, throw_addr, type_addr, total_count
+            pid,
+            tid as usize,
+            throw_addr,
+            type_addr,
+            total_count
         );
         if !type_name.is_null() {
-            log_info_lazy!("EXC_META: type_name_raw={}", cstr_to_lossy_or(type_name, ""));
+            log_info_lazy!(
+                "EXC_META: type_name_raw={}",
+                cstr_to_lossy_or(type_name, "")
+            );
         }
     }
     if should_dump_object {
@@ -434,26 +440,21 @@ pub fn rust_common_handle_exception(
                     log_info("EXC_META_PTR_DUMP: truncated");
                     break;
                 }
-                log_info_lazy!(
-                    "EXC_META_PTR_DUMP: addr=0x{:x} bytes={}",
-                    ptr, ptr_bytes
-                );
+                log_info_lazy!("EXC_META_PTR_DUMP: addr=0x{:x} bytes={}", ptr, ptr_bytes);
                 let _ = log_exception_object_dump(ptr as *mut c_void, ptr_bytes);
             }
         }
         let dump_tinfo = env_utils::env_truthy(EXC_DUMP_TINFO_ENV);
         if dump_tinfo {
-            log_info_lazy!(
-                "EXC_META_TINFO_DUMP: addr=0x{:x} bytes=256",
-                tinfo as usize
-            );
+            log_info_lazy!("EXC_META_TINFO_DUMP: addr=0x{:x} bytes=256", tinfo as usize);
             let _ = log_exception_object_dump(tinfo as *mut c_void, 256);
         }
         if env_utils::env_truthy(EXC_DUMP_SCAN_STRINGS_ENV) {
             let scan_bytes = env_usize(EXC_DUMP_SCAN_STRINGS_BYTES_ENV).unwrap_or(2048);
             log_info_lazy!(
                 "EXC_META_SCAN: addr=0x{:x} bytes={}",
-                thrown_exception as usize, scan_bytes
+                thrown_exception as usize,
+                scan_bytes
             );
             log_exception_string_scan(thrown_exception, scan_bytes);
         }

@@ -3,12 +3,10 @@ use std::ptr;
 use std::sync::atomic::{AtomicI32, Ordering};
 
 use crate::db_interpose_common::{
-    get_orig_sqlite3_bind_int, get_orig_sqlite3_bind_int64,
-    get_orig_sqlite3_bind_double, get_orig_sqlite3_bind_text,
-    get_orig_sqlite3_bind_text64, get_orig_sqlite3_bind_blob,
-    get_orig_sqlite3_bind_blob64, get_orig_sqlite3_bind_value,
-    get_orig_sqlite3_bind_null, get_orig_sqlite3_reset,
-    get_orig_sqlite3_sql, get_orig_sqlite3_db_handle,
+    get_orig_sqlite3_bind_blob, get_orig_sqlite3_bind_blob64, get_orig_sqlite3_bind_double,
+    get_orig_sqlite3_bind_int, get_orig_sqlite3_bind_int64, get_orig_sqlite3_bind_null,
+    get_orig_sqlite3_bind_text, get_orig_sqlite3_bind_text64, get_orig_sqlite3_bind_value,
+    get_orig_sqlite3_db_handle, get_orig_sqlite3_reset, get_orig_sqlite3_sql,
 };
 use crate::db_interpose_conn_utils::{cstr_to_string_or, log_debug};
 use crate::ffi_types::{sqlite3, sqlite3_stmt, sqlite3_value, PgStmt, StmtGuard, PARAM_BUF_LEN};
@@ -48,8 +46,8 @@ static PHASE_BIND_BLOB64: &[u8] = b"bind_blob64\0";
 static PHASE_BIND_VALUE: &[u8] = b"bind_value\0";
 static PHASE_BIND_NULL: &[u8] = b"bind_null\0";
 
-use crate::pg_statement::c_abi::pg_find_any_stmt;
 use crate::db_interpose_common::pg_exception_note_phase;
+use crate::pg_statement::c_abi::pg_find_any_stmt;
 
 #[no_mangle]
 pub extern "C" fn rust_my_sqlite3_bind_int(

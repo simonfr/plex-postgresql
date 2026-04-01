@@ -5,15 +5,23 @@ use super::support::{
 use super::*;
 use crate::log_info_lazy;
 
+fn set_pg_last_error(pg: &mut crate::ffi_types::PgConnection, msg: &str) {
+    pg.last_error_code = SQLITE_ERROR;
+    pg.last_error.fill(0);
+    let bytes = msg.as_bytes();
+    let len = bytes.len().min(pg.last_error.len().saturating_sub(1));
+    for (dst, src) in pg.last_error.iter_mut().zip(bytes.iter()).take(len) {
+        *dst = *src as c_char;
+    }
+}
+
 pub(crate) fn exec_via_postgres(
     pg_conn: *mut crate::ffi_types::PgConnection,
     sql: *const c_char,
 ) -> c_int {
     let pg = unsafe { &mut *pg_conn };
     unsafe {
-        if pg.conn.is_null()
-            || crate::libpq_helpers::rust_pq_status(pg.conn) != CONNECTION_OK
-        {
+        if pg.conn.is_null() || crate::libpq_helpers::rust_pq_status(pg.conn) != CONNECTION_OK {
             log_error(&format!(
                 "EXEC: CONNECTION_BAD pre-flight, attempting reconnect (thread {:p})",
                 libc::pthread_self() as *mut c_void
@@ -233,8 +241,7 @@ pub(crate) fn exec_via_postgres(
                     } else {
                         cmd_tuples
                     };
-                    pg.last_changes =
-                        crate::db_interpose_helpers::rust_pg_text_to_int(tuples_ptr);
+                    pg.last_changes = crate::db_interpose_helpers::rust_pg_text_to_int(tuples_ptr);
 
                     if starts_with_icase_bytes(sql_bytes, b"INSERT")
                         && status == PGRES_TUPLES_OK
@@ -306,6 +313,20 @@ pub(crate) fn exec_via_postgres(
                 }
                 crate::libpq_helpers::rust_pq_clear(res);
                 conn_guard.unlock();
+            } else {
+                let err = cstr_to_string_or(trans.error.as_ptr(), "translation failed");
+                let msg = format!(
+                    "PG exec translation failed: {} :: {}",
+                    cstr_prefix(exec_sql, 220, "NULL"),
+                    err
+                );
+                log_error(&msg);
+                set_pg_last_error(pg, &msg);
+                sql_translation_free(&mut trans as *mut SqlTranslation);
+                if !blobs_rewrite.is_null() {
+                    libc::free(blobs_rewrite as *mut c_void);
+                }
+                return SQLITE_ERROR;
             }
             sql_translation_free(&mut trans as *mut SqlTranslation);
         }

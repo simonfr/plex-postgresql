@@ -505,10 +505,8 @@ mod tests {
         // Exact form reported as broken:
         // INSERT INTO preferences (`name`,`value`) VALUES (:U1,:U2)
         //   ON CONFLICT(`name`) DO UPDATE SET `value`=excluded.`value` RETURNING `id`
-        let out = sql(
-            "INSERT INTO preferences (`name`,`value`) VALUES (:U1,:U2) \
-             ON CONFLICT(`name`) DO UPDATE SET `value`=excluded.`value` RETURNING `id`",
-        );
+        let out = sql("INSERT INTO preferences (`name`,`value`) VALUES (:U1,:U2) \
+             ON CONFLICT(`name`) DO UPDATE SET `value`=excluded.`value` RETURNING `id`");
         assert!(
             !out.contains('`'),
             "all backticks should be converted to double-quotes, got: {}",
@@ -531,9 +529,7 @@ mod tests {
     // DO UPDATE SET assignments must also have their backticks removed.
     #[test]
     fn compat_backticks__upsert_or_replace_backtick_columns_set_clause_translated() {
-        let out = sql(
-            "INSERT OR REPLACE INTO preferences (`name`, `value`) VALUES (:U1, :U2)",
-        );
+        let out = sql("INSERT OR REPLACE INTO preferences (`name`, `value`) VALUES (:U1, :U2)");
         assert!(
             !out.contains('`'),
             "backticks in synthesised DO UPDATE SET should be converted, got: {}",

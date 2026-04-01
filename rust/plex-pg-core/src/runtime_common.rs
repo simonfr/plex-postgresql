@@ -6,7 +6,6 @@ use crate::db_interpose_common::stderr_ptr;
 use crate::env_utils;
 use crate::log_info_lazy;
 
-
 pub(crate) fn should_skip_shim_init() -> bool {
     if cfg!(test) {
         return true;

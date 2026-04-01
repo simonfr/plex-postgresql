@@ -1,6 +1,4 @@
 use super::*;
-use crate::log_debug_lazy;
-
 #[inline]
 pub(crate) fn helpers_result_ptr(result: *mut PgResultLibpq) -> *const PgResultHelpers {
     result as *const PgResultHelpers

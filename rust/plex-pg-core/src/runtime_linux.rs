@@ -150,10 +150,7 @@ unsafe fn install_signal_handler(signum: c_int) {
 #[cfg(not(target_env = "musl"))]
 unsafe fn install_signal_handler(signum: c_int) {
     let handler: extern "C" fn(c_int) = db_interpose_common::common_signal_handler;
-    libc::signal(
-        signum,
-        handler as libc::sighandler_t,
-    );
+    libc::signal(signum, handler as libc::sighandler_t);
 }
 
 #[no_mangle]
@@ -494,317 +491,323 @@ static FINI: extern "C" fn() = shim_cleanup_wrapper;
 // ────────────────────────────────────────────────────────────────────────────
 #[cfg(feature = "interpose")]
 mod ld_preload_wrappers {
-use super::*;
+    use super::*;
 
-macro_rules! wrap_db_ret {
-    ($name:ident, $ret:ty, $my:ident) => {
-        #[no_mangle]
-        pub extern "C" fn $name(db: *mut sqlite3) -> $ret {
-            c_abi::$my(db)
-        }
-    };
-}
+    macro_rules! wrap_db_ret {
+        ($name:ident, $ret:ty, $my:ident) => {
+            #[no_mangle]
+            pub extern "C" fn $name(db: *mut sqlite3) -> $ret {
+                c_abi::$my(db)
+            }
+        };
+    }
 
-macro_rules! wrap_stmt_ret {
-    ($name:ident, $ret:ty, $my:ident) => {
-        #[no_mangle]
-        pub extern "C" fn $name(stmt: *mut sqlite3_stmt) -> $ret {
-            c_abi::$my(stmt)
-        }
-    };
-}
+    macro_rules! wrap_stmt_ret {
+        ($name:ident, $ret:ty, $my:ident) => {
+            #[no_mangle]
+            pub extern "C" fn $name(stmt: *mut sqlite3_stmt) -> $ret {
+                c_abi::$my(stmt)
+            }
+        };
+    }
 
-macro_rules! wrap_stmt_idx {
-    ($name:ident, $ret:ty, $my:ident) => {
-        #[no_mangle]
-        pub extern "C" fn $name(stmt: *mut sqlite3_stmt, idx: c_int) -> $ret {
-            c_abi::$my(stmt, idx)
-        }
-    };
-}
+    macro_rules! wrap_stmt_idx {
+        ($name:ident, $ret:ty, $my:ident) => {
+            #[no_mangle]
+            pub extern "C" fn $name(stmt: *mut sqlite3_stmt, idx: c_int) -> $ret {
+                c_abi::$my(stmt, idx)
+            }
+        };
+    }
 
-macro_rules! wrap_val_ret {
-    ($name:ident, $ret:ty, $my:ident) => {
-        #[no_mangle]
-        pub extern "C" fn $name(val: *mut sqlite3_value) -> $ret {
-            c_abi::$my(val)
-        }
-    };
-}
+    macro_rules! wrap_val_ret {
+        ($name:ident, $ret:ty, $my:ident) => {
+            #[no_mangle]
+            pub extern "C" fn $name(val: *mut sqlite3_value) -> $ret {
+                c_abi::$my(val)
+            }
+        };
+    }
 
-wrap_db_ret!(sqlite3_changes, c_int, my_sqlite3_changes);
-wrap_db_ret!(sqlite3_changes64, i64, my_sqlite3_changes64);
-wrap_db_ret!(sqlite3_last_insert_rowid, i64, my_sqlite3_last_insert_rowid);
-wrap_db_ret!(sqlite3_errmsg, *const c_char, my_sqlite3_errmsg);
-wrap_db_ret!(sqlite3_errcode, c_int, my_sqlite3_errcode);
-wrap_db_ret!(sqlite3_extended_errcode, c_int, my_sqlite3_extended_errcode);
+    wrap_db_ret!(sqlite3_changes, c_int, my_sqlite3_changes);
+    wrap_db_ret!(sqlite3_changes64, i64, my_sqlite3_changes64);
+    wrap_db_ret!(sqlite3_last_insert_rowid, i64, my_sqlite3_last_insert_rowid);
+    wrap_db_ret!(sqlite3_errmsg, *const c_char, my_sqlite3_errmsg);
+    wrap_db_ret!(sqlite3_errcode, c_int, my_sqlite3_errcode);
+    wrap_db_ret!(sqlite3_extended_errcode, c_int, my_sqlite3_extended_errcode);
 
-wrap_stmt_ret!(sqlite3_step, c_int, my_sqlite3_step);
-wrap_stmt_ret!(sqlite3_reset, c_int, my_sqlite3_reset);
-wrap_stmt_ret!(sqlite3_finalize, c_int, my_sqlite3_finalize);
-wrap_stmt_ret!(sqlite3_clear_bindings, c_int, my_sqlite3_clear_bindings);
-wrap_stmt_ret!(sqlite3_column_count, c_int, my_sqlite3_column_count);
-wrap_stmt_ret!(sqlite3_data_count, c_int, my_sqlite3_data_count);
-wrap_stmt_ret!(
-    sqlite3_bind_parameter_count,
-    c_int,
-    my_sqlite3_bind_parameter_count
-);
-wrap_stmt_ret!(sqlite3_stmt_readonly, c_int, my_sqlite3_stmt_readonly);
-wrap_stmt_ret!(sqlite3_stmt_busy, c_int, my_sqlite3_stmt_busy);
-wrap_stmt_ret!(sqlite3_db_handle, *mut sqlite3, my_sqlite3_db_handle);
-wrap_stmt_ret!(sqlite3_expanded_sql, *mut c_char, my_sqlite3_expanded_sql);
-wrap_stmt_ret!(sqlite3_sql, *const c_char, my_sqlite3_sql);
+    wrap_stmt_ret!(sqlite3_step, c_int, my_sqlite3_step);
+    wrap_stmt_ret!(sqlite3_reset, c_int, my_sqlite3_reset);
+    wrap_stmt_ret!(sqlite3_finalize, c_int, my_sqlite3_finalize);
+    wrap_stmt_ret!(sqlite3_clear_bindings, c_int, my_sqlite3_clear_bindings);
+    wrap_stmt_ret!(sqlite3_column_count, c_int, my_sqlite3_column_count);
+    wrap_stmt_ret!(sqlite3_data_count, c_int, my_sqlite3_data_count);
+    wrap_stmt_ret!(
+        sqlite3_bind_parameter_count,
+        c_int,
+        my_sqlite3_bind_parameter_count
+    );
+    wrap_stmt_ret!(sqlite3_stmt_readonly, c_int, my_sqlite3_stmt_readonly);
+    wrap_stmt_ret!(sqlite3_stmt_busy, c_int, my_sqlite3_stmt_busy);
+    wrap_stmt_ret!(sqlite3_db_handle, *mut sqlite3, my_sqlite3_db_handle);
+    wrap_stmt_ret!(sqlite3_expanded_sql, *mut c_char, my_sqlite3_expanded_sql);
+    wrap_stmt_ret!(sqlite3_sql, *const c_char, my_sqlite3_sql);
 
-wrap_stmt_idx!(sqlite3_column_type, c_int, my_sqlite3_column_type);
-wrap_stmt_idx!(sqlite3_column_int, c_int, my_sqlite3_column_int);
-wrap_stmt_idx!(sqlite3_column_int64, i64, my_sqlite3_column_int64);
-wrap_stmt_idx!(sqlite3_column_double, f64, my_sqlite3_column_double);
-wrap_stmt_idx!(sqlite3_column_text, *const u8, my_sqlite3_column_text);
-wrap_stmt_idx!(sqlite3_column_blob, *const c_void, my_sqlite3_column_blob);
-wrap_stmt_idx!(sqlite3_column_bytes, c_int, my_sqlite3_column_bytes);
-wrap_stmt_idx!(sqlite3_column_name, *const c_char, my_sqlite3_column_name);
-wrap_stmt_idx!(
-    sqlite3_column_value,
-    *mut sqlite3_value,
-    my_sqlite3_column_value
-);
-wrap_stmt_idx!(
-    sqlite3_bind_parameter_name,
-    *const c_char,
-    my_sqlite3_bind_parameter_name
-);
+    wrap_stmt_idx!(sqlite3_column_type, c_int, my_sqlite3_column_type);
+    wrap_stmt_idx!(sqlite3_column_int, c_int, my_sqlite3_column_int);
+    wrap_stmt_idx!(sqlite3_column_int64, i64, my_sqlite3_column_int64);
+    wrap_stmt_idx!(sqlite3_column_double, f64, my_sqlite3_column_double);
+    wrap_stmt_idx!(sqlite3_column_text, *const u8, my_sqlite3_column_text);
+    wrap_stmt_idx!(sqlite3_column_blob, *const c_void, my_sqlite3_column_blob);
+    wrap_stmt_idx!(sqlite3_column_bytes, c_int, my_sqlite3_column_bytes);
+    wrap_stmt_idx!(sqlite3_column_name, *const c_char, my_sqlite3_column_name);
+    wrap_stmt_idx!(
+        sqlite3_column_value,
+        *mut sqlite3_value,
+        my_sqlite3_column_value
+    );
+    wrap_stmt_idx!(
+        sqlite3_bind_parameter_name,
+        *const c_char,
+        my_sqlite3_bind_parameter_name
+    );
 
-wrap_val_ret!(sqlite3_value_type, c_int, my_sqlite3_value_type);
-wrap_val_ret!(sqlite3_value_text, *const u8, my_sqlite3_value_text);
-wrap_val_ret!(sqlite3_value_int, c_int, my_sqlite3_value_int);
-wrap_val_ret!(sqlite3_value_int64, i64, my_sqlite3_value_int64);
-wrap_val_ret!(sqlite3_value_double, f64, my_sqlite3_value_double);
-wrap_val_ret!(sqlite3_value_bytes, c_int, my_sqlite3_value_bytes);
-wrap_val_ret!(sqlite3_value_blob, *const c_void, my_sqlite3_value_blob);
+    wrap_val_ret!(sqlite3_value_type, c_int, my_sqlite3_value_type);
+    wrap_val_ret!(sqlite3_value_text, *const u8, my_sqlite3_value_text);
+    wrap_val_ret!(sqlite3_value_int, c_int, my_sqlite3_value_int);
+    wrap_val_ret!(sqlite3_value_int64, i64, my_sqlite3_value_int64);
+    wrap_val_ret!(sqlite3_value_double, f64, my_sqlite3_value_double);
+    wrap_val_ret!(sqlite3_value_bytes, c_int, my_sqlite3_value_bytes);
+    wrap_val_ret!(sqlite3_value_blob, *const c_void, my_sqlite3_value_blob);
 
-#[no_mangle]
-pub extern "C" fn sqlite3_open(filename: *const c_char, db: *mut *mut sqlite3) -> c_int {
-    c_abi::my_sqlite3_open(filename, db)
-}
+    #[no_mangle]
+    pub extern "C" fn sqlite3_open(filename: *const c_char, db: *mut *mut sqlite3) -> c_int {
+        c_abi::my_sqlite3_open(filename, db)
+    }
 
-#[no_mangle]
-pub extern "C" fn sqlite3_open_v2(
-    filename: *const c_char,
-    db: *mut *mut sqlite3,
-    flags: c_int,
-    vfs: *const c_char,
-) -> c_int {
-    c_abi::my_sqlite3_open_v2(filename, db, flags, vfs)
-}
+    #[no_mangle]
+    pub extern "C" fn sqlite3_open_v2(
+        filename: *const c_char,
+        db: *mut *mut sqlite3,
+        flags: c_int,
+        vfs: *const c_char,
+    ) -> c_int {
+        c_abi::my_sqlite3_open_v2(filename, db, flags, vfs)
+    }
 
-#[no_mangle]
-pub extern "C" fn sqlite3_close(db: *mut sqlite3) -> c_int {
-    c_abi::my_sqlite3_close(db)
-}
+    #[no_mangle]
+    pub extern "C" fn sqlite3_close(db: *mut sqlite3) -> c_int {
+        c_abi::my_sqlite3_close(db)
+    }
 
-#[no_mangle]
-pub extern "C" fn sqlite3_close_v2(db: *mut sqlite3) -> c_int {
-    c_abi::my_sqlite3_close_v2(db)
-}
+    #[no_mangle]
+    pub extern "C" fn sqlite3_close_v2(db: *mut sqlite3) -> c_int {
+        c_abi::my_sqlite3_close_v2(db)
+    }
 
-#[no_mangle]
-pub extern "C" fn sqlite3_exec(
-    db: *mut sqlite3,
-    sql: *const c_char,
-    cb: Option<
-        unsafe extern "C" fn(*mut c_void, c_int, *mut *mut c_char, *mut *mut c_char) -> c_int,
-    >,
-    arg: *mut c_void,
-    errmsg: *mut *mut c_char,
-) -> c_int {
-    c_abi::my_sqlite3_exec(db, sql, cb, arg, errmsg)
-}
+    #[no_mangle]
+    pub extern "C" fn sqlite3_exec(
+        db: *mut sqlite3,
+        sql: *const c_char,
+        cb: Option<
+            unsafe extern "C" fn(*mut c_void, c_int, *mut *mut c_char, *mut *mut c_char) -> c_int,
+        >,
+        arg: *mut c_void,
+        errmsg: *mut *mut c_char,
+    ) -> c_int {
+        c_abi::my_sqlite3_exec(db, sql, cb, arg, errmsg)
+    }
 
-#[no_mangle]
-pub extern "C" fn sqlite3_get_table(
-    db: *mut sqlite3,
-    sql: *const c_char,
-    results: *mut *mut *mut c_char,
-    nrow: *mut c_int,
-    ncol: *mut c_int,
-    errmsg: *mut *mut c_char,
-) -> c_int {
-    c_abi::my_sqlite3_get_table(db, sql, results, nrow, ncol, errmsg)
-}
+    #[no_mangle]
+    pub extern "C" fn sqlite3_get_table(
+        db: *mut sqlite3,
+        sql: *const c_char,
+        results: *mut *mut *mut c_char,
+        nrow: *mut c_int,
+        ncol: *mut c_int,
+        errmsg: *mut *mut c_char,
+    ) -> c_int {
+        c_abi::my_sqlite3_get_table(db, sql, results, nrow, ncol, errmsg)
+    }
 
-#[no_mangle]
-pub extern "C" fn sqlite3_prepare(
-    db: *mut sqlite3,
-    sql: *const c_char,
-    n: c_int,
-    stmt: *mut *mut sqlite3_stmt,
-    tail: *mut *const c_char,
-) -> c_int {
-    c_abi::my_sqlite3_prepare(db, sql, n, stmt, tail)
-}
+    #[no_mangle]
+    pub extern "C" fn sqlite3_prepare(
+        db: *mut sqlite3,
+        sql: *const c_char,
+        n: c_int,
+        stmt: *mut *mut sqlite3_stmt,
+        tail: *mut *const c_char,
+    ) -> c_int {
+        c_abi::my_sqlite3_prepare(db, sql, n, stmt, tail)
+    }
 
-#[no_mangle]
-pub extern "C" fn sqlite3_prepare_v2(
-    db: *mut sqlite3,
-    sql: *const c_char,
-    n: c_int,
-    stmt: *mut *mut sqlite3_stmt,
-    tail: *mut *const c_char,
-) -> c_int {
-    c_abi::my_sqlite3_prepare_v2(db, sql, n, stmt, tail)
-}
+    #[no_mangle]
+    pub extern "C" fn sqlite3_prepare_v2(
+        db: *mut sqlite3,
+        sql: *const c_char,
+        n: c_int,
+        stmt: *mut *mut sqlite3_stmt,
+        tail: *mut *const c_char,
+    ) -> c_int {
+        c_abi::my_sqlite3_prepare_v2(db, sql, n, stmt, tail)
+    }
 
-#[no_mangle]
-pub extern "C" fn sqlite3_prepare_v3(
-    db: *mut sqlite3,
-    sql: *const c_char,
-    n: c_int,
-    flags: c_int,
-    stmt: *mut *mut sqlite3_stmt,
-    tail: *mut *const c_char,
-) -> c_int {
-    c_abi::my_sqlite3_prepare_v3(db, sql, n, flags as u32, stmt, tail)
-}
+    #[no_mangle]
+    pub extern "C" fn sqlite3_prepare_v3(
+        db: *mut sqlite3,
+        sql: *const c_char,
+        n: c_int,
+        flags: c_int,
+        stmt: *mut *mut sqlite3_stmt,
+        tail: *mut *const c_char,
+    ) -> c_int {
+        c_abi::my_sqlite3_prepare_v3(db, sql, n, flags as u32, stmt, tail)
+    }
 
-#[no_mangle]
-pub extern "C" fn sqlite3_prepare16_v2(
-    db: *mut sqlite3,
-    sql: *const c_void,
-    n: c_int,
-    stmt: *mut *mut sqlite3_stmt,
-    tail: *mut *const c_void,
-) -> c_int {
-    c_abi::my_sqlite3_prepare16_v2(db, sql, n, stmt, tail)
-}
+    #[no_mangle]
+    pub extern "C" fn sqlite3_prepare16_v2(
+        db: *mut sqlite3,
+        sql: *const c_void,
+        n: c_int,
+        stmt: *mut *mut sqlite3_stmt,
+        tail: *mut *const c_void,
+    ) -> c_int {
+        c_abi::my_sqlite3_prepare16_v2(db, sql, n, stmt, tail)
+    }
 
-#[no_mangle]
-pub extern "C" fn sqlite3_bind_int(stmt: *mut sqlite3_stmt, idx: c_int, val: c_int) -> c_int {
-    c_abi::my_sqlite3_bind_int(stmt, idx, val)
-}
+    #[no_mangle]
+    pub extern "C" fn sqlite3_bind_int(stmt: *mut sqlite3_stmt, idx: c_int, val: c_int) -> c_int {
+        c_abi::my_sqlite3_bind_int(stmt, idx, val)
+    }
 
-#[no_mangle]
-pub extern "C" fn sqlite3_bind_int64(stmt: *mut sqlite3_stmt, idx: c_int, val: i64) -> c_int {
-    c_abi::my_sqlite3_bind_int64(stmt, idx, val)
-}
+    #[no_mangle]
+    pub extern "C" fn sqlite3_bind_int64(stmt: *mut sqlite3_stmt, idx: c_int, val: i64) -> c_int {
+        c_abi::my_sqlite3_bind_int64(stmt, idx, val)
+    }
 
-#[no_mangle]
-pub extern "C" fn sqlite3_bind_double(stmt: *mut sqlite3_stmt, idx: c_int, val: f64) -> c_int {
-    c_abi::my_sqlite3_bind_double(stmt, idx, val)
-}
+    #[no_mangle]
+    pub extern "C" fn sqlite3_bind_double(stmt: *mut sqlite3_stmt, idx: c_int, val: f64) -> c_int {
+        c_abi::my_sqlite3_bind_double(stmt, idx, val)
+    }
 
-#[no_mangle]
-pub extern "C" fn sqlite3_bind_null(stmt: *mut sqlite3_stmt, idx: c_int) -> c_int {
-    c_abi::my_sqlite3_bind_null(stmt, idx)
-}
+    #[no_mangle]
+    pub extern "C" fn sqlite3_bind_null(stmt: *mut sqlite3_stmt, idx: c_int) -> c_int {
+        c_abi::my_sqlite3_bind_null(stmt, idx)
+    }
 
-#[no_mangle]
-pub extern "C" fn sqlite3_bind_text(
-    stmt: *mut sqlite3_stmt,
-    idx: c_int,
-    val: *const c_char,
-    n: c_int,
-    dtor: *mut c_void,
-) -> c_int {
-    c_abi::my_sqlite3_bind_text(stmt, idx, val, n, dtor)
-}
+    #[no_mangle]
+    pub extern "C" fn sqlite3_bind_text(
+        stmt: *mut sqlite3_stmt,
+        idx: c_int,
+        val: *const c_char,
+        n: c_int,
+        dtor: *mut c_void,
+    ) -> c_int {
+        c_abi::my_sqlite3_bind_text(stmt, idx, val, n, dtor)
+    }
 
-#[no_mangle]
-pub extern "C" fn sqlite3_bind_text64(
-    stmt: *mut sqlite3_stmt,
-    idx: c_int,
-    val: *const c_char,
-    n: u64,
-    dtor: *mut c_void,
-    enc: u8,
-) -> c_int {
-    c_abi::my_sqlite3_bind_text64(stmt, idx, val, n, dtor, enc)
-}
+    #[no_mangle]
+    pub extern "C" fn sqlite3_bind_text64(
+        stmt: *mut sqlite3_stmt,
+        idx: c_int,
+        val: *const c_char,
+        n: u64,
+        dtor: *mut c_void,
+        enc: u8,
+    ) -> c_int {
+        c_abi::my_sqlite3_bind_text64(stmt, idx, val, n, dtor, enc)
+    }
 
-#[no_mangle]
-pub extern "C" fn sqlite3_bind_blob(
-    stmt: *mut sqlite3_stmt,
-    idx: c_int,
-    val: *const c_void,
-    n: c_int,
-    dtor: *mut c_void,
-) -> c_int {
-    c_abi::my_sqlite3_bind_blob(stmt, idx, val, n, dtor)
-}
+    #[no_mangle]
+    pub extern "C" fn sqlite3_bind_blob(
+        stmt: *mut sqlite3_stmt,
+        idx: c_int,
+        val: *const c_void,
+        n: c_int,
+        dtor: *mut c_void,
+    ) -> c_int {
+        c_abi::my_sqlite3_bind_blob(stmt, idx, val, n, dtor)
+    }
 
-#[no_mangle]
-pub extern "C" fn sqlite3_bind_blob64(
-    stmt: *mut sqlite3_stmt,
-    idx: c_int,
-    val: *const c_void,
-    n: u64,
-    dtor: *mut c_void,
-) -> c_int {
-    c_abi::my_sqlite3_bind_blob64(stmt, idx, val, n, dtor)
-}
+    #[no_mangle]
+    pub extern "C" fn sqlite3_bind_blob64(
+        stmt: *mut sqlite3_stmt,
+        idx: c_int,
+        val: *const c_void,
+        n: u64,
+        dtor: *mut c_void,
+    ) -> c_int {
+        c_abi::my_sqlite3_bind_blob64(stmt, idx, val, n, dtor)
+    }
 
-#[no_mangle]
-pub extern "C" fn sqlite3_bind_value(
-    stmt: *mut sqlite3_stmt,
-    idx: c_int,
-    val: *const sqlite3_value,
-) -> c_int {
-    c_abi::my_sqlite3_bind_value(stmt, idx, val)
-}
+    #[no_mangle]
+    pub extern "C" fn sqlite3_bind_value(
+        stmt: *mut sqlite3_stmt,
+        idx: c_int,
+        val: *const sqlite3_value,
+    ) -> c_int {
+        c_abi::my_sqlite3_bind_value(stmt, idx, val)
+    }
 
-#[no_mangle]
-pub extern "C" fn sqlite3_bind_parameter_index(
-    stmt: *mut sqlite3_stmt,
-    name: *const c_char,
-) -> c_int {
-    c_abi::my_sqlite3_bind_parameter_index(stmt, name)
-}
+    #[no_mangle]
+    pub extern "C" fn sqlite3_bind_parameter_index(
+        stmt: *mut sqlite3_stmt,
+        name: *const c_char,
+    ) -> c_int {
+        c_abi::my_sqlite3_bind_parameter_index(stmt, name)
+    }
 
-#[no_mangle]
-pub extern "C" fn sqlite3_stmt_status(stmt: *mut sqlite3_stmt, op: c_int, reset: c_int) -> c_int {
-    c_abi::my_sqlite3_stmt_status(stmt, op, reset)
-}
+    #[no_mangle]
+    pub extern "C" fn sqlite3_stmt_status(
+        stmt: *mut sqlite3_stmt,
+        op: c_int,
+        reset: c_int,
+    ) -> c_int {
+        c_abi::my_sqlite3_stmt_status(stmt, op, reset)
+    }
 
-#[no_mangle]
-pub extern "C" fn sqlite3_free(ptr: *mut c_void) {
-    c_abi::my_sqlite3_free(ptr);
-}
+    #[no_mangle]
+    pub extern "C" fn sqlite3_free(ptr: *mut c_void) {
+        c_abi::my_sqlite3_free(ptr);
+    }
 
-#[no_mangle]
-pub extern "C" fn sqlite3_malloc(n: c_int) -> *mut c_void {
-    c_abi::my_sqlite3_malloc(n)
-}
+    #[no_mangle]
+    pub extern "C" fn sqlite3_malloc(n: c_int) -> *mut c_void {
+        c_abi::my_sqlite3_malloc(n)
+    }
 
-#[no_mangle]
-pub extern "C" fn sqlite3_create_collation(
-    db: *mut sqlite3,
-    name: *const c_char,
-    enc: c_int,
-    arg: *mut c_void,
-    cmp: Option<
-        unsafe extern "C" fn(*mut c_void, c_int, *const c_void, c_int, *const c_void) -> c_int,
-    >,
-) -> c_int {
-    c_abi::my_sqlite3_create_collation(db, name, enc, arg, cmp)
-}
+    #[no_mangle]
+    pub extern "C" fn sqlite3_create_collation(
+        db: *mut sqlite3,
+        name: *const c_char,
+        enc: c_int,
+        arg: *mut c_void,
+        cmp: Option<
+            unsafe extern "C" fn(*mut c_void, c_int, *const c_void, c_int, *const c_void) -> c_int,
+        >,
+    ) -> c_int {
+        c_abi::my_sqlite3_create_collation(db, name, enc, arg, cmp)
+    }
 
-#[no_mangle]
-pub extern "C" fn sqlite3_create_collation_v2(
-    db: *mut sqlite3,
-    name: *const c_char,
-    enc: c_int,
-    arg: *mut c_void,
-    cmp: Option<
-        unsafe extern "C" fn(*mut c_void, c_int, *const c_void, c_int, *const c_void) -> c_int,
-    >,
-    destroy: Option<unsafe extern "C" fn(*mut c_void)>,
-) -> c_int {
-    c_abi::my_sqlite3_create_collation_v2(db, name, enc, arg, cmp, destroy)
-}
+    #[no_mangle]
+    pub extern "C" fn sqlite3_create_collation_v2(
+        db: *mut sqlite3,
+        name: *const c_char,
+        enc: c_int,
+        arg: *mut c_void,
+        cmp: Option<
+            unsafe extern "C" fn(*mut c_void, c_int, *const c_void, c_int, *const c_void) -> c_int,
+        >,
+        destroy: Option<unsafe extern "C" fn(*mut c_void)>,
+    ) -> c_int {
+        c_abi::my_sqlite3_create_collation_v2(db, name, enc, arg, cmp, destroy)
+    }
 
-#[no_mangle]
-pub extern "C" fn sqlite3_column_decltype(stmt: *mut sqlite3_stmt, idx: c_int) -> *const c_char {
-    c_abi::my_sqlite3_column_decltype(stmt, idx)
-}
-
+    #[no_mangle]
+    pub extern "C" fn sqlite3_column_decltype(
+        stmt: *mut sqlite3_stmt,
+        idx: c_int,
+    ) -> *const c_char {
+        c_abi::my_sqlite3_column_decltype(stmt, idx)
+    }
 } // mod ld_preload_wrappers

@@ -287,6 +287,7 @@ INSERT INTO plex.sqlite_column_types VALUES ('metadata_items', 'remote', 'INTEGE
 INSERT INTO plex.sqlite_column_types VALUES ('metadata_items', 'edition_title', 'VARCHAR(255)');
 INSERT INTO plex.sqlite_column_types VALUES ('metadata_items', 'slug', 'VARCHAR(255)');
 INSERT INTO plex.sqlite_column_types VALUES ('metadata_items', 'user_clear_logo_url', 'VARCHAR(255)');
+INSERT INTO plex.sqlite_column_types VALUES ('metadata_items', 'user_square_art_url', 'VARCHAR(255)');
 INSERT INTO plex.sqlite_column_types VALUES ('metadata_items', 'metadata_agent_provider_group_id', 'INTEGER');
 INSERT INTO plex.sqlite_column_types VALUES ('play_queue_items', 'id', 'INTEGER');
 INSERT INTO plex.sqlite_column_types VALUES ('play_queue_items', 'play_queue_id', 'INTEGER');
@@ -572,4 +573,3 @@ ALTER TABLE ONLY plex.sqlite_column_types
 --
 -- PostgreSQL database dump complete
 --
-

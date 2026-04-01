@@ -8,6 +8,21 @@ use super::{
     oid_to_sqlite_type, DECLTYPE_CASE_DT_INTEGER_8, DECLTYPE_CASE_NONE, DECLTYPE_CASE_NULL,
 };
 
+fn is_aggregate_expression_name(col: &str) -> bool {
+    let col = col.trim();
+    if col.is_empty() {
+        return false;
+    }
+
+    let lower = col.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "count" | "cnt" | "sum" | "max" | "min" | "avg"
+    ) || ["count(", "sum(", "max(", "min(", "avg("]
+        .iter()
+        .any(|needle| lower.contains(needle))
+}
+
 pub fn rust_oid_to_sqlite_type(oid: u32) -> i32 {
     oid_to_sqlite_type(oid)
 }
@@ -34,7 +49,10 @@ pub fn rust_decltype_special_case(
         }
     }
 
-    if table_oid == 0 {
+    // Only classify as aggregate when table_oid==0 (expression column).
+    // Real table columns named "count", "max", etc. have table_oid != 0
+    // and must keep their normal decltype.
+    if table_oid == 0 && is_aggregate_expression_name(col) {
         return DECLTYPE_CASE_NULL;
     }
 

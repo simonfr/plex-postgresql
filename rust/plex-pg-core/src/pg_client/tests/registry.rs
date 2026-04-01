@@ -79,3 +79,20 @@ fn registry_find_any_library_none_match() {
     let result = reg.find_any_library(|_| false);
     assert_eq!(result, None);
 }
+
+#[test]
+fn registry_find_any() {
+    let reg = ConnectionRegistry::new();
+    reg.register(0x100, 0xAAA);
+    reg.register(0x200, 0xBBB);
+    let result = reg.find_any(|conn| conn == 0xAAA);
+    assert_eq!(result, Some(0xAAA));
+}
+
+#[test]
+fn registry_find_any_none_match() {
+    let reg = ConnectionRegistry::new();
+    reg.register(0x100, 0xAAA);
+    let result = reg.find_any(|_| false);
+    assert_eq!(result, None);
+}

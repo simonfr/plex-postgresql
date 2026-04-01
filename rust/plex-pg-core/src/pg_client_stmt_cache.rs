@@ -315,10 +315,7 @@ pub fn rust_stmt_cache_clear(conn: *mut c_void) {
         deallocate_stmt(conn, name);
     }
 
-    log_debug_lazy!(
-        "Cleared prepared statement cache for connection {:p}",
-        conn
-    );
+    log_debug_lazy!("Cleared prepared statement cache for connection {:p}", conn);
 }
 
 /// Drop cache entry for a connection (no DEALLOCATE).

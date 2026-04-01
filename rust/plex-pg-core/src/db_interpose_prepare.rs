@@ -5,9 +5,7 @@ use std::ptr;
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 
 use crate::db_interpose_common::{tls_in_interpose_call_ptr, tls_prepare_v2_depth_ptr};
-use crate::db_interpose_conn_utils::{
-    cstr_prefix, cstr_to_string_or, log_error, log_info,
-};
+use crate::db_interpose_conn_utils::{cstr_prefix, cstr_to_string_or, log_error, log_info};
 use crate::db_interpose_prepare_utils::{
     contains_ascii_icase, contains_icase_ptr, starts_with_ascii_icase,
 };
@@ -66,7 +64,7 @@ struct SqlTranslation {
     error: [c_char; 256],
 }
 
-use crate::pg_statement::c_abi::{pg_stmt_create, pg_register_stmt};
+use crate::pg_statement::c_abi::{pg_register_stmt, pg_stmt_create};
 
 extern "C" {
     static mut worker_running: c_int;
@@ -199,9 +197,11 @@ mod tests {
     }
 
     #[test]
-    fn worker_delegation_bypass_matches_skip_policy_for_fts3_tokenizer() {
+    fn worker_delegation_does_not_bypass_passthrough_sql() {
+        // fts3_tokenizer is sqlite-passthrough (not skip-SQL), so worker
+        // delegation should NOT be bypassed — it needs real SQLite prepare.
         let sql = CString::new("SELECT fts3_tokenizer(?, ?)").unwrap();
-        assert!(should_bypass_worker_delegation(sql.as_ptr()));
+        assert!(!should_bypass_worker_delegation(sql.as_ptr()));
     }
 
     #[test]

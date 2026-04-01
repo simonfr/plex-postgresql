@@ -129,8 +129,7 @@ pub extern "C" fn rust_step_write_execute_and_finalize(
             } else {
                 cmd_tuples
             };
-            ec.last_changes =
-                crate::db_interpose_helpers::rust_pg_text_to_int(tuples_ptr);
+            ec.last_changes = crate::db_interpose_helpers::rust_pg_text_to_int(tuples_ptr);
 
             if status == PGRES_TUPLES_OK && crate::libpq_helpers::rust_pq_ntuples(res) > 0 {
                 let mut id_buf = [0 as c_char; 64];

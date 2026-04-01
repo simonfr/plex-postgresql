@@ -25,13 +25,15 @@ pub(super) fn value_type_impl(p_val: *mut sqlite3_value) -> c_int {
     }
 
     let Some(ctx) = (unsafe { load_fake_value_context(p_val, "VALUE_TYPE") }) else {
-        return get_orig_sqlite3_value_type().map(|f| unsafe { f(p_val) }).unwrap_or(SQLITE_NULL);
+        return get_orig_sqlite3_value_type()
+            .map(|f| unsafe { f(p_val) })
+            .unwrap_or(SQLITE_NULL);
     };
 
     let call_num = VALUE_TYPE_CALLS.fetch_add(1, Ordering::Relaxed);
     unsafe {
         let tls_query = tls_last_query_ptr();
-        *tls_query = (&*ctx.pg_stmt).pg_sql;  // accessed before mutex lock
+        *tls_query = (&*ctx.pg_stmt).pg_sql; // accessed before mutex lock
     }
 
     let pg_stmt_ref = unsafe { &mut *ctx.pg_stmt };
@@ -39,7 +41,9 @@ pub(super) fn value_type_impl(p_val: *mut sqlite3_value) -> c_int {
     if unsafe { !fake_value_has_result(&ctx) } {
         log_info_lazy!(
             "VALUE_TYPE[{}]: FAKE VALUE but no result (row={} col={})",
-            call_num, ctx.row, ctx.col
+            call_num,
+            ctx.row,
+            ctx.col
         );
         return SQLITE_NULL;
     }
@@ -118,7 +122,9 @@ pub(super) fn value_text_impl(p_val: *mut sqlite3_value) -> *const c_uchar {
     }
 
     let Some(ctx) = (unsafe { load_fake_value_context(p_val, "VALUE_TEXT") }) else {
-        return get_orig_sqlite3_value_text().map(|f| unsafe { f(p_val) }).unwrap_or(ptr::null());
+        return get_orig_sqlite3_value_text()
+            .map(|f| unsafe { f(p_val) })
+            .unwrap_or(ptr::null());
     };
 
     let call_num = VALUE_TEXT_CALLS.fetch_add(1, Ordering::Relaxed);
@@ -143,7 +149,9 @@ pub(super) fn value_text_impl(p_val: *mut sqlite3_value) -> *const c_uchar {
         if call_num % 100 == 0 {
             log_info_lazy!(
                 "VALUE_TEXT[{}]: col={} row={} -> NULL (is_null)",
-                call_num, ctx.col, ctx.row
+                call_num,
+                ctx.col,
+                ctx.row
             );
         }
         return ptr::null();

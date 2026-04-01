@@ -1,7 +1,7 @@
 use std::ffi::CStr;
 
 const DECLTYPE_INTEGER: &[u8] = b"INTEGER\0";
-const DECLTYPE_BIGINT: &[u8] = b"BIGINT\0";
+const DECLTYPE_DT_INTEGER_8: &[u8] = b"dt_integer(8)\0";
 const DECLTYPE_REAL: &[u8] = b"REAL\0";
 const DECLTYPE_BLOB: &[u8] = b"BLOB\0";
 const DECLTYPE_TEXT: &[u8] = b"TEXT\0";
@@ -33,8 +33,7 @@ pub(crate) fn oid_to_sqlite_type(oid: u32) -> i32 {
 pub(crate) fn oid_to_sqlite_decltype(oid: u32) -> &'static CStr {
     let bytes: &'static [u8] = match oid {
         16 | 21 | 23 | 26 => DECLTYPE_INTEGER,
-        20 => DECLTYPE_BIGINT,
-        1114 | 1184 => DECLTYPE_INTEGER, // timestamp, timestamptz → epoch int
+        20 | 1114 | 1184 => DECLTYPE_DT_INTEGER_8, // 64-bit epoch/int8 → SOCI int64
         700 | 701 | 1700 => DECLTYPE_REAL,
         17 => DECLTYPE_BLOB,
         _ => DECLTYPE_TEXT,

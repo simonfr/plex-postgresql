@@ -50,10 +50,9 @@ use pure_helpers::{
 };
 pub(crate) use string_utils::cstr_to_str_or_empty;
 use string_utils::{
-    contains_ascii_icase, contains_ascii_icase_str, cstr_to_str, find_ascii_icase,
-    find_closing_paren, find_subslice, has_boundary, is_next_numeric_boundary,
-    is_prev_numeric_boundary, normalize_ident_token, push_capped, slice_eq_icase, split_csv_simple,
-    starts_with_icase, write_buf, write_i32_to_buf, write_i64_to_buf,
+    contains_ascii_icase, cstr_to_str, find_ascii_icase, find_closing_paren, find_subslice,
+    has_boundary, is_next_numeric_boundary, is_prev_numeric_boundary, normalize_ident_token,
+    push_capped, split_csv_simple, starts_with_icase, write_buf, write_i32_to_buf, write_i64_to_buf,
 };
 pub use type_cache::{
     rust_decltype_cache_insert, rust_decltype_cache_lookup, rust_decltype_cache_lookup_alias,
@@ -298,11 +297,7 @@ pub fn rust_add_if_not_exists_for_sqlite_ddl(sql: *const c_char) -> *mut c_char 
     }
 }
 
-pub fn rust_format_epoch_to_datetime_utc(
-    epoch: i64,
-    out: *mut c_char,
-    out_len: usize,
-) -> c_int {
+pub fn rust_format_epoch_to_datetime_utc(epoch: i64, out: *mut c_char, out_len: usize) -> c_int {
     format_epoch_to_datetime_utc_impl(epoch, out, out_len)
 }
 
@@ -360,10 +355,7 @@ pub fn rust_should_mask_collection_metadata_type(
     ))
 }
 
-pub fn rust_find_insert_column_index(
-    sql: *const c_char,
-    column_name: *const c_char,
-) -> c_int {
+pub fn rust_find_insert_column_index(sql: *const c_char, column_name: *const c_char) -> c_int {
     if sql.is_null() || column_name.is_null() {
         return -1;
     }

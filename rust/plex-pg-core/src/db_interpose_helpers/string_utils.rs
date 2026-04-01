@@ -31,14 +31,6 @@ pub(super) fn starts_with_icase(bytes: &[u8], pat: &[u8]) -> bool {
     bytes[..pat.len()].eq_ignore_ascii_case(pat)
 }
 
-#[inline]
-pub(super) fn slice_eq_icase(bytes: &[u8], start: usize, pat: &[u8]) -> bool {
-    if bytes.len() < start + pat.len() {
-        return false;
-    }
-    bytes[start..start + pat.len()].eq_ignore_ascii_case(pat)
-}
-
 pub(super) fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || haystack.len() < needle.len() {
         return None;
@@ -86,18 +78,6 @@ pub(super) fn find_ascii_icase_from(haystack: &[u8], start: usize, pat: &[u8]) -
         i += 1;
     }
     None
-}
-
-pub(super) fn contains_ascii_icase_str(haystack: &str, needle: &str) -> bool {
-    if needle.is_empty() {
-        return false;
-    }
-    let hay = haystack.as_bytes();
-    let ned = needle.as_bytes();
-    if hay.len() < ned.len() {
-        return false;
-    }
-    hay.windows(ned.len()).any(|w| w.eq_ignore_ascii_case(ned))
 }
 
 pub(super) fn write_i64_to_buf(out: *mut c_char, out_len: usize, val: i64) -> bool {

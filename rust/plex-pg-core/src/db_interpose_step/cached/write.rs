@@ -9,6 +9,20 @@ use super::super::{note_pg_conn_error, STEP_RESULT_DONE, STEP_RESULT_ERROR};
 use super::free_expanded_sql;
 use crate::log_debug_lazy;
 
+unsafe fn set_cached_write_error(pg_conn: *mut PgConnection, msg: &str) {
+    if pg_conn.is_null() {
+        return;
+    }
+    let conn = &mut *pg_conn;
+    conn.last_error_code = STEP_RESULT_ERROR;
+    conn.last_error.fill(0);
+    let bytes = msg.as_bytes();
+    let len = bytes.len().min(conn.last_error.len().saturating_sub(1));
+    for (dst, src) in conn.last_error.iter_mut().zip(bytes.iter()).take(len) {
+        *dst = *src as c_char;
+    }
+}
+
 pub(super) unsafe fn handle_cached_write(
     p_stmt: *mut sqlite3_stmt,
     pg_conn: *mut PgConnection,
@@ -30,10 +44,7 @@ pub(super) unsafe fn handle_cached_write(
             "  expanded_sql={}",
             if expanded_sql.is_null() { "NO" } else { "YES" }
         );
-        log_debug_lazy!(
-            "  sql (first 300): {}",
-            cstr_prefix(sql, 300, "(null)")
-        );
+        log_debug_lazy!("  sql (first 300): {}", cstr_prefix(sql, 300, "(null)"));
     }
     if crate::db_interpose_helpers::rust_is_junk_metadata_insert(sql) != 0 {
         log_error(
@@ -91,6 +102,16 @@ pub(super) unsafe fn handle_cached_write(
             }
             return STEP_RESULT_ERROR;
         }
+    } else {
+        let msg = format!(
+            "PG cached write translation failed: {}",
+            cstr_prefix(sql, 220, "NULL")
+        );
+        log_error(&msg);
+        set_cached_write_error(pg_conn, &msg);
+        sql_translation_free(&mut trans as *mut _);
+        free_expanded_sql(expanded_sql);
+        return STEP_RESULT_ERROR;
     }
     sql_translation_free(&mut trans as *mut _);
     free_expanded_sql(expanded_sql);

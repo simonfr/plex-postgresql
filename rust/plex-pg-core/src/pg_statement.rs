@@ -66,8 +66,7 @@ use stmt_constants::{
 pub use stmt_factory::rust_stmt_create;
 pub use stmt_lifecycle::{rust_stmt_clear_result, rust_stmt_free};
 use stmt_support::{
-    leak_enabled, stmt_cache_disabled, stmt_ref_ptr, stmt_unref_ptr,
-    MAX_CACHED_STMTS_PER_THREAD,
+    leak_enabled, stmt_cache_disabled, stmt_ref_ptr, stmt_unref_ptr, MAX_CACHED_STMTS_PER_THREAD,
 };
 use tls_cache::with_tls_cache;
 #[cfg(test)]

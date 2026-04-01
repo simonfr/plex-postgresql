@@ -45,10 +45,7 @@ pub(crate) unsafe fn adopt_materialized_result_owner(
         return false;
     }
     let stmt = &mut *stmt;
-    if stmt.result.is_null()
-        || stmt.streaming_mode != 0
-        || stmt.result_conn == exec_conn
-    {
+    if stmt.result.is_null() || stmt.streaming_mode != 0 || stmt.result_conn == exec_conn {
         return false;
     }
 

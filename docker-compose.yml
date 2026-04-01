@@ -53,8 +53,10 @@ services:
       # Optional ARM override for OpenSSL CPU feature probing in some VMs/containers
       # - PLEX_PG_OPENSSL_ARMCAP=0
       # Logging: 0=ERROR, 1=INFO, 2=DEBUG
+      # Logging: 0/ERROR, 1/INFO, 2/DEBUG
       - PLEX_PG_LOG_LEVEL=ERROR
       - PLEX_PG_LOG_FILE=/config/plex_redirect_pg.log
+      - PLEX_PG_ENABLE_SIGNAL_LOG=1
       # Clear log file on startup to avoid stale errors
       - PLEX_PG_LOG_TRUNCATE_ON_START=1
     volumes:

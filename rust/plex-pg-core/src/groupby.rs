@@ -275,19 +275,14 @@ fn table_factor_name(tf: &TableFactor) -> Option<String> {
                 })
             }
         }
-        TableFactor::Derived { alias, .. } => {
-            alias.as_ref().map(|a| a.name.value.to_lowercase())
-        }
+        TableFactor::Derived { alias, .. } => alias.as_ref().map(|a| a.name.value.to_lowercase()),
         _ => None,
     }
 }
 
 /// Build a `table.id` compound identifier expression.
 fn make_table_dot_id(table: &str) -> Expr {
-    Expr::CompoundIdentifier(vec![
-        Ident::new(table),
-        Ident::new("id"),
-    ])
+    Expr::CompoundIdentifier(vec![Ident::new(table), Ident::new("id")])
 }
 
 /// Collect SELECT projection columns that are not aggregates and not in GROUP BY.
@@ -620,10 +615,7 @@ mod tests {
     #[test]
     fn rewrite_groupby__qualified_wildcard_no_dup_when_already_in_groupby() {
         // If table.id is already in GROUP BY, don't duplicate it
-        let r = translate(
-            "SELECT t.* FROM t GROUP BY t.id",
-        )
-        .unwrap();
+        let r = translate("SELECT t.* FROM t GROUP BY t.id").unwrap();
         let sql = r.sql.to_lowercase();
         let gb_pos = sql.find("group by").unwrap();
         let after_gb = &sql[gb_pos..];

@@ -1,19 +1,15 @@
+#[cfg(target_os = "linux")]
+use super::{linux_process_name_is_primary, linux_process_name_requires_passthrough};
 use super::{
     rust_common_handle_exception, rust_common_load_sqlite_symbols, rust_get_exception_tracker,
     rust_reset_exception_tracking, rust_simple_str_replace, tls_column_type_calls_ptr,
     tls_last_query_ptr, tls_value_type_calls_ptr, total_exception_count,
 };
-#[cfg(target_os = "linux")]
-use super::{linux_process_name_is_primary, linux_process_name_requires_passthrough};
 use libc::{c_void, RTLD_DEFAULT, RTLD_LAZY};
 use std::ffi::{CStr, CString};
 use std::sync::atomic::Ordering;
 
-fn call_replace(
-    input: Option<&str>,
-    old: Option<&str>,
-    new_str: Option<&str>,
-) -> Option<String> {
+fn call_replace(input: Option<&str>, old: Option<&str>, new_str: Option<&str>) -> Option<String> {
     let input_cs = input.map(|s| CString::new(s).unwrap());
     let old_cs = old.map(|s| CString::new(s).unwrap());
     let new_cs = new_str.map(|s| CString::new(s).unwrap());

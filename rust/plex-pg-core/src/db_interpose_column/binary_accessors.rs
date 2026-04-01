@@ -152,7 +152,9 @@ pub(super) fn column_blob_impl(p_stmt: *mut sqlite3_stmt, idx: c_int) -> *const 
     let raw_pg_stmt = pg_find_any_stmt(p_stmt);
 
     if raw_pg_stmt.is_null() || unsafe { (&*raw_pg_stmt).is_pg == 0 } {
-        return get_orig_sqlite3_column_blob().map(|f| unsafe { f(p_stmt, idx) }).unwrap_or(ptr::null());
+        return get_orig_sqlite3_column_blob()
+            .map(|f| unsafe { f(p_stmt, idx) })
+            .unwrap_or(ptr::null());
     }
 
     let pg_stmt = unsafe { &mut *raw_pg_stmt };
@@ -195,7 +197,9 @@ pub(super) fn column_bytes_impl(p_stmt: *mut sqlite3_stmt, idx: c_int) -> c_int 
     let raw_pg_stmt = pg_find_any_stmt(p_stmt);
 
     if raw_pg_stmt.is_null() || unsafe { (&*raw_pg_stmt).is_pg == 0 } {
-        return get_orig_sqlite3_column_bytes().map(|f| unsafe { f(p_stmt, idx) }).unwrap_or(0);
+        return get_orig_sqlite3_column_bytes()
+            .map(|f| unsafe { f(p_stmt, idx) })
+            .unwrap_or(0);
     }
 
     let pg_stmt = unsafe { &mut *raw_pg_stmt };

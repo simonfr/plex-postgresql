@@ -45,12 +45,7 @@ pub(super) unsafe fn eager_fetch_result(
         } else {
             CString::new(cstr_to_str(err2)).unwrap_or_else(|_| CString::new("?").unwrap())
         };
-        log_sql_fallback(
-            s.sql,
-            s.pg_sql,
-            fallback_err.as_ptr(),
-            ctx.as_ptr(),
-        );
+        log_sql_fallback(s.sql, s.pg_sql, fallback_err.as_ptr(), ctx.as_ptr());
         crate::libpq_helpers::rust_pq_clear(s.result);
         s.result = std::ptr::null_mut();
         crate::pg_client::rust_pool_check_health(exec_conn as *mut c_void);

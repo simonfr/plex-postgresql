@@ -65,10 +65,7 @@ pub(crate) fn phase1_existing_ready(ctx: &AcquireCtx<'_>) -> AcquireDecision {
         }
         if !conn.is_null() && check_conn_ok(conn) {
             if conn_is_streaming_active_ptr(conn as *mut PgConnection) {
-                log_debug_lazy!(
-                    "Pool: slot {} streaming_active, skipping for thread",
-                    i
-                );
+                log_debug_lazy!("Pool: slot {} streaming_active, skipping for thread", i);
                 continue;
             }
             return cache_existing_ready_slot(ctx, i, slot, conn);

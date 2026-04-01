@@ -81,6 +81,7 @@ RUN ARCH=$(uname -m) && \
     echo "Created symlink: libc.musl-${MUSL_ARCH}.so.1 -> /usr/lib/plexmediaserver/lib/libc.so"
 
 COPY --from=builder /libs/*.so* /usr/local/lib/plex-postgresql/
+COPY --from=builder /libs/subreaper /usr/local/bin/subreaper
 
 COPY schema/plex_schema.sql /usr/local/lib/plex-postgresql/
 COPY schema/sqlite_schema.sql /usr/local/lib/plex-postgresql/
@@ -88,6 +89,7 @@ COPY schema/sqlite_column_types.sql /usr/local/lib/plex-postgresql/
 COPY schema/pg_compat_functions.sql /usr/local/lib/plex-postgresql/
 COPY scripts/migrate_lib.sh /usr/local/lib/plex-postgresql/
 COPY scripts/migrate_table.py /usr/local/lib/plex-postgresql/
+COPY scripts/seed_shadow_table_from_pg.py /usr/local/lib/plex-postgresql/
 COPY scripts/doctor.sh /usr/local/lib/plex-postgresql/
 
 # Copy the initialization script for s6-overlay
@@ -119,8 +121,14 @@ RUN if [ -f /etc/s6-overlay/s6-rc.d/init-plex-claim/run ]; then \
 # Keep upstream CrashUploader binary.
 # With SIGCHLD forced to SIG_IGN, child exits should no longer destabilize Plex.
 
-# Inject shim env directly into the upstream svc-plex run script so s6 still
-# supervises the real PMS process instead of a wrapper layer.
+# s6 finish script: when PMS exits (after vfork/re-exec), check if a
+# re-exec'd PMS child is still running on port 32400. If so, wait for it
+# instead of immediately restarting (which would cause "bind address in use").
+RUN printf '#!/bin/bash\nif pgrep -f "Plex Media Server" >/dev/null 2>&1 && nc -z localhost 32400 2>/dev/null; then\n  echo "[plex-pg] PMS re-exec detected, waiting for child process..."\n  while pgrep -f "Plex Media Server" >/dev/null 2>&1; do sleep 5; done\nfi\n' \
+        > /etc/s6-overlay/s6-rc.d/svc-plex/finish && \
+    chmod +x /etc/s6-overlay/s6-rc.d/svc-plex/finish
+
+# Inject shim env into the upstream svc-plex run script.
 RUN sed -i '/export PLEX_MEDIA_SERVER_INFO_PLATFORM_VERSION/a\
 arch="$(uname -m)"\
 \nif [[ "$arch" == "aarch64" || "$arch" == "arm64" ]]; then\

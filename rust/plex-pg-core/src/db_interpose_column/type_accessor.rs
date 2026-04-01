@@ -26,7 +26,7 @@ impl LiveTypeState {
     fn decltype_guess(&self) -> &'static str {
         match self.oid {
             16 | 21 | 23 | 26 => "INTEGER",
-            20 => "BIGINT",
+            20 | 1114 | 1184 => "dt_integer(8)",
             700 | 701 | 1700 => "REAL",
             17 => "BLOB",
             _ => "TEXT",
@@ -53,7 +53,13 @@ unsafe fn column_type_debug_sql(pg_stmt: *mut PgStmt) -> *const c_char {
 }
 
 fn passthrough_column_type(p_stmt: *mut sqlite3_stmt, idx: c_int) -> c_int {
-    get_orig_sqlite3_column_type().map(|f| unsafe { f(p_stmt, idx) }).unwrap_or(SQLITE_NULL)
+    get_orig_sqlite3_column_type()
+        .map(|f| unsafe { f(p_stmt, idx) })
+        .unwrap_or(SQLITE_NULL)
+}
+
+fn sqlite_type_for_oid(oid: u32) -> c_int {
+    pg_oid_to_sqlite_type_impl(oid)
 }
 
 unsafe fn load_cached_type_state(pg_stmt: &mut PgStmt, idx: c_int) -> Option<CachedTypeState> {
@@ -138,16 +144,16 @@ unsafe fn resolve_cached_column_type(
     ctx.trace_col = trace_col;
 
     if state.is_null {
-        // For integer-typed columns (OID 20=bigint, 23=int4, etc.), return
-        // SQLITE_INTEGER instead of SQLITE_NULL when the value is NULL.
-        // SOCI pre-allocates a typed holder from column_decltype before step().
-        // If decltype says "dt_integer(8)" but column_type returns SQLITE_NULL,
-        // SOCI's dynamic_cast fails with std::bad_cast. This happens on LEFT JOIN
-        // queries where STRM files have NULL directory_id → NULL timestamp columns.
-        let oid_type = pg_oid_to_sqlite_type_impl(state.oid);
-        if oid_type == SQLITE_INTEGER {
-            ctx.result = SQLITE_INTEGER;
-            return (SQLITE_INTEGER, ctx);
+        // For NULL values, derive the SQLite type from the PG OID instead of
+        // returning SQLITE_NULL. SOCI's post_fetch does dynamic_cast based on
+        // the type reported by column_type(). If we return SQLITE_NULL but SOCI
+        // allocated a typed holder (int/text/etc.) based on column_decltype(),
+        // the cast fails with std::bad_cast.
+        let oid_type = sqlite_type_for_oid(state.oid);
+        if oid_type != SQLITE_NULL {
+            ctx.result = oid_type;
+            ctx.is_null = true;
+            return (oid_type, ctx);
         }
         ctx.is_null = true;
         return (SQLITE_NULL, ctx);
@@ -157,11 +163,13 @@ unsafe fn resolve_cached_column_type(
         let raw_val = pg_text_to_int64_impl(state.value_ptr);
         let mut masked = 0i64;
         if mask_collection_metadata_type(pg_stmt, state.col_name, raw_val, &mut masked) {
-            return (SQLITE_NULL, ctx);
+            let result = sqlite_type_for_oid(state.oid);
+            ctx.result = result;
+            return (result, ctx);
         }
     }
 
-    let result = pg_oid_to_sqlite_type_impl(state.oid);
+    let result = sqlite_type_for_oid(state.oid);
     ctx.result = result;
     (result, ctx)
 }
@@ -240,6 +248,34 @@ unsafe fn resolve_live_column_type(
         decltype_guess: "",
     };
 
+    if pg_stmt.metadata_only_result != 0 && !pg_stmt.result.is_null() {
+        if idx < 0 || idx >= pg_stmt.num_cols {
+            ctx.out_of_bounds = true;
+            return (SQLITE_NULL, ctx);
+        }
+
+        let oid = crate::db_interpose_helpers::rust_pg_result_col_oid(
+            helpers_result_ptr(pg_stmt.result),
+            idx,
+        );
+        let col_name = crate::db_interpose_helpers::rust_pg_result_col_name(
+            helpers_result_ptr(pg_stmt.result),
+            idx,
+        );
+        ctx.phase = "metadata";
+        ctx.oid = oid;
+        ctx.col_name = col_name;
+        ctx.trace_col = trace_badcast_should_log_col(pg_stmt as *mut PgStmt, idx, col_name);
+        ctx.result = sqlite_type_for_oid(oid);
+        ctx.decltype_guess = match ctx.result {
+            SQLITE_INTEGER => "INTEGER",
+            SQLITE_FLOAT => "REAL",
+            SQLITE_BLOB => "BLOB",
+            _ => "TEXT",
+        };
+        return (ctx.result, ctx);
+    }
+
     let Some(state) = load_live_type_state(pg_stmt, idx) else {
         ctx.out_of_bounds = true;
         return (SQLITE_NULL, ctx);
@@ -279,11 +315,16 @@ unsafe fn resolve_live_column_type(
     // --- seqlock: end CRASH_LAST_COLUMN write ---
 
     if state.is_null {
-        // Same fix as cached path: for integer-typed NULL columns, return
-        // SQLITE_INTEGER to prevent SOCI's std::bad_cast on holder mismatch.
-        if state.sqlite_type == SQLITE_INTEGER {
-            ctx.result = SQLITE_INTEGER;
-            return (SQLITE_INTEGER, ctx);
+        // For NULL values, derive the SQLite type from the PG OID instead of
+        // returning SQLITE_NULL. SOCI's post_fetch does dynamic_cast based on
+        // the type reported by column_type(). If we return SQLITE_NULL but SOCI
+        // allocated a typed holder (int/text/etc.) based on column_decltype(),
+        // the cast fails with std::bad_cast.
+        let oid_type = sqlite_type_for_oid(state.oid);
+        if oid_type != SQLITE_NULL {
+            ctx.result = oid_type;
+            ctx.is_null = true;
+            return (oid_type, ctx);
         }
         ctx.is_null = true;
         return (SQLITE_NULL, ctx);
@@ -293,7 +334,12 @@ unsafe fn resolve_live_column_type(
         let raw_val = pg_text_to_int64_impl(state.value_buf.as_ptr());
         let mut masked = 0i64;
         if mask_collection_metadata_type(pg_stmt, state.col_name, raw_val, &mut masked) {
-            return (SQLITE_NULL, ctx);
+            // Return the column's actual type (not SQLITE_NULL) to prevent
+            // holder/type mismatch → bad_cast. The mask sets the value to 0,
+            // which column_int will return. SOCI's typed holder stays valid.
+            let result = state.sqlite_type;
+            ctx.result = result;
+            return (result, ctx);
         }
     }
 
@@ -309,7 +355,9 @@ pub(super) fn column_type_impl(p_stmt: *mut sqlite3_stmt, idx: c_int) -> c_int {
     log_debug_lazy!("COLUMN_TYPE: stmt={:p} idx={}", p_stmt, idx);
     let raw_pg_stmt = pg_find_any_stmt(p_stmt);
     let dbg_sql = unsafe { column_type_debug_sql(raw_pg_stmt) };
-    let dbg_db = get_orig_sqlite3_db_handle().map(|f| unsafe { f(p_stmt) }).unwrap_or(ptr::null_mut());
+    let dbg_db = get_orig_sqlite3_db_handle()
+        .map(|f| unsafe { f(p_stmt) })
+        .unwrap_or(ptr::null_mut());
     unsafe {
         pg_exception_note_phase(
             b"column_type\0".as_ptr() as *const c_char,
@@ -321,6 +369,11 @@ pub(super) fn column_type_impl(p_stmt: *mut sqlite3_stmt, idx: c_int) -> c_int {
 
     let result = if !raw_pg_stmt.is_null() && unsafe { (&*raw_pg_stmt).is_pg != 0 } {
         let pg_stmt = unsafe { &mut *raw_pg_stmt };
+        let needs_metadata =
+            pg_stmt.result.is_null() && pg_stmt.cached_result.is_null() && !pg_stmt.pg_sql.is_null();
+        if needs_metadata {
+            ensure_pg_result_for_metadata(raw_pg_stmt);
+        }
         unsafe {
             let tls_query = tls_last_query_ptr();
             *tls_query = pg_stmt.pg_sql;
@@ -345,23 +398,22 @@ pub(super) fn column_type_impl(p_stmt: *mut sqlite3_stmt, idx: c_int) -> c_int {
 
 /// Emit all diagnostic / trace logging for a column_type call.
 /// Must be called OUTSIDE any pg_stmt mutex scope.
-fn column_type_emit_log(
-    pg_stmt: *mut PgStmt,
-    p_stmt: *mut sqlite3_stmt,
-    ctx: &ColumnTypeLogCtx,
-) {
+fn column_type_emit_log(pg_stmt: *mut PgStmt, p_stmt: *mut sqlite3_stmt, ctx: &ColumnTypeLogCtx) {
     if ctx.out_of_bounds {
         log_debug_lazy!(
             "COLUMN_TYPE_VERBOSE: idx={} row={} -> SQLITE_NULL ({}, out of bounds)",
-            ctx.idx, ctx.row, ctx.phase
+            ctx.idx,
+            ctx.row,
+            ctx.phase
         );
         return;
     }
     if ctx.is_null {
         log_debug_lazy!(
-            "COLUMN_TYPE: idx={} col='{}' is NULL, returning SQLITE_NULL ({})",
+            "COLUMN_TYPE: idx={} col='{}' is NULL, returning {} ({})",
             ctx.idx,
             cstr_to_string_or(ctx.col_name, "?"),
+            sqlite_type_name(ctx.result),
             ctx.phase
         );
         if ctx.trace_col {
@@ -377,11 +429,12 @@ fn column_type_emit_log(
                 ctx.col_name,
             );
             log_debug_lazy!(
-                "TRACE_BADCAST: column_type idx={} col='{}' row={} oid={} is_null=1 -> NULL sql={}",
+                "TRACE_BADCAST: column_type idx={} col='{}' row={} oid={} is_null=1 -> {} sql={}",
                 ctx.idx,
                 cstr_to_string_or(ctx.col_name, "?"),
                 ctx.row,
                 ctx.oid,
+                sqlite_type_name(ctx.result),
                 cstr_prefix(ctx.pg_sql, 200, "?")
             );
         }
@@ -421,4 +474,15 @@ fn column_type_emit_log(
         ctx.decltype_guess,
         ctx.phase
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn null_oid_mapping_keeps_timestamp_columns_integer() {
+        assert_eq!(sqlite_type_for_oid(1114), SQLITE_INTEGER);
+        assert_eq!(sqlite_type_for_oid(1184), SQLITE_INTEGER);
+    }
 }

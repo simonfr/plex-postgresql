@@ -453,7 +453,8 @@ pub fn rust_query_cache_init() {
     }
     log_info_lazy!(
         "Query result cache initialized (size={}, ttl={}ms) [Rust]",
-        QUERY_CACHE_SIZE, QUERY_CACHE_TTL_MS
+        QUERY_CACHE_SIZE,
+        QUERY_CACHE_TTL_MS
     );
 }
 
@@ -660,7 +661,8 @@ pub fn rust_query_cache_store(
             if !reclaimed {
                 log_debug_lazy!(
                     "QUERY_CACHE STORE: slot {} became busy before reclaim, skipping key={:x}",
-                    slot, cache_key
+                    slot,
+                    cache_key
                 );
                 return;
             }
@@ -806,7 +808,11 @@ pub fn rust_query_cache_store(
             };
             log_debug_lazy!(
                 "QUERY_CACHE STORE: key={:x} rows={} cols={} size={} sql={}",
-                cache_key, num_rows, num_cols, total_size, sql_preview
+                cache_key,
+                num_rows,
+                num_cols,
+                total_size,
+                sql_preview
             );
         }
     });

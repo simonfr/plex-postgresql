@@ -13,10 +13,7 @@ pub(super) fn trace_prepare_pgsql_if_enabled(sqlite_sql: *const c_char, pg_sql: 
     if pg_sql.is_null() {
         return;
     }
-    log_debug_lazy!(
-        "TRACE_PREPARE_PGSQL: {}",
-        cstr_prefix(pg_sql, 900, "")
-    );
+    log_debug_lazy!("TRACE_PREPARE_PGSQL: {}", cstr_prefix(pg_sql, 900, ""));
 }
 
 pub(super) fn prepared_statements_disabled() -> bool {

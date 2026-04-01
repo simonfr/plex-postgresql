@@ -1,6 +1,6 @@
 use std::sync::atomic::Ordering;
 
-use crate::db_interpose_conn_utils::{log_error};
+use crate::db_interpose_conn_utils::log_error;
 use crate::ffi_types::PgConnection;
 
 use super::super::super::connection_helpers::conn_is_pg_active_ptr;

@@ -212,10 +212,7 @@ pub(crate) fn ensure_pg_result_for_metadata(pg_stmt: *mut PgStmt) -> bool {
 
             log_error(&format!(
                 "METADATA_DESCRIBE: PQdescribePrepared failed: {}",
-                cstr_to_string_or(
-                    crate::libpq_helpers::rust_pq_error_message(ec.conn),
-                    "?"
-                )
+                cstr_to_string_or(crate::libpq_helpers::rust_pq_error_message(ec.conn), "?")
             ));
             crate::libpq_helpers::rust_pq_clear(desc);
             return false;
@@ -273,10 +270,7 @@ pub(crate) fn ensure_pg_result_for_metadata(pg_stmt: *mut PgStmt) -> bool {
 
         true
     } else {
-        let err = cstr_to_string_or(
-            crate::libpq_helpers::rust_pq_error_message(ec.conn),
-            "?",
-        );
+        let err = cstr_to_string_or(crate::libpq_helpers::rust_pq_error_message(ec.conn), "?");
         crate::libpq_helpers::rust_pq_clear(pg_stmt_ref.result);
         pg_stmt_ref.result = ptr::null_mut();
         drop(_conn_guard);

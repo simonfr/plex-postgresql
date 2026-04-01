@@ -17,8 +17,17 @@ pub(super) unsafe fn pg_map_param_index(
     let s = &*pg_stmt;
 
     if !s.param_names.is_null() && s.param_count > 0 {
-        let param_name =
-            crate::db_interpose_metadata::rust_my_sqlite3_bind_parameter_name(p_stmt, sqlite_idx);
+        // For PG-routed non-cached stmts, read param name directly from PgStmt
+        // to avoid LD_PRELOAD re-entry of orig_sqlite3_bind_parameter_name.
+        let param_name = if s.is_pg != 0
+            && s.is_cached == 0
+            && sqlite_idx > 0
+            && (sqlite_idx as usize) <= s.param_count as usize
+        {
+            *s.param_names.add((sqlite_idx - 1) as usize)
+        } else {
+            crate::db_interpose_metadata::rust_my_sqlite3_bind_parameter_name(p_stmt, sqlite_idx)
+        };
         log_debug_lazy!(
             "pg_map_param_index: sqlite_idx={}, param_name={}, param_count={}",
             sqlite_idx,
@@ -36,11 +45,7 @@ pub(super) unsafe fn pg_map_param_index(
             let max_debug = param_count.min(5);
             for i in 0..max_debug {
                 let cur = *s.param_names.add(i);
-                log_debug_lazy!(
-                    "  param_names[{}] = {}",
-                    i,
-                    cstr_to_string_or(cur, "NULL")
-                );
+                log_debug_lazy!("  param_names[{}] = {}", i, cstr_to_string_or(cur, "NULL"));
             }
 
             for i in 0..param_count {
@@ -76,11 +81,7 @@ pub(super) fn note_bind_phase(phase: &[u8], p_stmt: *mut sqlite3_stmt, pg_stmt: 
 
     if !pg_stmt.is_null() {
         let s = unsafe { &*pg_stmt };
-        sql = if !s.pg_sql.is_null() {
-            s.pg_sql
-        } else {
-            s.sql
-        };
+        sql = if !s.pg_sql.is_null() { s.pg_sql } else { s.sql };
     }
 
     if sql.is_null() {
@@ -92,7 +93,12 @@ pub(super) fn note_bind_phase(phase: &[u8], p_stmt: *mut sqlite3_stmt, pg_stmt: 
     if let Some(f) = get_orig_sqlite3_db_handle() {
         db = unsafe { f(p_stmt) };
     }
-    pg_exception_note_phase(phase.as_ptr() as *const c_char, sql, p_stmt as *const c_void, db as *const c_void);
+    pg_exception_note_phase(
+        phase.as_ptr() as *const c_char,
+        sql,
+        p_stmt as *const c_void,
+        db as *const c_void,
+    );
 }
 
 pub(super) fn bind_reset_disabled() -> bool {
@@ -139,8 +145,32 @@ pub(super) fn should_reset_stmt(pg_stmt: *mut PgStmt) -> bool {
     s.is_pg != 0
 }
 
+/// Returns true if this statement is PG-routed (read/write, not skip/no-op)
+/// and non-cached, meaning bind/reset/clear should skip orig_sqlite3_* calls.
+/// Excludes is_pg==3 (skip-SQL like BEGIN/COMMIT/PRAGMA) which are effectively
+/// bindless and don't need the deadlock guard.
+pub(super) fn is_pg_routed_noncached(pg_stmt: *mut PgStmt) -> bool {
+    if pg_stmt.is_null() {
+        return false;
+    }
+    let s = unsafe { &*pg_stmt };
+    (s.is_pg == 1 || s.is_pg == 2) && s.is_cached == 0
+}
+
+/// When skipping orig_sqlite3_bind_text/blob for PG-routed stmts,
+/// invoke the destructor if it's a custom function pointer.
+/// SQLITE_STATIC = NULL, SQLITE_TRANSIENT = (void(*)(void*))-1
+pub(super) unsafe fn invoke_destructor_if_custom(val: *const c_void, destructor: *mut c_void) {
+    if destructor.is_null() || destructor as usize == usize::MAX {
+        return;
+    }
+    let dtor: unsafe extern "C" fn(*mut c_void) =
+        std::mem::transmute::<*mut c_void, unsafe extern "C" fn(*mut c_void)>(destructor);
+    dtor(val as *mut c_void);
+}
+
 pub(super) unsafe fn wait_for_stmt_ready(p_stmt: *mut sqlite3_stmt, pg_stmt: *mut PgStmt) -> bool {
-    if should_reset_stmt(pg_stmt) {
+    if should_reset_stmt(pg_stmt) && !is_pg_routed_noncached(pg_stmt) {
         if let Some(f) = get_orig_sqlite3_reset() {
             f(p_stmt);
         }
@@ -150,7 +180,7 @@ pub(super) unsafe fn wait_for_stmt_ready(p_stmt: *mut sqlite3_stmt, pg_stmt: *mu
 }
 
 pub(super) unsafe fn ensure_stmt_not_busy(p_stmt: *mut sqlite3_stmt, pg_stmt: *mut PgStmt) {
-    if should_reset_stmt(pg_stmt) {
+    if should_reset_stmt(pg_stmt) && !is_pg_routed_noncached(pg_stmt) {
         if let Some(f) = get_orig_sqlite3_reset() {
             f(p_stmt);
         }
@@ -187,6 +217,9 @@ where
 {
     if rc != SQLITE_MISUSE {
         return rc;
+    }
+    if is_pg_routed_noncached(pg_stmt) {
+        return SQLITE_OK;
     }
     for _ in 0..3 {
         if wait_for_stmt_ready(p_stmt, pg_stmt) {

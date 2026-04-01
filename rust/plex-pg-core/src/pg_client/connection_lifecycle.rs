@@ -95,7 +95,11 @@ pub(super) fn create_pool_connection(db_path: *const c_char) -> *mut c_void {
     let cfg = conn_config();
     log_debug_lazy!(
         "create_pool_connection: host='{}' port={} db='{}' user='{}' schema='{}'",
-        cfg.host, cfg.port, cfg.database, cfg.user, cfg.schema
+        cfg.host,
+        cfg.port,
+        cfg.database,
+        cfg.user,
+        cfg.schema
     );
 
     if cfg.host.is_empty() || cfg.port == 0 {
@@ -290,10 +294,7 @@ pub extern "C" fn rust_pg_connect(
     if is_library_db(db_path_str) {
         conn.conn = std::ptr::null_mut();
         conn.is_pg_active = 1;
-        log_info_lazy!(
-            "PostgreSQL pool-only connection for: {}",
-            db_path_str
-        );
+        log_info_lazy!("PostgreSQL pool-only connection for: {}", db_path_str);
         return conn_ptr;
     }
 

@@ -173,7 +173,9 @@ fn maybe_log_txn_route(
         let routed_pg = TXN_ROUTE_PG.load(Ordering::Relaxed);
         log_info_lazy!(
             "TXN_ROUTE stats: total={} skipped={} pg_routed={}",
-            total, skipped, routed_pg
+            total,
+            skipped,
+            routed_pg
         );
     }
 }
@@ -200,15 +202,19 @@ pub(super) fn prepare_v2_internal_impl(
     }
 
     if trace_prepare_sql_ok(z_sql) {
-        log_debug_lazy!(
-            "TRACE_PREPARE_SQL: {}",
-            cstr_prefix(z_sql, 700, "NULL")
-        );
+        log_debug_lazy!("TRACE_PREPARE_SQL: {}", cstr_prefix(z_sql, 700, "NULL"));
     }
 
+    // Only check shadow SQLite schema for non-PG databases.
+    // For PG-routed DDL, PG is authoritative — skip shadow checks entirely.
+    // This prevents crashes when shadow SQLite lacks tables that PG has.
     unsafe {
-        if let Some(rc) = maybe_skip_alter_table_add(db, z_sql, pp_stmt, pz_tail) {
-            return rc;
+        let pg_conn_check = crate::pg_client::rust_pg_find_connection(db);
+        let is_pg_active = !pg_conn_check.is_null() && (&*pg_conn_check).is_pg_active != 0;
+        if !is_pg_active {
+            if let Some(rc) = maybe_skip_alter_table_add(db, z_sql, pp_stmt, pz_tail) {
+                return rc;
+            }
         }
     }
 
@@ -286,7 +292,9 @@ pub(super) fn prepare_v2_internal_impl(
         skip_complex_processing = 1;
         log_info_lazy!(
             "STACK CAUTION: stack_used={}/{} bytes, remaining={} - skipping complex processing",
-            stack.used, stack.size, stack.remaining
+            stack.used,
+            stack.size,
+            stack.remaining
         );
     }
 
@@ -323,7 +331,27 @@ pub(super) fn prepare_v2_internal_impl(
         );
     }
 
-    let use_dummy_shadow = unsafe { should_use_dummy_shadow(pg_conn, z_sql, is_read, is_write) };
+    let sql_str = unsafe { CStr::from_ptr(z_sql) }.to_str().unwrap_or("");
+
+    // SQLite passthrough (fts3_tokenizer, icu_load_collation, sqlite_master, etc.)
+    // must use real SQLite prepare. They configure SQLite's engine or query metadata.
+    let is_passthrough = crate::pg_config::is_sqlite_passthrough_str(sql_str);
+
+    // DDL must never hit shadow SQLite — always use dummy shadow + PG.
+    // Defense-in-depth: if pg_conn is null (low-stack skip_complex_processing),
+    // look up the connection directly so DDL still routes to PG.
+    let is_ddl = crate::pg_config::is_ddl_str(sql_str);
+    let effective_pg_conn = if is_ddl && pg_conn.is_null() {
+        crate::pg_client::rust_pg_find_connection(db)
+    } else {
+        pg_conn
+    };
+    let is_ddl_on_pg = is_ddl
+        && !effective_pg_conn.is_null()
+        && unsafe { (&*effective_pg_conn).is_pg_active } != 0;
+
+    let use_dummy_shadow = !is_passthrough
+        && (is_ddl_on_pg || unsafe { should_use_dummy_shadow(pg_conn, z_sql, is_read, is_write) });
 
     let mut pre_trans: SqlTranslation = unsafe { std::mem::zeroed() };
     let mut have_pre_trans = false;
@@ -349,7 +377,7 @@ pub(super) fn prepare_v2_internal_impl(
     unsafe {
         clear_connection_error_state(db);
         maybe_register_pg_stmt(
-            pg_conn,
+            effective_pg_conn,
             z_sql,
             bytes,
             pp_stmt,

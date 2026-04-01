@@ -1,9 +1,9 @@
 use std::sync::atomic::Ordering;
 
 use crate::db_interpose_conn_utils::{log_debug, log_error};
-use crate::log_debug_lazy;
 use crate::db_interpose_helpers::cstr_to_str_or_empty;
 use crate::ffi_types::PgStmt;
+use crate::log_debug_lazy;
 use crate::sync_utils::{rwlock_read, rwlock_write};
 
 use super::{
@@ -29,13 +29,14 @@ pub fn rust_stmt_unref(pg_stmt: *mut PgStmt) {
     // Atomically decrement, rejecting any transition that would go below 0.
     let result = unsafe {
         let stmt = &*pg_stmt;
-        stmt.ref_count.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-            if current <= 0 {
-                None // reject: already at 0 or below
-            } else {
-                Some(current - 1)
-            }
-        })
+        stmt.ref_count
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                if current <= 0 {
+                    None // reject: already at 0 or below
+                } else {
+                    Some(current - 1)
+                }
+            })
     };
 
     let old = match result {
@@ -67,7 +68,10 @@ pub fn rust_stmt_unref(pg_stmt: *mut PgStmt) {
     };
     log_debug_lazy!(
         "pg_stmt_unref: stmt={:p} old_ref={} new_ref={} sql={:.40}",
-        pg_stmt, old, new, sql
+        pg_stmt,
+        old,
+        new,
+        sql
     );
 
     if old == 1 {
@@ -83,10 +87,7 @@ pub fn rust_stmt_unref(pg_stmt: *mut PgStmt) {
             }
             return;
         }
-        log_debug_lazy!(
-            "pg_stmt_unref: last reference, freeing stmt={:p}",
-            pg_stmt
-        );
+        log_debug_lazy!("pg_stmt_unref: last reference, freeing stmt={:p}", pg_stmt);
         rust_stmt_free(pg_stmt);
     }
 }

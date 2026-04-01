@@ -535,7 +535,10 @@ unsafe fn load_sqlite_fallback() {
             libc::RTLD_LAZY | libc::RTLD_LOCAL,
         );
         if !handle.is_null() {
-            std::ptr::write(std::ptr::addr_of_mut!(db_interpose_common::sqlite_handle), handle);
+            std::ptr::write(
+                std::ptr::addr_of_mut!(db_interpose_common::sqlite_handle),
+                handle,
+            );
             let _ = libc::fprintf(
                 stderr_ptr(),
                 b"[SHIM_INIT] Loaded SQLite fallback from: %s\n\0".as_ptr() as *const c_char,

@@ -54,8 +54,7 @@ pub(super) unsafe fn get_exception_tracker_impl(
 
     let idx = guard.count as usize;
     if idx < MAX_EXCEPTION_TYPES {
-        let tracker =
-            &mut guard.types[idx] as *mut ExceptionTypeTracker;
+        let tracker = &mut guard.types[idx] as *mut ExceptionTypeTracker;
         let t = &mut *tracker;
         t.type_name = type_name;
         t.count = 1;

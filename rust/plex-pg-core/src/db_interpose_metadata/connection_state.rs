@@ -50,24 +50,23 @@ pub(super) fn last_insert_rowid_impl(db: *mut sqlite3) -> i64 {
         let global_rowid = crate::pg_client::rust_get_global_last_insert_rowid();
         log_debug_lazy!(
             "last_insert_rowid: CALLED db={:p} pg_conn=NULL (no exact match, global={})",
-            db, global_rowid
+            db,
+            global_rowid
         );
         return if global_rowid > 0 { global_rowid } else { 0 };
     }
 
     log_debug_lazy!(
         "last_insert_rowid: CALLED db={:p} pg_conn={:p} (exact match)",
-        db, pg_conn
+        db,
+        pg_conn
     );
 
     {
         let pg = unsafe { &*pg_conn };
         if pg.last_insert_rowid > 0 {
             let rowid = pg.last_insert_rowid;
-            log_debug_lazy!(
-                "last_insert_rowid: using cached connection rowid={}",
-                rowid
-            );
+            log_debug_lazy!("last_insert_rowid: using cached connection rowid={}", rowid);
             return rowid;
         }
     }
@@ -248,49 +247,49 @@ pub(super) fn get_table_impl(
     let pg_conn = crate::pg_client::rust_pg_find_connection(db);
     unsafe {
         if !pg_conn.is_null() {
-        let pg = &mut *pg_conn;
-        if pg.is_pg_active != 0
-            && !pg.conn.is_null()
-            && crate::pg_config::pg_config_is_read_operation(sql) != 0
-        {
-            let mut trans = sql_translate(sql);
-            if trans.success != 0 && !trans.sql.is_null() {
-                let mut conn_guard = PthreadMutexGuard::lock(&mut pg.mutex as *mut _);
-                let res = crate::libpq_helpers::rust_pq_exec(pg.conn, trans.sql);
-                if crate::libpq_helpers::rust_pq_result_status(res) == PGRES_TUPLES_OK {
-                    let mut result: *mut *mut c_char = std::ptr::null_mut();
-                    let mut nrows = 0;
-                    let mut ncols = 0;
-                    if crate::db_interpose_helpers::rust_get_table_from_pgresult(
-                        res as *const crate::db_interpose_helpers::PGresult,
-                        &mut result,
-                        &mut nrows,
-                        &mut ncols,
-                    ) != 0
-                    {
-                        if !paz_result.is_null() {
-                            *paz_result = result;
+            let pg = &mut *pg_conn;
+            if pg.is_pg_active != 0
+                && !pg.conn.is_null()
+                && crate::pg_config::pg_config_is_read_operation(sql) != 0
+            {
+                let mut trans = sql_translate(sql);
+                if trans.success != 0 && !trans.sql.is_null() {
+                    let mut conn_guard = PthreadMutexGuard::lock(&mut pg.mutex as *mut _);
+                    let res = crate::libpq_helpers::rust_pq_exec(pg.conn, trans.sql);
+                    if crate::libpq_helpers::rust_pq_result_status(res) == PGRES_TUPLES_OK {
+                        let mut result: *mut *mut c_char = std::ptr::null_mut();
+                        let mut nrows = 0;
+                        let mut ncols = 0;
+                        if crate::db_interpose_helpers::rust_get_table_from_pgresult(
+                            res as *const crate::db_interpose_helpers::PGresult,
+                            &mut result,
+                            &mut nrows,
+                            &mut ncols,
+                        ) != 0
+                        {
+                            if !paz_result.is_null() {
+                                *paz_result = result;
+                            }
+                            if !pn_row.is_null() {
+                                *pn_row = nrows;
+                            }
+                            if !pn_column.is_null() {
+                                *pn_column = ncols;
+                            }
+                            if !pz_err_msg.is_null() {
+                                *pz_err_msg = std::ptr::null_mut();
+                            }
+                            crate::libpq_helpers::rust_pq_clear(res);
+                            conn_guard.unlock();
+                            sql_translation_free(&mut trans as *mut SqlTranslation);
+                            return SQLITE_OK;
                         }
-                        if !pn_row.is_null() {
-                            *pn_row = nrows;
-                        }
-                        if !pn_column.is_null() {
-                            *pn_column = ncols;
-                        }
-                        if !pz_err_msg.is_null() {
-                            *pz_err_msg = std::ptr::null_mut();
-                        }
-                        crate::libpq_helpers::rust_pq_clear(res);
-                        conn_guard.unlock();
-                        sql_translation_free(&mut trans as *mut SqlTranslation);
-                        return SQLITE_OK;
                     }
+                    crate::libpq_helpers::rust_pq_clear(res);
+                    conn_guard.unlock();
                 }
-                crate::libpq_helpers::rust_pq_clear(res);
-                conn_guard.unlock();
+                sql_translation_free(&mut trans as *mut SqlTranslation);
             }
-            sql_translation_free(&mut trans as *mut SqlTranslation);
-        }
         } // if !pg_conn.is_null()
     }
 

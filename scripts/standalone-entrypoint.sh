@@ -157,6 +157,45 @@ sync_schema_migrations_to_sqlite() {
     fi
 }
 
+seed_shadow_tables_from_pg() {
+    local db_file="$1"
+    local db_name helper table_list normalized_list raw_table table
+    db_name=$(basename "$db_file")
+
+    if [[ "$db_name" != "com.plexapp.plugins.library.db" ]]; then
+        return 0
+    fi
+
+    if ! command -v psql >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
+        return 0
+    fi
+
+    helper="$SHIM_DIR/seed_shadow_table_from_pg.py"
+    if [[ ! -f "$helper" ]]; then
+        echo "WARNING: Shadow seed helper missing: $helper"
+        return 0
+    fi
+
+    table_list="${PLEX_PG_SHADOW_SYNC_TABLES:-preferences}"
+    normalized_list=$(printf '%s' "$table_list" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+    case "$normalized_list" in
+        ""|0|none|false|off)
+            echo "Shadow table seeding disabled"
+            return 0
+            ;;
+    esac
+
+    IFS=',' read -r -a shadow_tables <<< "$table_list"
+    for raw_table in "${shadow_tables[@]}"; do
+        table=$(printf '%s' "$raw_table" | tr -d '[:space:]')
+        [[ -z "$table" ]] && continue
+        echo "Seeding shadow SQLite $db_name table '$table' from PostgreSQL..."
+        if ! python3 "$helper" "$db_file" "$table" "$PG_SCHEMA"; then
+            echo "WARNING: Failed to seed shadow table '$table' from PostgreSQL"
+        fi
+    done
+}
+
 # Pre-initialize a single SQLite database
 init_single_sqlite_db() {
     local db_file="$1"
@@ -164,26 +203,24 @@ init_single_sqlite_db() {
     local db_name
     db_name=$(basename "$db_file")
 
-    if [ ! -f "$db_file" ]; then
-        echo "Pre-initializing SQLite database $db_name..."
-        if [ -f "$schema_file" ]; then
-            sqlite3 "$db_file" < "$schema_file" 2>&1 || true
-            echo "SQLite database $db_name initialized"
-        else
-            echo "WARNING: Schema file not found: $schema_file"
-        fi
-        chown plex:plex "$db_file" 2>/dev/null || true
-    else
-        # Database exists, ensure it has the min_version column
-        if ! sqlite3 "$db_file" "SELECT min_version FROM schema_migrations LIMIT 1" >/dev/null 2>&1; then
-            echo "Adding min_version column to $db_name..."
-            sqlite3 "$db_file" "ALTER TABLE schema_migrations ADD COLUMN min_version TEXT;" 2>/dev/null || true
-        fi
+    # Always rebuild: remove stale shadow DB to prevent schema drift.
+    if [ -f "$db_file" ]; then
+        echo "Rebuilding shadow SQLite $db_name (removing stale copy)..."
+        rm -f "$db_file" "${db_file}-shm" "${db_file}-wal"
     fi
 
-    # Always sync migration versions from PG to SQLite
-    # This prevents Plex from re-running migrations that are already in PostgreSQL
+    echo "Creating shadow SQLite $db_name from schema..."
+    if [ -f "$schema_file" ]; then
+        sqlite3 "$db_file" < "$schema_file" 2>&1 || true
+        echo "Shadow SQLite $db_name initialized"
+    else
+        echo "WARNING: Schema file not found: $schema_file"
+    fi
+    chown plex:plex "$db_file" 2>/dev/null || chown abc:abc "$db_file" 2>/dev/null || true
+
+    # Sync migration versions from PG to SQLite
     sync_schema_migrations_to_sqlite "$db_file"
+    seed_shadow_tables_from_pg "$db_file"
 }
 
 # Pre-initialize SQLite databases
@@ -208,6 +245,21 @@ init_plex_directories() {
     mkdir -p "$plex_dir/Metadata"
     mkdir -p "$plex_dir/Cache"
     mkdir -p "$plex_dir/Logs"
+    mkdir -p "$plex_dir/Crash Reports"
+
+    # Ensure Preferences.xml exists (Plex crashes with boost::filesystem error without it)
+    if [[ ! -f "$plex_dir/Preferences.xml" ]]; then
+        local machine_id
+        machine_id="$(cat /proc/sys/kernel/random/uuid 2>/dev/null | tr -d '-' || echo "plex-pg-$(date +%s)")"
+        cat > "$plex_dir/Preferences.xml" << PREFEOF
+<?xml version="1.0" encoding="utf-8"?>
+<Preferences OldestPreviousVersion="1.43.0.10492-121068a07" MachineIdentifier="${machine_id}" ProcessedMachineIdentifier="${machine_id}" AnonymousMachineIdentifier="${machine_id}" AcceptedEULA="1" PublishServerOnPlexOnline="0"/>
+PREFEOF
+        echo "Created initial Preferences.xml (MachineIdentifier=${machine_id})"
+    fi
+
+    # Set ownership (plex user for plexinc image, abc for linuxserver)
+    chown -R plex:plex "$plex_dir" 2>/dev/null || chown -R abc:abc "$plex_dir" 2>/dev/null || true
 
     echo "Plex directories initialized"
 }

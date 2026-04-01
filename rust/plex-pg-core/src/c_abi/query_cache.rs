@@ -61,11 +61,7 @@ pub extern "C" fn pg_query_cache_store(stmt: *mut PgStmt, result_ptr: *mut c_voi
 
     let s = unsafe { &*stmt };
     crate::db_interpose_helpers::rust_query_cache_store_from_pgresult(
-        key,
-        result,
-        num_rows,
-        num_cols,
-        s.pg_sql,
+        key, result, num_rows, num_cols, s.pg_sql,
     );
 }
 

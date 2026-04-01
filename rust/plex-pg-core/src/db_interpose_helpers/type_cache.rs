@@ -1,9 +1,9 @@
 use super::{
-    cstr_to_str, has_boundary, normalize_sqlite_decltype_impl, starts_with_icase,
-    SQLITE_BLOB_CONST, SQLITE_FLOAT_CONST, SQLITE_INTEGER_CONST, SQLITE_TEXT_CONST,
+    cstr_to_str, has_boundary, starts_with_icase, SQLITE_BLOB_CONST, SQLITE_FLOAT_CONST,
+    SQLITE_INTEGER_CONST, SQLITE_TEXT_CONST,
 };
 use std::collections::HashMap;
-use std::ffi::{CStr, CString};
+use std::ffi::CString;
 use std::os::raw::{c_char, c_int, c_uint};
 use std::sync::{LazyLock, RwLock};
 
@@ -21,21 +21,17 @@ pub fn rust_decltype_hash(ptr: *const c_char) -> u32 {
     hash
 }
 
-pub fn rust_decltype_cache_insert(
-    key: *const c_char,
-    decltype_val: *const c_char,
-) -> c_int {
+pub fn rust_decltype_cache_insert(key: *const c_char, decltype_val: *const c_char) -> c_int {
     let key_str = match cstr_to_str(key) {
         Some(s) if !s.is_empty() => s,
         _ => return 0,
     };
 
-    let normalized = normalize_sqlite_decltype_impl(cstr_to_str(decltype_val));
-    if normalized.is_null() {
-        return 0;
-    }
-    let normalized_bytes = unsafe { CStr::from_ptr(normalized).to_bytes() };
-    let normalized_owned = match CString::new(normalized_bytes) {
+    let decltype_str = match cstr_to_str(decltype_val) {
+        Some(s) if !s.is_empty() => s,
+        _ => return 0,
+    };
+    let normalized_owned = match CString::new(decltype_str) {
         Ok(s) => s,
         Err(_) => return 0,
     };
@@ -145,19 +141,64 @@ pub fn rust_decltype_cache_lookup_alias(alias: *const c_char) -> *const c_char {
         Some(s) if !s.is_empty() => s,
         _ => return std::ptr::null(),
     };
-    let Some((table, column)) = alias_str.split_once('_') else {
-        return std::ptr::null();
-    };
-    if table.is_empty() || column.is_empty() {
-        return std::ptr::null();
-    }
-    let key = format!("{}_{}", table, column);
     let cache = match DECLTYPE_CACHE.read() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
-    cache
-        .get(&key)
-        .map(|s| s.as_ptr())
+
+    if let Some(existing) = cache.get(alias_str) {
+        return existing.as_ptr();
+    }
+
+    let mut best_match: Option<(&String, &CString)> = None;
+    for (key, value) in cache.iter() {
+        if !alias_matches_cache_key(alias_str, key) {
+            continue;
+        }
+        let should_replace = match best_match {
+            Some((best_key, _)) => key.len() > best_key.len(),
+            None => true,
+        };
+        if should_replace {
+            best_match = Some((key, value));
+        }
+    }
+
+    best_match
+        .map(|(_, value)| value.as_ptr())
         .unwrap_or(std::ptr::null())
+}
+
+fn alias_matches_cache_key(alias: &str, cache_key: &str) -> bool {
+    if alias == cache_key {
+        return true;
+    }
+
+    for (idx, b) in cache_key.as_bytes().iter().enumerate() {
+        if *b != b'_' {
+            continue;
+        }
+
+        let table = &cache_key[..idx];
+        let column = &cache_key[idx + 1..];
+        if table.is_empty() || column.is_empty() {
+            continue;
+        }
+
+        if !alias.starts_with(table) {
+            continue;
+        }
+        if alias.len() <= table.len() || alias.as_bytes()[table.len()] != b'_' {
+            continue;
+        }
+
+        let mut suffix = String::with_capacity(column.len() + 1);
+        suffix.push('_');
+        suffix.push_str(column);
+        if alias.ends_with(&suffix) {
+            return true;
+        }
+    }
+
+    false
 }

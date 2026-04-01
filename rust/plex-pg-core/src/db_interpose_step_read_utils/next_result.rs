@@ -119,7 +119,8 @@ pub(super) fn streaming_next_impl(p_stmt: *mut sqlite3_stmt, stmt: *mut PgStmt) 
         cstr_to_str(stmt.pg_sql)
     ));
     crate::libpq_helpers::rust_pq_clear(row_res);
-    let mut drain = crate::libpq_helpers::rust_pq_get_result(unsafe { (*stmt.streaming_conn).conn });
+    let mut drain =
+        crate::libpq_helpers::rust_pq_get_result(unsafe { (*stmt.streaming_conn).conn });
     while !drain.is_null() {
         crate::libpq_helpers::rust_pq_clear(drain);
         drain = crate::libpq_helpers::rust_pq_get_result(unsafe { (*stmt.streaming_conn).conn });

@@ -46,8 +46,8 @@ use exception_support::{
 use exception_tracker::{
     get_exception_tracker_impl, reset_exception_tracking_impl, ExceptionTypeTracker,
 };
-pub(crate) use fake_values::{FAKE_VALUES, MAX_FAKE_VALUES, PG_FAKE_VALUE_MAGIC};
 pub use fake_values::{rust_pg_check_fake_value, PgFakeValue};
+pub(crate) use fake_values::{FAKE_VALUES, MAX_FAKE_VALUES, PG_FAKE_VALUE_MAGIC};
 pub use ffi_exports::{
     common_load_sqlite_symbols, delegate_prepare_to_worker, get_exception_tracker,
     is_blobs_db_path, is_library_db_path, pg_check_fake_value, pg_exception_dump_recent_phases,
@@ -78,7 +78,7 @@ pub use sqlite_symbols::{
 };
 use state::*;
 pub use state::{
-    CxaDemangleFn, CXA_DEMANGLE_FN, orig_sqlite3_bind_blob, orig_sqlite3_bind_blob64, orig_sqlite3_bind_double,
+    orig_sqlite3_bind_blob, orig_sqlite3_bind_blob64, orig_sqlite3_bind_double,
     orig_sqlite3_bind_int, orig_sqlite3_bind_int64, orig_sqlite3_bind_null,
     orig_sqlite3_bind_parameter_count, orig_sqlite3_bind_parameter_index,
     orig_sqlite3_bind_parameter_name, orig_sqlite3_bind_text, orig_sqlite3_bind_text64,
@@ -97,9 +97,14 @@ pub use state::{
     orig_sqlite3_stmt_busy, orig_sqlite3_stmt_readonly, orig_sqlite3_stmt_status,
     orig_sqlite3_value_blob, orig_sqlite3_value_bytes, orig_sqlite3_value_double,
     orig_sqlite3_value_int, orig_sqlite3_value_int64, orig_sqlite3_value_text,
-    orig_sqlite3_value_type, SHIM_INITIALIZED, SHIM_PASSTHROUGH_ONLY, shim_sqlite3_errcode,
-    shim_sqlite3_errmsg, shim_sqlite3_prepare_v2, sqlite_handle,
+    orig_sqlite3_value_type, shim_sqlite3_errcode, shim_sqlite3_errmsg, shim_sqlite3_prepare_v2,
+    sqlite_handle, CxaDemangleFn, CXA_DEMANGLE_FN, SHIM_INITIALIZED, SHIM_PASSTHROUGH_ONLY,
 };
+pub(crate) use state::{
+    CRASH_COLUMN_MAX_LEN as CRASH_LAST_COLUMN_MAX_LEN, CRASH_LAST_COLUMN, CRASH_LAST_COLUMN_LEN,
+    CRASH_LAST_COLUMN_SEQ,
+};
+pub(crate) use state::{GLOBAL_COLUMN_TYPE_CALLS, GLOBAL_VALUE_TYPE_CALLS};
 pub(crate) use tls_support::{
     stderr_ptr, tls_column_type_calls_ptr, tls_in_interpose_call_ptr, tls_in_resolve_tables_ptr,
     tls_last_query_ptr, tls_prepare_v2_depth_ptr, tls_value_type_calls_ptr,
@@ -107,11 +112,6 @@ pub(crate) use tls_support::{
 #[cfg(target_os = "linux")]
 pub(crate) use worker_runtime::fast_mark_fork_child_passthrough;
 pub use worker_runtime::{rust_delegate_prepare_to_worker, rust_worker_cleanup, rust_worker_init};
-pub(crate) use state::{GLOBAL_COLUMN_TYPE_CALLS, GLOBAL_VALUE_TYPE_CALLS};
-pub(crate) use state::{
-    CRASH_LAST_COLUMN, CRASH_LAST_COLUMN_LEN, CRASH_LAST_COLUMN_SEQ,
-    CRASH_COLUMN_MAX_LEN as CRASH_LAST_COLUMN_MAX_LEN,
-};
 
 #[cfg(test)]
 mod tests;

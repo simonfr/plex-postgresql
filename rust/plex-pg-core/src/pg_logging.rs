@@ -145,8 +145,9 @@ pub fn parse_max_size(s: &str) -> u64 {
 /// "DEBUG" → 2, "INFO" → 1, "ERROR" → 0, unrecognised/empty → 0.
 pub fn parse_log_level(s: &str) -> i32 {
     match s.trim().to_ascii_uppercase().as_str() {
-        "DEBUG" => LEVEL_DEBUG,
-        "INFO" => LEVEL_INFO,
+        "DEBUG" | "2" => LEVEL_DEBUG,
+        "INFO" | "1" => LEVEL_INFO,
+        "ERROR" | "0" => LEVEL_ERROR,
         _ => LEVEL_ERROR,
     }
 }
@@ -498,9 +499,7 @@ pub fn rust_logging_fallback(
     error_msg: *const c_char,
     context: *const c_char,
 ) {
-    let c_to_str = |ptr: *const c_char| -> &str {
-        cstr_to_option(ptr).unwrap_or("<null>")
-    };
+    let c_to_str = |ptr: *const c_char| -> &str { cstr_to_option(ptr).unwrap_or("<null>") };
 
     let original = c_to_str(original_sql);
     let translated = c_to_str(translated_sql);
@@ -516,8 +515,7 @@ pub fn rust_logging_fallback(
     // Write to the dedicated fallback log file and main log.
     // Use try_lock to avoid deadlock when called from mutex-holding contexts.
     if let Ok(state) = logger().try_lock() {
-        let fallback_path =
-            fallback_log_path_for(&state.path, state.is_stdout, state.is_stderr);
+        let fallback_path = fallback_log_path_for(&state.path, state.is_stdout, state.is_stderr);
         drop(state);
 
         if let Ok(mut f) = OpenOptions::new()
@@ -698,6 +696,13 @@ mod tests {
     #[test]
     fn parse_log_level_unknown_returns_error() {
         assert_eq!(parse_log_level("VERBOSE"), LEVEL_ERROR);
+    }
+
+    #[test]
+    fn parse_log_level_numeric() {
+        assert_eq!(parse_log_level("0"), LEVEL_ERROR);
+        assert_eq!(parse_log_level("1"), LEVEL_INFO);
+        assert_eq!(parse_log_level("2"), LEVEL_DEBUG);
     }
 
     // ── is_known_limitation_str ─────────────────────────────────────────────

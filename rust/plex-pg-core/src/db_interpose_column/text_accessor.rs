@@ -170,7 +170,10 @@ unsafe fn write_live_text_output(
     });
 
     if transform_rc == -2 {
-        return ptr::null();
+        // PQgetvalue returned NULL for a non-NULL cell — likely a stale PGresult
+        // race condition. Match the C shim behavior: return empty string instead
+        // of NULL to prevent std::string(nullptr) → basic_string exception.
+        return b"\0".as_ptr();
     }
     out_ptr
 }
@@ -187,7 +190,9 @@ pub(super) fn column_text_impl(p_stmt: *mut sqlite3_stmt, idx: c_int) -> *const 
     } else {
         ptr::null()
     };
-    let dbg_db = get_orig_sqlite3_db_handle().map(|f| unsafe { f(p_stmt) }).unwrap_or(ptr::null_mut());
+    let dbg_db = get_orig_sqlite3_db_handle()
+        .map(|f| unsafe { f(p_stmt) })
+        .unwrap_or(ptr::null_mut());
     unsafe {
         pg_exception_note_phase(
             b"column_text\0".as_ptr() as *const c_char,
@@ -200,7 +205,9 @@ pub(super) fn column_text_impl(p_stmt: *mut sqlite3_stmt, idx: c_int) -> *const 
     validate_type_consistency(p_stmt, idx, "column_text");
 
     if dbg_stmt.is_null() || unsafe { (&*dbg_stmt).is_pg == 0 } {
-        return get_orig_sqlite3_column_text().map(|f| unsafe { f(p_stmt, idx) }).unwrap_or(ptr::null());
+        return get_orig_sqlite3_column_text()
+            .map(|f| unsafe { f(p_stmt, idx) })
+            .unwrap_or(ptr::null());
     }
 
     let pg_stmt = unsafe { &mut *dbg_stmt };
@@ -213,7 +220,10 @@ pub(super) fn column_text_impl(p_stmt: *mut sqlite3_stmt, idx: c_int) -> *const 
         if !pg_stmt.cached_result.is_null() {
             match unsafe { load_cached_text_state(pg_stmt, idx) } {
                 Some(state) => unsafe { write_cached_text_output(pg_stmt, idx, &state) },
-                None => ptr::null(),
+                // SQL NULL: return empty string instead of NULL to prevent
+                // Plex's std::string(nullptr) → basic_string crash.
+                // Real SQLite returns NULL here, but Plex doesn't always check.
+                None => empty_text_buffer(),
             }
         } else if pg_stmt.result.is_null() {
             empty_text_buffer()
@@ -226,7 +236,7 @@ pub(super) fn column_text_impl(p_stmt: *mut sqlite3_stmt, idx: c_int) -> *const 
             } else {
                 match unsafe { load_live_text_state(pg_stmt, idx) } {
                     Some(state) => unsafe { write_live_text_output(pg_stmt, idx, &state) },
-                    None => ptr::null(),
+                    None => empty_text_buffer(),
                 }
             }
         }

@@ -65,9 +65,7 @@ pub extern "C" fn rust_step_write_log_debug_context(
             );
         }
 
-        if !stmt.sql.is_null()
-            && contains_bytes(cstr_bytes(stmt.sql), b"play_queue_generators")
-        {
+        if !stmt.sql.is_null() && contains_bytes(cstr_bytes(stmt.sql), b"play_queue_generators") {
             let p0 = if stmt.param_count > 0 {
                 param_at(param_values, 0)
             } else {
@@ -99,10 +97,7 @@ pub extern "C" fn rust_step_write_log_debug_context(
                 cstr_to_string_or(p2, "NULL"),
                 cstr_to_string_or(p3, "NULL")
             );
-            log_debug_lazy!(
-                "  SQL: {}",
-                cstr_prefix(stmt.pg_sql, 300, "NULL")
-            );
+            log_debug_lazy!("  SQL: {}", cstr_prefix(stmt.pg_sql, 300, "NULL"));
         }
     }
 }

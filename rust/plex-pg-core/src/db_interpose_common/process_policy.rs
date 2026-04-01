@@ -34,7 +34,10 @@ pub fn linux_apply_process_role_policy(reason: &str, process_name: &str) -> c_in
     let name_c = std::ffi::CString::new(linux_trim_process_name(process_name)).ok();
     let reason_c = std::ffi::CString::new(reason).ok();
     unsafe {
-        if SHIM_PASSTHROUGH_ONLY.compare_exchange(0, 1, Ordering::Release, Ordering::Relaxed).is_ok() {
+        if SHIM_PASSTHROUGH_ONLY
+            .compare_exchange(0, 1, Ordering::Release, Ordering::Relaxed)
+            .is_ok()
+        {
             libc::fprintf(
                 stderr_ptr(),
                 b"[SHIM_INIT] Linux child role '%s' set to passthrough-only via %s (PID %d)\n\0"

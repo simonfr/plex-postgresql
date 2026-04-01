@@ -62,9 +62,11 @@ pub(super) fn is_aggregate_alias(col: &str) -> bool {
     if col.is_empty() {
         return false;
     }
-    let lower = col.to_ascii_lowercase();
+    let lower = col.trim().to_ascii_lowercase();
     matches!(lower.as_str(), "count" | "sum" | "max" | "min" | "avg")
-        || contains_ascii_icase_str(col, "count(")
+        || ["count(", "sum(", "max(", "min(", "avg("]
+            .iter()
+            .any(|prefix| lower.starts_with(prefix))
 }
 
 pub(super) fn pg_sql_has_timestamp_hint(pg_sql: &str) -> bool {

@@ -42,7 +42,8 @@ pub(super) unsafe fn maybe_delegate_prepare_to_worker(
     {
         log_debug_lazy!(
             "WORKER DELEGATION: stack_remaining={} bytes < {}, delegating to 8MB worker",
-            stack_remaining, WORKER_DELEGATION_THRESHOLD
+            stack_remaining,
+            WORKER_DELEGATION_THRESHOLD
         );
         depth_guard.decrement_now();
         return Some(delegate_prepare_to_worker(
@@ -79,7 +80,8 @@ pub(super) unsafe fn maybe_handle_ondeck_low_stack(
     let pg_conn = crate::pg_client::rust_pg_find_connection(db);
     if !pg_conn.is_null() {
         let pc = &*pg_conn;
-        if pc.is_pg_active != 0 && !pc.conn.is_null()
+        if pc.is_pg_active != 0
+            && !pc.conn.is_null()
             && crate::db_interpose_helpers::rust_is_library_db_path(pc.db_path.as_ptr()) != 0
         {
             let rc = prepare_shadow_stmt(db, c"SELECT 1".as_ptr(), pp_stmt, pz_tail);
@@ -115,6 +117,7 @@ pub(super) unsafe fn maybe_handle_ondeck_low_stack(
                         );
                     }
                     sql_translation_free(&mut trans as *mut SqlTranslation);
+                    pg_register_stmt(*pp_stmt, pg_stmt);
                 }
             }
             return Some(rc);
@@ -146,19 +149,29 @@ pub(super) unsafe fn maybe_handle_low_stack_prepare_path(
         return None;
     }
 
+    // SQLite passthrough (fts3_tokenizer, icu_load_collation, sqlite_master, etc.)
+    // must go to real SQLite even on low stack — never route to PG, never reject.
+    if !z_sql.is_null() {
+        let sql_str = CStr::from_ptr(z_sql).to_str().unwrap_or("");
+        if crate::pg_config::is_sqlite_passthrough_str(sql_str) {
+            return None; // fall through to normal prepare_real_sqlite_stmt
+        }
+    }
+
     let pg_conn_check = crate::pg_client::rust_pg_find_connection(db);
-    let is_pg_read = if pg_conn_check.is_null() {
+    let is_pg_routable = if pg_conn_check.is_null() {
         false
     } else {
         let pcc = &*pg_conn_check;
         pcc.is_pg_active != 0
             && !pcc.conn.is_null()
             && !z_sql.is_null()
-            && crate::pg_config::pg_config_is_read_operation(z_sql) != 0
             && crate::db_interpose_helpers::rust_is_library_db_path(pcc.db_path.as_ptr()) != 0
+            && (crate::pg_config::pg_config_is_read_operation(z_sql) != 0
+                || crate::pg_config::pg_config_is_write_operation(z_sql) != 0)
     };
 
-    if is_pg_read {
+    if is_pg_routable {
         log_info_lazy!(
             "STACK LOW ({} bytes) but using PG path for: {}",
             stack_remaining,
@@ -171,7 +184,8 @@ pub(super) unsafe fn maybe_handle_low_stack_prepare_path(
             let pg_stmt = pg_stmt_create(pg_conn_check, z_sql, *pp_stmt);
             if !pg_stmt.is_null() {
                 let s = &mut *pg_stmt;
-                s.is_pg = 2;
+                let is_write = crate::pg_config::pg_config_is_write_operation(z_sql) != 0;
+                s.is_pg = if is_write { 1 } else { 2 };
 
                 let mut trans = sql_translate(z_sql);
                 if trans.success != 0 && !trans.sql.is_null() {

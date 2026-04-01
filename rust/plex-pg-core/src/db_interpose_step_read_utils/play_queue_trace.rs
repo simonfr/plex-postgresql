@@ -77,15 +77,13 @@ pub(crate) unsafe fn trace_play_queue_params(
         };
         parts.push(format!("${}={}", i + 1, val_str));
     }
-    log_info_lazy!(
-        "PLAY_QUEUE TRACE {} params: {}",
-        phase,
-        parts.join(", ")
-    );
+    log_info_lazy!("PLAY_QUEUE TRACE {} params: {}", phase, parts.join(", "));
     if count > max_params {
         log_info_lazy!(
             "PLAY_QUEUE TRACE {} params: truncated {} of {}",
-            phase, max_params, count
+            phase,
+            max_params,
+            count
         );
     }
 }
@@ -105,7 +103,9 @@ pub(crate) unsafe fn trace_play_queue_result(
     let max_len = 256usize;
     log_info_lazy!(
         "PLAY_QUEUE TRACE {} result: rows={} cols={}",
-        phase, num_rows, num_cols
+        phase,
+        num_rows,
+        num_cols
     );
     let rows = if num_rows > 0 { num_rows } else { 0 };
     let cols = if num_cols > 0 { num_cols } else { 0 };
@@ -142,23 +142,22 @@ pub(crate) unsafe fn trace_play_queue_result(
             };
             parts.push(format!("{}={}", name, val));
         }
-        log_info_lazy!(
-            "PLAY_QUEUE TRACE {} row {}: {}",
-            phase,
-            r,
-            parts.join(", ")
-        );
+        log_info_lazy!("PLAY_QUEUE TRACE {} row {}: {}", phase, r, parts.join(", "));
     }
     if rows > row_cap {
         log_info_lazy!(
             "PLAY_QUEUE TRACE {} result: truncated rows {} of {}",
-            phase, row_cap, rows
+            phase,
+            row_cap,
+            rows
         );
     }
     if cols > col_cap {
         log_info_lazy!(
             "PLAY_QUEUE TRACE {} result: truncated cols {} of {}",
-            phase, col_cap, cols
+            phase,
+            col_cap,
+            cols
         );
     }
 }

@@ -23,16 +23,13 @@ mod type_accessor;
 mod value_accessor;
 
 use crate::db_interpose_common::{
-    tls_column_type_calls_ptr,
-    tls_in_resolve_tables_ptr, tls_last_query_ptr, PgFakeValue, MAX_FAKE_VALUES,
-    PG_FAKE_VALUE_MAGIC, GLOBAL_COLUMN_TYPE_CALLS,
-    get_orig_sqlite3_column_count, get_orig_sqlite3_column_type,
-    get_orig_sqlite3_column_int, get_orig_sqlite3_column_int64,
-    get_orig_sqlite3_column_double, get_orig_sqlite3_column_text,
-    get_orig_sqlite3_column_blob, get_orig_sqlite3_column_bytes,
-    get_orig_sqlite3_column_name, get_orig_sqlite3_column_decltype,
-    get_orig_sqlite3_column_value, get_orig_sqlite3_data_count,
-    get_orig_sqlite3_db_handle,
+    get_orig_sqlite3_column_blob, get_orig_sqlite3_column_bytes, get_orig_sqlite3_column_count,
+    get_orig_sqlite3_column_decltype, get_orig_sqlite3_column_double, get_orig_sqlite3_column_int,
+    get_orig_sqlite3_column_int64, get_orig_sqlite3_column_name, get_orig_sqlite3_column_text,
+    get_orig_sqlite3_column_type, get_orig_sqlite3_column_value, get_orig_sqlite3_data_count,
+    get_orig_sqlite3_db_handle, tls_column_type_calls_ptr, tls_in_resolve_tables_ptr,
+    tls_last_query_ptr, PgFakeValue, GLOBAL_COLUMN_TYPE_CALLS, MAX_FAKE_VALUES,
+    PG_FAKE_VALUE_MAGIC,
 };
 use crate::db_interpose_conn_utils::{
     cstr_prefix, cstr_to_string_or, log_debug, log_error, log_info, PthreadMutexGuard,
@@ -87,10 +84,7 @@ const PMT_COLUMN_CACHED_BLOB_ALLOC: c_int = 3;
 const PMT_COLUMN_DECODED_BLOB_ALLOC: c_int = 4;
 
 static DECLTYPE_TEXT: &[u8] = b"TEXT\0";
-// SOCI's describe_column strips non-alphanumeric chars and looks up in its
-// type map. "dt_integer(8)" → "dt_integer" is NOT recognized, causing a
-// step+probe fallback → bad_cast. Use "BIGINT" which maps to db_int64.
-static DECLTYPE_DT_INTEGER_8: &[u8] = b"BIGINT\0";
+static DECLTYPE_DT_INTEGER_8: &[u8] = b"dt_integer(8)\0";
 static _DECLTYPE_INTEGER: &[u8] = b"INTEGER\0";
 static _DECLTYPE_BIGINT: &[u8] = b"BIGINT\0";
 static _NEEDLE_TYPE: &[u8] = b"type\0";
@@ -220,13 +214,18 @@ pub extern "C" fn rust_my_sqlite3_data_count(p_stmt: *mut sqlite3_stmt) -> c_int
 #[cfg(test)]
 mod tests {
     use super::{
-        next_text_buffer_index, set_metadata_result_state, COLUMN_TEXT_BUF_IDX, NUM_TEXT_BUFFERS,
+        next_text_buffer_index, rust_my_sqlite3_column_count, rust_my_sqlite3_column_decltype,
+        set_metadata_result_state, COLUMN_TEXT_BUF_IDX, NUM_TEXT_BUFFERS,
     };
-    use crate::ffi_types::{PgConnection, PgStmt};
+    use crate::db_interpose_common::{orig_sqlite3_column_count, orig_sqlite3_column_decltype};
+    use crate::ffi_types::{sqlite3_stmt, PgConnection, PgStmt};
     use crate::libpq_helpers::PGresult as PgResultLibpq;
-    use crate::pg_statement::{rust_stmt_create, rust_stmt_free};
+    use crate::pg_statement::{
+        rust_stmt_create, rust_stmt_free, rust_stmt_register, rust_stmt_unregister,
+    };
     use std::collections::HashSet;
-    use std::ffi::CString;
+    use std::ffi::{CStr, CString};
+    use std::os::raw::{c_char, c_int};
 
     fn reset_text_buffer_idx() {
         COLUMN_TEXT_BUF_IDX.with(|idx| idx.set(0));
@@ -287,6 +286,75 @@ mod tests {
         s.result = std::ptr::null_mut();
         s.result_conn = std::ptr::null_mut();
 
+        rust_stmt_free(stmt);
+    }
+
+    extern "C" fn shadow_column_count_stub(_: *mut sqlite3_stmt) -> c_int {
+        1
+    }
+
+    extern "C" fn shadow_column_decltype_stub(_: *mut sqlite3_stmt, _: c_int) -> *const c_char {
+        c"INTEGER".as_ptr()
+    }
+
+    #[test]
+    fn pg_column_count_without_metadata_does_not_fall_back_to_shadow_count() {
+        let stmt = make_stmt();
+        let shadow_stmt = 0x10000usize as *mut sqlite3_stmt;
+        let pg_sql = CString::new(
+            "SELECT plugins.*, plugin_prefixes.* FROM plugins \
+             JOIN plugin_prefixes ON plugin_prefixes.plugin_id = plugins.id \
+             WHERE plugin_prefixes.prefix = $1",
+        )
+        .unwrap();
+
+        let old = unsafe { orig_sqlite3_column_count };
+        unsafe {
+            orig_sqlite3_column_count = Some(shadow_column_count_stub);
+            let s = &mut *stmt;
+            s.is_pg = 2;
+            s.pg_sql = libc::strdup(pg_sql.as_ptr());
+        }
+        rust_stmt_register(shadow_stmt as usize, stmt as usize);
+
+        let count = rust_my_sqlite3_column_count(shadow_stmt);
+        assert_eq!(count, 0);
+
+        rust_stmt_unregister(shadow_stmt as usize);
+        unsafe {
+            orig_sqlite3_column_count = old;
+        }
+        rust_stmt_free(stmt);
+    }
+
+    #[test]
+    fn pg_column_decltype_without_metadata_does_not_use_shadow_decltype() {
+        let stmt = make_stmt();
+        let shadow_stmt = 0x20000usize as *mut sqlite3_stmt;
+        let pg_sql = CString::new(
+            "SELECT plugins.*, plugin_prefixes.* FROM plugins \
+             JOIN plugin_prefixes ON plugin_prefixes.plugin_id = plugins.id \
+             WHERE plugin_prefixes.prefix = $1",
+        )
+        .unwrap();
+
+        let old = unsafe { orig_sqlite3_column_decltype };
+        unsafe {
+            orig_sqlite3_column_decltype = Some(shadow_column_decltype_stub);
+            let s = &mut *stmt;
+            s.is_pg = 2;
+            s.pg_sql = libc::strdup(pg_sql.as_ptr());
+        }
+        rust_stmt_register(shadow_stmt as usize, stmt as usize);
+
+        let decl = rust_my_sqlite3_column_decltype(shadow_stmt, 0);
+        let decl = unsafe { CStr::from_ptr(decl) }.to_str().unwrap();
+        assert_eq!(decl, "TEXT");
+
+        rust_stmt_unregister(shadow_stmt as usize);
+        unsafe {
+            orig_sqlite3_column_decltype = old;
+        }
         rust_stmt_free(stmt);
     }
 }

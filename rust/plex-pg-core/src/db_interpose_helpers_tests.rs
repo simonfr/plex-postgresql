@@ -512,61 +512,85 @@ fn bind_helpers_bytes_to_pg_hex_png_header() {
 }
 
 #[test]
-fn type_normalization_dt_integer_variants() {
-    assert_eq!(normalize_decltype(Some("DT_INTEGER(8)")), "dt_integer(8)");
-    assert_eq!(normalize_decltype(Some("DT_INTEGER(4)")), "INTEGER");
-    assert_eq!(normalize_decltype(Some("DT_INTEGER(2)")), "INTEGER");
-    assert_eq!(normalize_decltype(Some("DT_INTEGER")), "INTEGER");
+fn decltype_preserves_original_sqlite_strings() {
+    assert_eq!(normalize_decltype(Some("DT_INTEGER(8)")), "DT_INTEGER(8)");
     assert_eq!(normalize_decltype(Some("dt_integer(8)")), "dt_integer(8)");
-}
-
-#[test]
-fn type_normalization_integer_variants() {
+    assert_eq!(normalize_decltype(Some("varchar(255)")), "varchar(255)");
+    assert_eq!(normalize_decltype(Some("boolean")), "boolean");
     assert_eq!(normalize_decltype(Some("INTEGER")), "INTEGER");
-    assert_eq!(normalize_decltype(Some("integer")), "INTEGER");
-    assert_eq!(normalize_decltype(Some("INTEGER(8)")), "dt_integer(8)");
-    assert_eq!(normalize_decltype(Some("INTEGER(4)")), "INTEGER");
 }
 
 #[test]
-fn type_normalization_int64_aliases() {
-    assert_eq!(normalize_decltype(Some("BIGINT")), "dt_integer(8)");
-    assert_eq!(normalize_decltype(Some("bigint")), "dt_integer(8)");
-    assert_eq!(normalize_decltype(Some("BIGINT(8)")), "dt_integer(8)");
-    assert_eq!(normalize_decltype(Some("INT8")), "dt_integer(8)");
-    assert_eq!(normalize_decltype(Some("INT64")), "dt_integer(8)");
-    assert_eq!(normalize_decltype(Some("LONG")), "dt_integer(8)");
+fn decltype_preserve_empty_returns_null() {
+    assert_eq!(normalize_decltype(Some("")), "");
+    assert_eq!(normalize_decltype(None), "");
 }
 
 #[test]
-fn type_normalization_boolean_timestamp_float() {
-    assert_eq!(normalize_decltype(Some("boolean")), "INTEGER");
-    assert_eq!(normalize_decltype(Some("TIMESTAMP")), "INTEGER");
-    assert_eq!(normalize_decltype(Some("FLOAT")), "REAL");
-    assert_eq!(normalize_decltype(Some("DOUBLE")), "REAL");
+fn pg_udt_fallback_mapping_uses_sqlite_like_decltypes() {
+    let cases = [
+        ("int4", "integer"),
+        ("int8", "dt_integer(8)"),
+        ("timestamp", "dt_integer(8)"),
+        ("timestamptz", "dt_integer(8)"),
+        ("bool", "boolean"),
+        ("varchar", "varchar(255)"),
+        ("text", "varchar(255)"),
+        ("float8", "float"),
+        ("bytea", "blob"),
+    ];
+
+    for (input, expected) in cases {
+        let ptr = pg_udt_to_sqlite_decltype_impl(Some(input));
+        let actual = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap();
+        assert_eq!(actual, expected);
+    }
 }
 
 #[test]
-fn type_normalization_string_variants() {
-    assert_eq!(normalize_decltype(Some("VARCHAR")), "TEXT");
-    assert_eq!(normalize_decltype(Some("VARCHAR(255)")), "TEXT");
-    assert_eq!(normalize_decltype(Some("STRING")), "TEXT");
-    assert_eq!(normalize_decltype(Some("CHAR")), "TEXT");
+fn decltype_cache_preserves_exact_decltype_string() {
+    let key = c("accounts_auto_select_subtitle");
+    let decl = c("varchar(255)");
+
+    assert_eq!(rust_decltype_cache_insert(key.as_ptr(), decl.as_ptr()), 1);
+    let cached = rust_decltype_cache_lookup(key.as_ptr());
+    let cached = unsafe { CStr::from_ptr(cached) }.to_str().unwrap();
+    assert_eq!(cached, "varchar(255)");
 }
 
 #[test]
-fn type_normalization_standard_sqlite_types() {
-    assert_eq!(normalize_decltype(Some("REAL")), "REAL");
-    assert_eq!(normalize_decltype(Some("TEXT")), "TEXT");
-    assert_eq!(normalize_decltype(Some("BLOB")), "BLOB");
-    assert_eq!(normalize_decltype(Some("NUMERIC")), "NUMERIC");
+fn decltype_cache_alias_lookup_accepts_full_table_column_key() {
+    let key = c("metadata_item_settings_last_viewed_at");
+    let decl = c("dt_integer(8)");
+
+    assert_eq!(rust_decltype_cache_insert(key.as_ptr(), decl.as_ptr()), 1);
+    let cached = rust_decltype_cache_lookup_alias(key.as_ptr());
+    let cached = unsafe { CStr::from_ptr(cached) }.to_str().unwrap();
+    assert_eq!(cached, "dt_integer(8)");
 }
 
 #[test]
-fn type_normalization_unknown_and_empty_fallback_to_text() {
-    assert_eq!(normalize_decltype(Some("WAT")), "TEXT");
-    assert_eq!(normalize_decltype(Some("")), "TEXT");
-    assert_eq!(normalize_decltype(None), "TEXT");
+fn decltype_cache_alias_lookup_resolves_self_join_parent_alias() {
+    let key = c("metadata_items_added_at");
+    let decl = c("dt_integer(8)");
+    let alias = c("metadata_items_parents_added_at");
+
+    assert_eq!(rust_decltype_cache_insert(key.as_ptr(), decl.as_ptr()), 1);
+    let cached = rust_decltype_cache_lookup_alias(alias.as_ptr());
+    let cached = unsafe { CStr::from_ptr(cached) }.to_str().unwrap();
+    assert_eq!(cached, "dt_integer(8)");
+}
+
+#[test]
+fn decltype_cache_alias_lookup_resolves_self_join_text_alias() {
+    let key = c("metadata_items_user_square_art_url");
+    let decl = c("varchar(255)");
+    let alias = c("metadata_items_parents_user_square_art_url");
+
+    assert_eq!(rust_decltype_cache_insert(key.as_ptr(), decl.as_ptr()), 1);
+    let cached = rust_decltype_cache_lookup_alias(alias.as_ptr());
+    let cached = unsafe { CStr::from_ptr(cached) }.to_str().unwrap();
+    assert_eq!(cached, "varchar(255)");
 }
 
 #[test]
@@ -682,6 +706,29 @@ fn column_text_reformat_aggregate_int8() {
         .to_string_lossy()
         .into_owned();
     assert_eq!(out_s, "123");
+}
+
+#[test]
+fn column_text_reformat_aggregate_alias_expression_int8() {
+    let col = c("max(year)");
+    let sql = c("select max(year) from t");
+    let src = c("2026");
+    let mut out = [0 as c_char; 32];
+
+    let rc = rust_column_text_reformat_aggregate(
+        col.as_ptr(),
+        20,
+        sql.as_ptr(),
+        src.as_ptr(),
+        out.as_mut_ptr(),
+        out.len(),
+    );
+
+    assert_eq!(rc, 1);
+    let out_s = unsafe { CStr::from_ptr(out.as_ptr()) }
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(out_s, "2026");
 }
 
 #[test]

@@ -43,10 +43,7 @@ pub(super) unsafe fn prepare_dummy_shadow_stmt(
             let out_bytes = CStr::from_ptr(pre_trans.sql).to_bytes();
             out_q_count = out_bytes.iter().filter(|b| **b == b'?').count();
         }
-        log_info_lazy!(
-            "MIS_TRANSLATE: orig={}",
-            cstr_prefix(z_sql, 1000, "NULL")
-        );
+        log_info_lazy!("MIS_TRANSLATE: orig={}", cstr_prefix(z_sql, 1000, "NULL"));
         log_info_lazy!(
             "MIS_TRANSLATE: rc={} params={} q_orig={} q_out={} out={}",
             pre_trans.success,
@@ -179,10 +176,7 @@ pub(super) unsafe fn prepare_real_sqlite_stmt(
                 if let Ok(cs) = CString::new(out) {
                     sql_for_sqlite = cs.as_ptr();
                     cleaned_sql = Some(cs);
-                    log_info_lazy!(
-                        "FTS query ORIGINAL: {}",
-                        cstr_prefix(z_sql, 500, "NULL")
-                    );
+                    log_info_lazy!("FTS query ORIGINAL: {}", cstr_prefix(z_sql, 500, "NULL"));
                     log_info_lazy!(
                         "FTS query SIMPLIFIED: {}",
                         cstr_prefix(sql_for_sqlite, 500, "NULL")

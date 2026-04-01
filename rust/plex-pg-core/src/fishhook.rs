@@ -261,10 +261,7 @@ unsafe fn prepend_rebindings(
 
 /// Atomically prepend a new entry to the global `REBINDINGS_HEAD` list using
 /// a CAS loop.  Returns 0 on success, -1 on allocation failure.
-unsafe fn prepend_rebindings_atomic(
-    rebindings: *const Rebinding,
-    nel: usize,
-) -> c_int {
+unsafe fn prepend_rebindings_atomic(rebindings: *const Rebinding, nel: usize) -> c_int {
     let entry = libc::malloc(size_of::<RebindingsEntry>()) as *mut RebindingsEntry;
     if entry.is_null() {
         return -1;

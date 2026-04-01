@@ -104,6 +104,35 @@ if [ -n "${SANITIZE_FLAGS}" ]; then
     done
 fi
 
+echo "=== Building subreaper wrapper ==="
+cat > subreaper.c << 'SUBREAPER_EOF'
+#include <sys/prctl.h>
+#include <sys/wait.h>
+#include <signal.h>
+#include <unistd.h>
+#include <stdio.h>
+#include <errno.h>
+static volatile pid_t child_pid = 0;
+void fwd(int s){if(child_pid>0)kill(child_pid,s);}
+int main(int c,char**v){
+  if(c<2){fprintf(stderr,"usage: subreaper cmd [args...]\n");return 1;}
+  prctl(PR_SET_CHILD_SUBREAPER,1,0,0,0);
+  signal(SIGTERM,fwd);signal(SIGINT,fwd);signal(SIGHUP,fwd);
+  child_pid=fork();
+  if(child_pid==0){execvp(v[1],v+1);perror("exec");_exit(127);}
+  if(child_pid<0){perror("fork");return 1;}
+  int st;pid_t p;
+  while((p=wait(&st))>0||errno==EINTR){
+    if(p==child_pid){
+      if(WIFEXITED(st))return WEXITSTATUS(st);
+      return 128+WTERMSIG(st);
+    }
+  }
+  return 0;}
+SUBREAPER_EOF
+gcc -static -O2 -o subreaper subreaper.c
+cp subreaper /libs/
+
 if [ "$WITH_NOOP" = "1" ]; then
     echo "=== Building static noop binary for CrashUploader replacement ==="
     printf '#include <unistd.h>\nint main(void){_exit(0);}\n' > noop.c

@@ -2,6 +2,7 @@ use crate::byte_utils::{contains_bytes, contains_icase_bytes, starts_with_icase_
 mod pg_path;
 mod support;
 
+use crate::db_interpose_common::stderr_ptr;
 use crate::db_interpose_conn_utils::{
     apply_pg_session_settings, connect_new, cstr_prefix, cstr_to_string_or, log_error, log_info,
     PgConnConfig, PthreadMutexGuard,
@@ -12,8 +13,7 @@ use pg_path::exec_via_postgres;
 use std::cell::Cell;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
-#[allow(unused_imports)]
-use support::{orig_exec, parse_positive_returning_rowid};
+use support::orig_exec;
 
 const SQLITE_OK: c_int = 0;
 const SQLITE_ERROR: c_int = 1;
@@ -57,6 +57,51 @@ extern "C" {
     fn pg_config_get() -> *mut PgConnConfig;
     fn sql_translate(sql: *const c_char) -> SqlTranslation;
     fn sql_translation_free(result: *mut SqlTranslation);
+}
+
+use crate::env_utils::loadone_trace_enabled;
+
+fn trim_ascii_sql(bytes: &[u8]) -> &[u8] {
+    let mut i = 0usize;
+    while i < bytes.len() && matches!(bytes[i], b' ' | b'\t' | b'\n' | b'\r') {
+        i += 1;
+    }
+    &bytes[i..]
+}
+
+unsafe fn trace_exec_skipped_select(
+    route: *const c_char,
+    db: *mut sqlite3,
+    pg_conn: *mut crate::ffi_types::PgConnection,
+    sql: *const c_char,
+) {
+    if !loadone_trace_enabled() || sql.is_null() {
+        return;
+    }
+
+    let sql_bytes = trim_ascii_sql(CStr::from_ptr(sql).to_bytes());
+    if !starts_with_icase_bytes(sql_bytes, b"select") {
+        return;
+    }
+
+    let file = crate::db_interpose_open::lookup_db_handle_filename(db);
+    let file_ptr = file
+        .as_ref()
+        .map(|s| s.as_ptr())
+        .unwrap_or(b"<untracked>\0".as_ptr() as *const c_char);
+    let handle_conn = crate::pg_client::rust_pg_find_handle_connection(db);
+    let _ = libc::fprintf(
+        stderr_ptr(),
+        b"[LOADONE_TRACE][exec] route=%s db=%p file=%.900s handle_conn=%p pg_conn=%p sql=%.900s\n\0"
+            .as_ptr() as *const c_char,
+        route,
+        db as *mut c_void,
+        file_ptr,
+        handle_conn as *mut c_void,
+        pg_conn as *mut c_void,
+        sql,
+    );
+    let _ = libc::fflush(stderr_ptr());
 }
 
 #[no_mangle]
@@ -132,7 +177,42 @@ fn rust_my_sqlite3_exec_impl(
     let pg_conn = crate::pg_client::rust_pg_find_connection(db);
 
     if !pg_conn.is_null() && unsafe { (&*pg_conn).is_pg_active } != 0 {
+        // SQLite engine config (fts3_tokenizer, icu_load_collation, load_extension)
+        // must execute on real SQLite, not PG.
+        let sql_str = unsafe { CStr::from_ptr(sql).to_str().unwrap_or("") };
+        if crate::pg_config::is_sqlite_passthrough_str(sql_str) {
+            unsafe {
+                trace_exec_skipped_select(
+                    b"sqlite_passthrough\0".as_ptr() as *const c_char,
+                    db,
+                    pg_conn,
+                    sql,
+                );
+            }
+            return orig_exec(db, sql, callback, arg, errmsg);
+        }
+
+        unsafe {
+            trace_exec_skipped_select(b"pg_route\0".as_ptr() as *const c_char, db, pg_conn, sql);
+        }
+        // Transaction control (BEGIN/COMMIT/ROLLBACK/SAVEPOINT) is in skip-SQL,
+        // so exec_via_postgres will no-op them. PG runs in autocommit mode —
+        // each statement commits immediately. This is intentional: the pool
+        // architecture cannot guarantee connection affinity across statements,
+        // so forwarding transactions would send BEGIN/COMMIT to different
+        // connections, causing data visibility bugs.
         return exec_via_postgres(pg_conn, sql);
+    }
+
+    // For non-PG databases (e.g. :memory:), icu_load_collation may fail because
+    // the ICU extension isn't available in the Docker runtime environment.
+    // Rewrite to "SELECT NULL" so SOCI's loadOne gets a valid row instead of crashing.
+    let sql_str = unsafe { CStr::from_ptr(sql).to_str().unwrap_or("") };
+    let trimmed_lower = sql_str.trim().to_ascii_lowercase();
+    if trimmed_lower.starts_with("select icu_load_collation")
+        || trimmed_lower.starts_with("icu_load_collation")
+    {
+        return orig_exec(db, c"SELECT NULL".as_ptr(), callback, arg, errmsg);
     }
 
     let mut cleaned_sql: *mut c_char = std::ptr::null_mut();
@@ -145,6 +225,14 @@ fn rust_my_sqlite3_exec_impl(
         }
     }
 
+    unsafe {
+        trace_exec_skipped_select(
+            b"sqlite_orig\0".as_ptr() as *const c_char,
+            db,
+            pg_conn,
+            exec_sql,
+        );
+    }
     let rc = orig_exec(db, exec_sql, callback, arg, errmsg);
     if !cleaned_sql.is_null() {
         crate::db_interpose_helpers::rust_free_cstring(cleaned_sql);
@@ -154,7 +242,7 @@ fn rust_my_sqlite3_exec_impl(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_positive_returning_rowid;
+    use super::support::parse_positive_returning_rowid;
     use std::ffi::CString;
 
     #[test]

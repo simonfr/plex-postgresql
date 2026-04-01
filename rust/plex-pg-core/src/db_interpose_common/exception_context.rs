@@ -105,7 +105,7 @@ pub fn rust_pg_exception_note_phase(
         };
         CRASH_LAST_QUERY_LEN.store(qlen, Ordering::SeqCst);
         CRASH_LAST_QUERY_SEQ.store(q_seq.wrapping_add(2), Ordering::Release); // even = done
-        // --- seqlock: end CRASH_LAST_QUERY write ---
+                                                                              // --- seqlock: end CRASH_LAST_QUERY write ---
 
         // --- seqlock: begin CRASH_LAST_PHASE write ---
         let p_seq = CRASH_LAST_PHASE_SEQ.load(Ordering::Relaxed);
@@ -130,7 +130,7 @@ pub fn rust_pg_exception_note_phase(
         };
         CRASH_LAST_PHASE_LEN.store(plen, Ordering::SeqCst);
         CRASH_LAST_PHASE_SEQ.store(p_seq.wrapping_add(2), Ordering::Release); // even = done
-        // --- seqlock: end CRASH_LAST_PHASE write ---
+                                                                              // --- seqlock: end CRASH_LAST_PHASE write ---
 
         let trace_path = TRACE_LAST_QUERY_PATH
             .get()

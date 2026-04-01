@@ -1,6 +1,5 @@
-use std::os::raw::{c_char, c_int};
 use crate::log_info_lazy;
-
+use std::os::raw::{c_char, c_int};
 
 #[repr(C)]
 pub struct PGconn {

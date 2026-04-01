@@ -139,7 +139,10 @@ pub(crate) fn cstr_to_option(ptr: *const c_char) -> Option<&'static str> {
 /// Safe wrapper: returns `Cow<str>` from a possibly-null C string pointer.
 /// Returns `default` if `ptr` is null. Uses lossy UTF-8 conversion to
 /// handle non-UTF-8 data gracefully.
-pub(crate) fn cstr_to_lossy_or(ptr: *const c_char, default: &str) -> std::borrow::Cow<'static, str> {
+pub(crate) fn cstr_to_lossy_or(
+    ptr: *const c_char,
+    default: &str,
+) -> std::borrow::Cow<'static, str> {
     if ptr.is_null() {
         return std::borrow::Cow::Owned(default.to_string());
     }
@@ -206,10 +209,7 @@ pub(crate) unsafe fn apply_pg_session_settings(conn: *mut PGconn, cfg: &PgConnCo
     }
 }
 
-pub fn rust_step_conn_cancel_and_drain(
-    conn: *mut PgConnection,
-    scope_tag: *const c_char,
-) {
+pub fn rust_step_conn_cancel_and_drain(conn: *mut PgConnection, scope_tag: *const c_char) {
     if conn.is_null() {
         return;
     }
@@ -250,11 +250,7 @@ pub fn rust_step_conn_cancel_and_drain(
     let cancel: *mut PGcancel = crate::libpq_helpers::rust_pq_get_cancel(c.conn);
     if !cancel.is_null() {
         let mut errbuf = [0 as c_char; 256];
-        crate::libpq_helpers::rust_pq_cancel(
-            cancel,
-            errbuf.as_mut_ptr(),
-            errbuf.len() as c_int,
-        );
+        crate::libpq_helpers::rust_pq_cancel(cancel, errbuf.as_mut_ptr(), errbuf.len() as c_int);
         crate::libpq_helpers::rust_pq_free_cancel(cancel);
     }
 
@@ -274,7 +270,9 @@ pub fn rust_step_conn_cancel_and_drain(
         let tag = cstr_to_str(scope_tag);
         log_info_lazy!(
             "{}: Drained {} orphaned results total from connection {:p}",
-            tag, drain_count, conn
+            tag,
+            drain_count,
+            conn
         );
     }
 }

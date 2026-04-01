@@ -44,7 +44,8 @@ pub(super) fn resolve_selected_pool_path(
     if is_blobs_db(raw_path) && selected_path != raw_path {
         log_debug_lazy!(
             "Pool: canonicalized blobs db_path {} to shared pool path {}",
-            raw_path, selected_path
+            raw_path,
+            selected_path
         );
     }
 

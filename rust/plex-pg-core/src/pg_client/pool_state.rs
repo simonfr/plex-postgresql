@@ -199,7 +199,8 @@ impl PoolManager {
 
             log_info_lazy!(
                 "Pool: cleared stale streaming_active flag for slot {} (state={})",
-                i, state
+                i,
+                state
             );
             return true;
         }

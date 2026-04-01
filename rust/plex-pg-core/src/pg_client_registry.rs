@@ -30,11 +30,15 @@ impl ConnectionRegistry {
         mutex_lock(&self.map).values().any(|&conn| conn == conn_ptr)
     }
 
-    pub(crate) fn find_any_library(&self, is_library: impl Fn(usize) -> bool) -> Option<usize> {
+    pub(crate) fn find_any(&self, predicate: impl Fn(usize) -> bool) -> Option<usize> {
         mutex_lock(&self.map)
             .values()
             .copied()
-            .find(|&conn| is_library(conn))
+            .find(|&conn| predicate(conn))
+    }
+
+    pub(crate) fn find_any_library(&self, is_library: impl Fn(usize) -> bool) -> Option<usize> {
+        self.find_any(is_library)
     }
 
     pub(crate) fn clear(&self) {

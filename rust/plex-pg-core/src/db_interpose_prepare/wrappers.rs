@@ -1,5 +1,27 @@
 use super::*;
+use crate::db_interpose_common::stderr_ptr;
 use crate::log_info_lazy;
+
+use crate::env_utils::loadone_trace_enabled;
+
+unsafe fn trace_recursive_internal_flow_sql(sql: *const c_char) {
+    if !loadone_trace_enabled() {
+        return;
+    }
+
+    let sql = if sql.is_null() {
+        b"<null>\0".as_ptr() as *const c_char
+    } else {
+        sql
+    };
+    let _ = libc::fprintf(
+        stderr_ptr(),
+        b"[LOADONE_TRACE][prepare] recursive_internal_flow sql=%.900s\n\0".as_ptr()
+            as *const c_char,
+        sql,
+    );
+    let _ = libc::fflush(stderr_ptr());
+}
 
 pub(super) fn prepare_v2_impl(
     db: *mut sqlite3,
@@ -12,11 +34,12 @@ pub(super) fn prepare_v2_impl(
 
     unsafe {
         if *tls_in_interpose_call_ptr() != 0 {
-            if let Some(prepare) = shim_sqlite3_prepare_v2 {
-                return prepare(db, z_sql, n_byte, pp_stmt, pz_tail);
-            }
-            log_error("CRITICAL: shim_sqlite3_prepare_v2 is NULL during recursive call!");
-            return SQLITE_ERROR;
+            // Recursive prepare — always go through internal_flow so PgStmt
+            // is registered. Without this, step falls back to the dummy shadow
+            // → SQLITE_DONE → SOCI "loadOne: not an error".
+            // The 50-call depth guard in internal_flow prevents infinite recursion.
+            trace_recursive_internal_flow_sql(z_sql);
+            return super::prepare_v2_internal_impl(db, z_sql, n_byte, pp_stmt, pz_tail, 0);
         }
 
         *tls_in_interpose_call_ptr() = 1;
@@ -24,16 +47,6 @@ pub(super) fn prepare_v2_impl(
         *tls_in_interpose_call_ptr() = 0;
         result
     }
-}
-
-pub(super) fn prepare_impl(
-    db: *mut sqlite3,
-    z_sql: *const c_char,
-    n_byte: c_int,
-    pp_stmt: *mut *mut sqlite3_stmt,
-    pz_tail: *mut *const c_char,
-) -> c_int {
-    prepare_v2_impl(db, z_sql, n_byte, pp_stmt, pz_tail)
 }
 
 fn utf16_input_len(z_sql: *const c_void, n_byte: c_int) -> usize {
@@ -48,66 +61,21 @@ fn utf16_input_len(z_sql: *const c_void, n_byte: c_int) -> usize {
     let mut p = z_sql as *const u16;
     unsafe {
         while *p != 0 {
+            utf16_len += 2;
             p = p.add(1);
-            utf16_len += 1;
         }
     }
-    utf16_len * 2
+    utf16_len
 }
 
-unsafe fn maybe_route_utf16_icu_root(
+pub(super) fn prepare_impl(
     db: *mut sqlite3,
-    z_sql: *const c_void,
+    z_sql: *const c_char,
     n_byte: c_int,
     pp_stmt: *mut *mut sqlite3_stmt,
-    pz_tail: *mut *const c_void,
-) -> Option<c_int> {
-    if z_sql.is_null() {
-        return None;
-    }
-
-    let utf16_len = utf16_input_len(z_sql, n_byte);
-    if utf16_len == 0 {
-        return None;
-    }
-
-    let max_len = utf16_len * 2 + 1;
-    let mut buf = Vec::with_capacity(max_len);
-    let src = z_sql as *const u16;
-    let mut i = 0usize;
-    while i < utf16_len / 2 && *src.add(i) != 0 {
-        let ch = *src.add(i) as u32;
-        if ch < 0x80 {
-            buf.push(ch as u8);
-        } else if ch < 0x800 {
-            buf.push((0xC0 | (ch >> 6)) as u8);
-            buf.push((0x80 | (ch & 0x3F)) as u8);
-        } else {
-            buf.push((0xE0 | (ch >> 12)) as u8);
-            buf.push((0x80 | ((ch >> 6) & 0x3F)) as u8);
-            buf.push((0x80 | (ch & 0x3F)) as u8);
-        }
-        i += 1;
-    }
-
-    if buf.is_empty() || !contains_ascii_icase(&buf, b"collate icu_root") {
-        return None;
-    }
-
-    let Ok(cs) = CString::new(buf) else {
-        return None;
-    };
-
-    log_info_lazy!(
-        "UTF-16 query with icu_root, routing to UTF-8 handler: {}",
-        cstr_prefix(cs.as_ptr(), 200, "NULL")
-    );
-    let mut tail8: *const c_char = ptr::null();
-    let rc = prepare_v2_impl(db, cs.as_ptr(), -1, pp_stmt, &mut tail8);
-    if !pz_tail.is_null() {
-        *pz_tail = ptr::null();
-    }
-    Some(rc)
+    pz_tail: *mut *const c_char,
+) -> c_int {
+    prepare_v2_impl(db, z_sql, n_byte, pp_stmt, pz_tail)
 }
 
 pub(super) fn prepare16_v2_impl(
@@ -117,15 +85,21 @@ pub(super) fn prepare16_v2_impl(
     pp_stmt: *mut *mut sqlite3_stmt,
     pz_tail: *mut *const c_void,
 ) -> c_int {
-    if let Some(rc) = unsafe { maybe_route_utf16_icu_root(db, z_sql, n_byte, pp_stmt, pz_tail) } {
-        return rc;
+    if z_sql.is_null() {
+        return unsafe {
+            orig_sqlite3_prepare16_v2
+                .map(|f| f(db, z_sql, n_byte, pp_stmt, pz_tail))
+                .unwrap_or(SQLITE_ERROR)
+        };
     }
-
+    let byte_len = utf16_input_len(z_sql, n_byte);
+    let utf16_slice = unsafe { std::slice::from_raw_parts(z_sql as *const u8, byte_len) };
+    let utf8 = String::from_utf8_lossy(utf16_slice);
+    log_info_lazy!("PREPARE16_V2: {}", &utf8[..utf8.len().min(200)]);
     unsafe {
-        if let Some(f) = orig_sqlite3_prepare16_v2 {
-            return f(db, z_sql, n_byte, pp_stmt, pz_tail);
-        }
-        sqlite3_prepare16_v2(db, z_sql, n_byte, pp_stmt, pz_tail)
+        orig_sqlite3_prepare16_v2
+            .map(|f| f(db, z_sql, n_byte, pp_stmt, pz_tail))
+            .unwrap_or(SQLITE_ERROR)
     }
 }
 
@@ -133,16 +107,10 @@ pub(super) fn prepare_v3_impl(
     db: *mut sqlite3,
     z_sql: *const c_char,
     n_byte: c_int,
-    prep_flags: u32,
+    flags: u32,
     pp_stmt: *mut *mut sqlite3_stmt,
     pz_tail: *mut *const c_char,
 ) -> c_int {
-    if !z_sql.is_null() && contains_icase_ptr(z_sql, "metadata_items") {
-        log_info_lazy!(
-            "PREPARE_V3 metadata_items query: {}",
-            cstr_prefix(z_sql, 200, "NULL")
-        );
-    }
-    let _ = prep_flags;
+    let _ = flags;
     prepare_v2_impl(db, z_sql, n_byte, pp_stmt, pz_tail)
 }

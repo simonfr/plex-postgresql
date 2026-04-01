@@ -210,7 +210,9 @@ pub extern "C" fn rust_pg_client_init() {
             if pool_max != db_max_connections {
                 log_info_lazy!(
                     "Pool max ({}) does not match database max_connections ({}); adjusting to {}",
-                    pool_max, db_max_connections, db_max_connections
+                    pool_max,
+                    db_max_connections,
+                    db_max_connections
                 );
                 pool_max = db_max_connections;
             }
@@ -224,7 +226,8 @@ pub extern "C" fn rust_pg_client_init() {
         if pool_size > pool_max {
             log_info_lazy!(
                 "Pool size {} exceeds pool max {}; clamping",
-                pool_size, pool_max
+                pool_size,
+                pool_max
             );
             pool_size = pool_max;
         }
@@ -259,7 +262,9 @@ pub extern "C" fn rust_pg_client_init() {
 
         log_info_lazy!(
             "pg_client initialized (Rust pool): pool_size={}, pool_max={}, idle_timeout={}s",
-            pool_size, pool_max, idle_timeout
+            pool_size,
+            pool_max,
+            idle_timeout
         );
     });
 }

@@ -35,7 +35,6 @@ pub struct PgConnection {
     pub shadow_db: *mut sqlite3,
     pub db_path: [c_char; DB_PATH_LEN],
     pub is_pg_active: c_int,
-    pub in_transaction: c_int,
     pub mutex: libc::pthread_mutex_t,
     pub last_changes: c_int,
     pub last_insert_rowid: i64,

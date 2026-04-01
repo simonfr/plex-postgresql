@@ -1,5 +1,47 @@
 use super::*;
+use crate::db_interpose_common::stderr_ptr;
 use crate::log_info_lazy;
+
+use crate::env_utils::loadone_trace_enabled;
+
+unsafe fn trace_pg_registration_translation_error(
+    pp_stmt: *mut *mut sqlite3_stmt,
+    sql: *const c_char,
+    err: *const c_char,
+    is_read: bool,
+    is_write: bool,
+) {
+    if !loadone_trace_enabled() {
+        return;
+    }
+
+    let stmt = if pp_stmt.is_null() {
+        std::ptr::null_mut()
+    } else {
+        *pp_stmt as *mut c_void
+    };
+    let sql = if sql.is_null() {
+        b"<null>\0".as_ptr() as *const c_char
+    } else {
+        sql
+    };
+    let err = if err.is_null() {
+        b"<null>\0".as_ptr() as *const c_char
+    } else {
+        err
+    };
+    let _ = libc::fprintf(
+        stderr_ptr(),
+        b"[LOADONE_TRACE][prepare] translation_failed stmt=%p read=%d write=%d sql=%.900s error=%.220s\n\0"
+            .as_ptr() as *const c_char,
+        stmt,
+        is_read as c_int,
+        is_write as c_int,
+        sql,
+        err,
+    );
+    let _ = libc::fflush(stderr_ptr());
+}
 
 fn should_route_via_pg(pg_conn: *mut PgConnection, is_read: bool, is_write: bool) -> bool {
     if pg_conn.is_null() {
@@ -90,11 +132,7 @@ unsafe fn replace_stmt_sql_with_suffix(
         suffix,
     );
     if let Some(label) = log_label {
-        log_info_lazy!(
-            "{}: {}",
-            label,
-            cstr_prefix(replaced, 200, "NULL")
-        );
+        log_info_lazy!("{}: {}", label, cstr_prefix(replaced, 200, "NULL"));
     }
     libc::free(pg_stmt.pg_sql as *mut c_void);
     pg_stmt.pg_sql = replaced;
@@ -143,6 +181,14 @@ pub(super) unsafe fn maybe_register_pg_stmt(
         return;
     }
 
+    // SQLite engine config (fts3_tokenizer, icu_load_collation, load_extension)
+    // must execute on real SQLite, not PG. Don't register a PgStmt — step will
+    // fall through to orig_step on the real SQLite statement.
+    let sql_str = crate::db_interpose_helpers::cstr_to_str_or_empty(z_sql);
+    if crate::pg_config::is_sqlite_passthrough_str(sql_str) {
+        return;
+    }
+
     let pg_stmt = pg_stmt_create(pg_conn, z_sql, *pp_stmt);
     if pg_stmt.is_null() {
         return;
@@ -170,6 +216,13 @@ pub(super) unsafe fn maybe_register_pg_stmt(
             cstr_prefix(z_sql, 200, "NULL"),
             cstr_to_string_or(trans.error.as_ptr(), "")
         ));
+        trace_pg_registration_translation_error(
+            pp_stmt,
+            z_sql,
+            trans.error.as_ptr(),
+            is_read,
+            is_write,
+        );
     }
 
     s.param_count = trans.param_count;

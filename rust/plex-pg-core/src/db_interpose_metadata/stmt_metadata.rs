@@ -43,10 +43,7 @@ pub(super) fn db_handle_impl(p_stmt: *mut sqlite3_stmt) -> *mut sqlite3 {
         }
         unsafe {
             if !s.conn.is_null() && !(*s.conn).shadow_db.is_null() {
-                log_debug_lazy!(
-                    "DB_HANDLE: returning shadow_db={:p}",
-                    (*s.conn).shadow_db
-                );
+                log_debug_lazy!("DB_HANDLE: returning shadow_db={:p}", (*s.conn).shadow_db);
                 return (*s.conn).shadow_db;
             }
         }
@@ -143,10 +140,7 @@ pub(super) fn stmt_busy_impl(p_stmt: *mut sqlite3_stmt) -> c_int {
 }
 
 pub(super) fn stmt_status_impl(p_stmt: *mut sqlite3_stmt, op: c_int, reset: c_int) -> c_int {
-    log_debug_lazy!(
-        "STMT_STATUS: stmt={:p} op={} reset={}",
-        p_stmt, op, reset
-    );
+    log_debug_lazy!("STMT_STATUS: stmt={:p} op={} reset={}", p_stmt, op, reset);
     if p_stmt.is_null() {
         return 0;
     }
@@ -243,11 +237,7 @@ pub(super) fn expanded_sql_impl(p_stmt: *mut sqlite3_stmt) -> *mut c_char {
     if is_interposed_pg_stmt(pg_stmt) {
         unsafe {
             let s = &*pg_stmt;
-            let base_sql = if !s.pg_sql.is_null() {
-                s.pg_sql
-            } else {
-                s.sql
-            };
+            let base_sql = if !s.pg_sql.is_null() { s.pg_sql } else { s.sql };
             if base_sql.is_null() {
                 return std::ptr::null_mut();
             }

@@ -27,11 +27,7 @@ static PG_VALUES: LazyLock<Vec<Mutex<PgValue>>> = LazyLock::new(|| {
     v
 });
 
-pub fn rust_create_column_value(
-    stmt: usize,
-    col_idx: i32,
-    sqlite_type: i32,
-) -> *mut PgValue {
+pub fn rust_create_column_value(stmt: usize, col_idx: i32, sqlite_type: i32) -> *mut PgValue {
     let slot = PG_VALUE_IDX.fetch_add(1, Ordering::Relaxed) as usize % MAX_PG_VALUES;
     let pool = &PG_VALUES[slot];
     let mut pv = mutex_lock(pool);

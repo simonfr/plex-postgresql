@@ -14,6 +14,7 @@ pub(super) fn preprocess_sql(sql: &str) -> String {
     let sql = rewrite_virtual_tables(&sql);
     let sql = rewrite_glob(&sql);
     let sql = rewrite_indexed_by(&sql);
+    let sql = rewrite_index_ddl_identifier_quotes(&sql);
     let sql = rewrite_sqlite_collations(&sql);
     let sql = rewrite_distinct_orderby_projection(&sql);
     rewrite_metadata_items_self_join(&sql)
@@ -1367,6 +1368,423 @@ fn split_sql_statements(sql: &str) -> Vec<String> {
     if !cur.trim().is_empty() {
         out.push(cur.trim().to_string());
     }
+    out
+}
+
+fn rewrite_index_ddl_identifier_quotes(sql: &str) -> String {
+    let mut out = Vec::new();
+    for stmt in split_sql_statements(sql) {
+        let t = stmt.trim();
+        if t.is_empty() {
+            continue;
+        }
+        out.push(rewrite_single_index_ddl_identifier_quotes(t));
+    }
+    out.join("; ")
+}
+
+fn rewrite_single_index_ddl_identifier_quotes(stmt: &str) -> String {
+    let start = skip_leading_ws_and_sql_comments_offset(stmt);
+    let core = &stmt[start..];
+    if core.is_empty() {
+        return stmt.to_string();
+    }
+
+    if is_create_index_stmt(core) {
+        let rewritten = rewrite_create_index_identifier_quotes_core(core);
+        if rewritten != core {
+            return format!("{}{}", &stmt[..start], rewritten);
+        }
+        return stmt.to_string();
+    }
+
+    if is_drop_index_stmt(core) {
+        let rewritten = rewrite_drop_index_identifier_quotes_core(core);
+        if rewritten != core {
+            return format!("{}{}", &stmt[..start], rewritten);
+        }
+    }
+
+    stmt.to_string()
+}
+
+fn is_create_index_stmt(stmt: &str) -> bool {
+    let lower = stmt.to_ascii_lowercase();
+    lower.starts_with("create index") || lower.starts_with("create unique index")
+}
+
+fn is_drop_index_stmt(stmt: &str) -> bool {
+    stmt.to_ascii_lowercase().starts_with("drop index")
+}
+
+fn skip_leading_ws_and_sql_comments_offset(stmt: &str) -> usize {
+    let bytes = stmt.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i + 1 < bytes.len() && bytes[i] == b'-' && bytes[i + 1] == b'-' {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            if i + 1 < bytes.len() {
+                i += 2;
+            }
+            continue;
+        }
+        break;
+    }
+    i
+}
+
+fn skip_ascii_ws(bytes: &[u8], mut i: usize) -> usize {
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    i
+}
+
+fn consume_keyword_ci(stmt: &str, i: usize, keyword: &str) -> Option<usize> {
+    let bytes = stmt.as_bytes();
+    let start = skip_ascii_ws(bytes, i);
+    let end = start + keyword.len();
+    if end > bytes.len() || !stmt[start..end].eq_ignore_ascii_case(keyword) {
+        return None;
+    }
+    if start > 0 && is_ident_char(bytes[start - 1]) {
+        return None;
+    }
+    if end < bytes.len() && is_ident_char(bytes[end]) {
+        return None;
+    }
+    Some(end)
+}
+
+fn find_token_end(stmt: &str, start: usize) -> usize {
+    let bytes = stmt.as_bytes();
+    let mut i = start;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' | b'"' | b'`' => {
+                let quote = bytes[i];
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == quote {
+                        i += 1;
+                        if i < bytes.len() && bytes[i] == quote {
+                            i += 1;
+                            continue;
+                        }
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            b if b.is_ascii_whitespace() => break,
+            _ => i += 1,
+        }
+    }
+    i
+}
+
+fn find_next_unquoted_char(stmt: &str, start: usize, target: u8) -> Option<usize> {
+    let bytes = stmt.as_bytes();
+    let mut i = start;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' | b'"' | b'`' => {
+                let quote = bytes[i];
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == quote {
+                        i += 1;
+                        if i < bytes.len() && bytes[i] == quote {
+                            i += 1;
+                            continue;
+                        }
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            b if b == target => return Some(i),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+fn find_matching_paren(stmt: &str, open_pos: usize) -> Option<usize> {
+    let bytes = stmt.as_bytes();
+    if open_pos >= bytes.len() || bytes[open_pos] != b'(' {
+        return None;
+    }
+
+    let mut depth = 0usize;
+    let mut i = open_pos;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' | b'"' | b'`' => {
+                let quote = bytes[i];
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == quote {
+                        i += 1;
+                        if i < bytes.len() && bytes[i] == quote {
+                            i += 1;
+                            continue;
+                        }
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            b'(' => {
+                depth += 1;
+                i += 1;
+            }
+            b')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(i);
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+
+    None
+}
+
+fn parse_quoted_token(stmt: &str, start: usize) -> Option<(char, String, usize)> {
+    let bytes = stmt.as_bytes();
+    if start >= bytes.len() {
+        return None;
+    }
+
+    let quote = bytes[start] as char;
+    if quote != '\'' && quote != '"' && quote != '`' {
+        return None;
+    }
+
+    let mut out = String::new();
+    let mut i = start + 1;
+    while i < bytes.len() {
+        let ch = bytes[i] as char;
+        if ch == quote {
+            i += 1;
+            if i < bytes.len() && bytes[i] as char == quote {
+                out.push(quote);
+                i += 1;
+                continue;
+            }
+            return Some((quote, out, i));
+        }
+        out.push(ch);
+        i += 1;
+    }
+
+    None
+}
+
+fn is_simple_identifier(value: &str) -> bool {
+    if value.is_empty() {
+        return false;
+    }
+    value
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+fn rewrite_identifier_quotes_in_segment(segment: &str) -> String {
+    let bytes = segment.as_bytes();
+    let mut out = String::with_capacity(segment.len());
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        if bytes[i] == b'\'' || bytes[i] == b'`' {
+            if let Some((_, content, next)) = parse_quoted_token(segment, i) {
+                if is_simple_identifier(&content) {
+                    out.push('"');
+                    out.push_str(&content);
+                    out.push('"');
+                    i = next;
+                    continue;
+                }
+            }
+        }
+
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+
+    out
+}
+
+fn rewrite_last_quoted_identifier_token(segment: &str) -> String {
+    let trimmed_end = segment
+        .trim_end_matches(|c: char| c.is_ascii_whitespace())
+        .len();
+    if trimmed_end == 0 {
+        return segment.to_string();
+    }
+
+    let token_start = segment[..trimmed_end]
+        .rfind(|c: char| c.is_ascii_whitespace())
+        .map(|idx| idx + 1)
+        .unwrap_or(0);
+    let token = &segment[token_start..trimmed_end];
+    let rewritten = rewrite_identifier_quotes_in_segment(token);
+    if rewritten == token {
+        return segment.to_string();
+    }
+
+    format!(
+        "{}{}{}",
+        &segment[..token_start],
+        rewritten,
+        &segment[trimmed_end..]
+    )
+}
+
+fn rewrite_index_column_item(item: &str) -> String {
+    let trimmed = item.trim_start();
+    let leading = &item[..item.len() - trimmed.len()];
+    let bytes = trimmed.as_bytes();
+    if bytes.is_empty() || (bytes[0] != b'\'' && bytes[0] != b'`') {
+        return item.to_string();
+    }
+
+    let Some((_, content, next)) = parse_quoted_token(trimmed, 0) else {
+        return item.to_string();
+    };
+    if !is_simple_identifier(&content) {
+        return item.to_string();
+    }
+
+    let rest = &trimmed[next..];
+    let rest_trimmed = rest.trim_start();
+    let allowed_suffix = rest_trimmed.is_empty()
+        || rest_trimmed
+            .split_whitespace()
+            .next()
+            .map(|kw| {
+                kw.eq_ignore_ascii_case("collate")
+                    || kw.eq_ignore_ascii_case("asc")
+                    || kw.eq_ignore_ascii_case("desc")
+                    || kw.eq_ignore_ascii_case("nulls")
+            })
+            .unwrap_or(false);
+    if !allowed_suffix {
+        return item.to_string();
+    }
+
+    format!("{leading}\"{content}\"{rest}")
+}
+
+fn rewrite_index_column_list(columns: &str) -> String {
+    split_csv_top_level(columns)
+        .into_iter()
+        .map(|item| rewrite_index_column_item(&item))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn rewrite_create_index_identifier_quotes_core(stmt: &str) -> String {
+    let bytes = stmt.as_bytes();
+    let mut pos = 0usize;
+    let Some(next) = consume_keyword_ci(stmt, pos, "create") else {
+        return stmt.to_string();
+    };
+    pos = next;
+    if let Some(next) = consume_keyword_ci(stmt, pos, "unique") {
+        pos = next;
+    }
+    let Some(next) = consume_keyword_ci(stmt, pos, "index") else {
+        return stmt.to_string();
+    };
+    pos = next;
+    if let Some(next_if) = consume_keyword_ci(stmt, pos, "if") {
+        if let Some(next_not) = consume_keyword_ci(stmt, next_if, "not") {
+            if let Some(next_exists) = consume_keyword_ci(stmt, next_not, "exists") {
+                pos = next_exists;
+            }
+        }
+    }
+
+    let name_start = skip_ascii_ws(bytes, pos);
+    if name_start >= bytes.len() {
+        return stmt.to_string();
+    }
+    let name_end = find_token_end(stmt, name_start);
+    let Some(on_pos) = find_top_level_keyword_from(stmt, name_end, "on") else {
+        return stmt.to_string();
+    };
+
+    let table_start = skip_ascii_ws(bytes, on_pos + 2);
+    let Some(open_paren) = find_next_unquoted_char(stmt, table_start, b'(') else {
+        return stmt.to_string();
+    };
+    let Some(close_paren) = find_matching_paren(stmt, open_paren) else {
+        return stmt.to_string();
+    };
+
+    let mut out = String::with_capacity(stmt.len());
+    out.push_str(&stmt[..name_start]);
+    out.push_str(&rewrite_last_quoted_identifier_token(
+        &stmt[name_start..name_end],
+    ));
+    out.push_str(&stmt[name_end..table_start]);
+    out.push_str(&rewrite_identifier_quotes_in_segment(
+        &stmt[table_start..open_paren],
+    ));
+    out.push('(');
+    out.push_str(&rewrite_index_column_list(
+        &stmt[open_paren + 1..close_paren],
+    ));
+    out.push_str(&stmt[close_paren..]);
+    out
+}
+
+fn rewrite_drop_index_identifier_quotes_core(stmt: &str) -> String {
+    let bytes = stmt.as_bytes();
+    let mut pos = 0usize;
+    let Some(next) = consume_keyword_ci(stmt, pos, "drop") else {
+        return stmt.to_string();
+    };
+    pos = next;
+    let Some(next) = consume_keyword_ci(stmt, pos, "index") else {
+        return stmt.to_string();
+    };
+    pos = next;
+    if let Some(next_if) = consume_keyword_ci(stmt, pos, "if") {
+        if let Some(next_exists) = consume_keyword_ci(stmt, next_if, "exists") {
+            pos = next_exists;
+        }
+    }
+
+    let name_start = skip_ascii_ws(bytes, pos);
+    if name_start >= bytes.len() {
+        return stmt.to_string();
+    }
+    let name_end = find_token_end(stmt, name_start);
+
+    let mut out = String::with_capacity(stmt.len());
+    out.push_str(&stmt[..name_start]);
+    out.push_str(&rewrite_last_quoted_identifier_token(
+        &stmt[name_start..name_end],
+    ));
+    out.push_str(&stmt[name_end..]);
     out
 }
 

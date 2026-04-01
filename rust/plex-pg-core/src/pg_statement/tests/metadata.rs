@@ -66,8 +66,8 @@ fn type_unknown_oid_is_text() {
 }
 
 #[test]
-fn decltype_int8_is_bigint() {
-    assert_eq!(oid_to_sqlite_decltype(20).to_str().unwrap(), "BIGINT");
+fn decltype_int8_is_dt_integer_8() {
+    assert_eq!(oid_to_sqlite_decltype(20).to_str().unwrap(), "dt_integer(8)");
 }
 
 #[test]
@@ -117,14 +117,20 @@ fn decltype_text_is_text() {
 
 #[test]
 fn decltype_timestamp_is_integer() {
-    // TIMESTAMP → INTEGER (epoch), matching C shim preload_decltype_cache
-    assert_eq!(oid_to_sqlite_decltype(1114).to_str().unwrap(), "INTEGER");
+    // TIMESTAMP → 64-bit epoch int, matching Plex SOCI's integer(8) parsing.
+    assert_eq!(
+        oid_to_sqlite_decltype(1114).to_str().unwrap(),
+        "dt_integer(8)"
+    );
 }
 
 #[test]
 fn decltype_timestamptz_is_integer() {
-    // TIMESTAMPTZ → INTEGER (epoch), matching C shim preload_decltype_cache
-    assert_eq!(oid_to_sqlite_decltype(1184).to_str().unwrap(), "INTEGER");
+    // TIMESTAMPTZ → 64-bit epoch int, matching Plex SOCI's integer(8) parsing.
+    assert_eq!(
+        oid_to_sqlite_decltype(1184).to_str().unwrap(),
+        "dt_integer(8)"
+    );
 }
 
 #[test]
@@ -132,17 +138,22 @@ fn column_type_and_decltype_are_consistent() {
     // Invariant: column_type and decltype must agree on the SOCI type class.
     // If decltype says INTEGER, column_type must return SQLITE_INTEGER.
     use crate::db_interpose_value_helpers::pg_oid_to_sqlite_type_impl;
-    let oids = [16, 20, 21, 23, 26, 700, 701, 1700, 17, 25, 1043, 1114, 1184, 1082];
+    let oids = [
+        16, 20, 21, 23, 26, 700, 701, 1700, 17, 25, 1043, 1114, 1184, 1082,
+    ];
     for oid in oids {
         let ty = pg_oid_to_sqlite_type_impl(oid);
         let decl = oid_to_sqlite_decltype(oid).to_str().unwrap();
         let expected_ty = match decl {
-            "INTEGER" | "BIGINT" => 1, // SQLITE_INTEGER
-            "REAL" => 2,               // SQLITE_FLOAT
-            "BLOB" => 4,               // SQLITE_BLOB
-            _ => 3,                    // SQLITE_TEXT
+            "INTEGER" | "dt_integer(8)" => 1, // SQLITE_INTEGER
+            "REAL" => 2,                      // SQLITE_FLOAT
+            "BLOB" => 4,                      // SQLITE_BLOB
+            _ => 3,                           // SQLITE_TEXT
         };
-        assert_eq!(ty, expected_ty, "OID {oid}: column_type={ty} but decltype='{decl}' expects {expected_ty}");
+        assert_eq!(
+            ty, expected_ty,
+            "OID {oid}: column_type={ty} but decltype='{decl}' expects {expected_ty}"
+        );
     }
 }
 
@@ -323,11 +334,51 @@ fn decltype_special_case_dt_integer_for_greatest_metadata_refresh() {
 }
 
 #[test]
-fn decltype_special_case_expression_returns_null_case() {
+fn decltype_special_case_expression_uses_oid_mapping() {
     let col = cs("count");
     let sql = cs("select count(*) from t");
     let rc = rust_decltype_special_case(23, col.as_ptr(), sql.as_ptr(), 0);
     assert_eq!(rc, DECLTYPE_CASE_NULL);
+}
+
+#[test]
+fn decltype_special_case_aggregate_alias_returns_null_case() {
+    let col = cs("max(year)");
+    let sql = cs("select max(year) from t");
+    let rc = rust_decltype_special_case(23, col.as_ptr(), sql.as_ptr(), 0);
+    assert_eq!(rc, DECLTYPE_CASE_NULL);
+}
+
+#[test]
+fn decltype_special_case_count_star_alias_returns_null_case() {
+    let col = cs("count(*)");
+    let sql = cs("select count(*) as \"count(*)\" from t");
+    let rc = rust_decltype_special_case(20, col.as_ptr(), sql.as_ptr(), 0);
+    assert_eq!(rc, DECLTYPE_CASE_NULL);
+}
+
+#[test]
+fn decltype_special_case_sum_alias_returns_null_case() {
+    let col = cs("sum");
+    let sql = cs("select sum(duration) as sum from t");
+    let rc = rust_decltype_special_case(20, col.as_ptr(), sql.as_ptr(), 0);
+    assert_eq!(rc, DECLTYPE_CASE_NULL);
+}
+
+#[test]
+fn decltype_special_case_regular_column_without_table_oid_uses_oid_mapping() {
+    let col = cs("identifier");
+    let sql = cs("select identifier from plugins where id = $1");
+    let rc = rust_decltype_special_case(25, col.as_ptr(), sql.as_ptr(), 0);
+    assert_eq!(rc, DECLTYPE_CASE_NONE);
+}
+
+#[test]
+fn decltype_special_case_regular_int8_without_table_oid_uses_oid_mapping() {
+    let col = cs("id");
+    let sql = cs("select id from plugins where id = $1");
+    let rc = rust_decltype_special_case(20, col.as_ptr(), sql.as_ptr(), 0);
+    assert_eq!(rc, DECLTYPE_CASE_NONE);
 }
 
 #[test]

@@ -227,8 +227,7 @@ pub extern "C" fn rust_step_cached_write_execute_and_finalize(
                 } else {
                     cmd_tuples
                 };
-                cc.last_changes =
-                    crate::db_interpose_helpers::rust_pg_text_to_int(tuples_ptr);
+                cc.last_changes = crate::db_interpose_helpers::rust_pg_text_to_int(tuples_ptr);
             }
 
             if starts_with_icase_bytes(cstr_bytes(orig_sql), b"INSERT")

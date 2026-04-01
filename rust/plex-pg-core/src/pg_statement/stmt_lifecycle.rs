@@ -58,7 +58,8 @@ unsafe fn clear_streaming_state(stmt_ptr: *mut PgStmt, stmt: &mut PgStmt, op_nam
             if drain_count > 1000 {
                 log_info_lazy!(
                     "{}: drain after cancel exceeded 1000 on {:p}",
-                    op_name, stmt.streaming_conn
+                    op_name,
+                    stmt.streaming_conn
                 );
                 break;
             }
@@ -72,13 +73,12 @@ unsafe fn clear_streaming_state(stmt_ptr: *mut PgStmt, stmt: &mut PgStmt, op_nam
                 };
                 log_debug_lazy!(
                     "{}: drained {} results after cancel (sql={:.60})",
-                    op_name, drain_count, sql
+                    op_name,
+                    drain_count,
+                    sql
                 );
             } else {
-                log_debug_lazy!(
-                    "{}: drained {} results after cancel",
-                    op_name, drain_count
-                );
+                log_debug_lazy!("{}: drained {} results after cancel", op_name, drain_count);
             }
         }
     }
@@ -151,7 +151,9 @@ pub fn rust_stmt_free(stmt_ptr: *mut PgStmt) {
 
         log_debug_lazy!(
             "pg_stmt_free: START stmt={:p} sql={:p} pg_sql={:p}",
-            stmt_ptr, stmt.sql, stmt.pg_sql
+            stmt_ptr,
+            stmt.sql,
+            stmt.pg_sql
         );
 
         let pg_sql_is_separate = !stmt.pg_sql.is_null() && stmt.pg_sql != stmt.sql;
@@ -162,10 +164,7 @@ pub fn rust_stmt_free(stmt_ptr: *mut PgStmt) {
             } else {
                 cstr_to_str_or_empty(stmt.sql)
             };
-            log_debug_lazy!(
-                "pg_stmt_free: freeing sql={:p} ({:.50})",
-                stmt.sql, sql
-            );
+            log_debug_lazy!("pg_stmt_free: freeing sql={:p} ({:.50})", stmt.sql, sql);
             libc::free(stmt.sql as *mut c_void);
             stmt.sql = std::ptr::null_mut();
         }
@@ -173,7 +172,8 @@ pub fn rust_stmt_free(stmt_ptr: *mut PgStmt) {
             let sql = cstr_to_str_or_empty(stmt.pg_sql);
             log_debug_lazy!(
                 "pg_stmt_free: freeing pg_sql={:p} ({:.50})",
-                stmt.pg_sql, sql
+                stmt.pg_sql,
+                sql
             );
             libc::free(stmt.pg_sql as *mut c_void);
             stmt.pg_sql = std::ptr::null_mut();
@@ -193,10 +193,7 @@ pub fn rust_stmt_free(stmt_ptr: *mut PgStmt) {
         for i in 0..stmt.param_values.len() {
             let val = stmt.param_values[i];
             if !val.is_null() && !stmt.is_preallocated_buffer(i) {
-                log_debug_lazy!(
-                    "pg_stmt_free: freeing param_values[{}]={:p}",
-                    i, val
-                );
+                log_debug_lazy!("pg_stmt_free: freeing param_values[{}]={:p}", i, val);
                 libc::free(val as *mut c_void);
                 stmt.param_values[i] = std::ptr::null_mut();
                 if i >= safe_param_count
@@ -214,7 +211,8 @@ pub fn rust_stmt_free(stmt_ptr: *mut PgStmt) {
         if !stmt.param_names.is_null() {
             log_debug_lazy!(
                 "pg_stmt_free: freeing param_names={:p} (array of {})",
-                stmt.param_names, safe_param_count
+                stmt.param_names,
+                safe_param_count
             );
             for i in 0..safe_param_count {
                 let slot = stmt.param_names.add(i);
@@ -222,7 +220,9 @@ pub fn rust_stmt_free(stmt_ptr: *mut PgStmt) {
                     let name = cstr_to_str_or_empty(*slot);
                     log_debug_lazy!(
                         "pg_stmt_free: freeing param_names[{}]={:p} ({:.30})",
-                        i, *slot, name
+                        i,
+                        *slot,
+                        name
                     );
                     libc::free(*slot as *mut c_void);
                     *slot = std::ptr::null_mut();
@@ -239,10 +239,7 @@ pub fn rust_stmt_free(stmt_ptr: *mut PgStmt) {
         for i in 0..stmt.decoded_blobs.len() {
             let blob = stmt.decoded_blobs[i];
             if !blob.is_null() {
-                log_debug_lazy!(
-                    "pg_stmt_free: freeing decoded_blobs[{}]={:p}",
-                    i, blob
-                );
+                log_debug_lazy!("pg_stmt_free: freeing decoded_blobs[{}]={:p}", i, blob);
                 libc::free(blob as *mut c_void);
                 stmt.decoded_blobs[i] = std::ptr::null_mut();
             }
@@ -251,10 +248,7 @@ pub fn rust_stmt_free(stmt_ptr: *mut PgStmt) {
         for i in 0..stmt.cached_text.len() {
             let text = stmt.cached_text[i];
             if !text.is_null() {
-                log_debug_lazy!(
-                    "pg_stmt_free: freeing cached_text[{}]={:p}",
-                    i, text
-                );
+                log_debug_lazy!("pg_stmt_free: freeing cached_text[{}]={:p}", i, text);
                 libc::free(text as *mut c_void);
                 stmt.cached_text[i] = std::ptr::null_mut();
             }
@@ -262,10 +256,7 @@ pub fn rust_stmt_free(stmt_ptr: *mut PgStmt) {
         for i in 0..stmt.cached_blob.len() {
             let blob = stmt.cached_blob[i];
             if !blob.is_null() {
-                log_debug_lazy!(
-                    "pg_stmt_free: freeing cached_blob[{}]={:p}",
-                    i, blob
-                );
+                log_debug_lazy!("pg_stmt_free: freeing cached_blob[{}]={:p}", i, blob);
                 libc::free(blob as *mut c_void);
                 stmt.cached_blob[i] = std::ptr::null_mut();
             }

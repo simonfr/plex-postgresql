@@ -156,7 +156,9 @@ pub(super) fn column_int_impl(p_stmt: *mut sqlite3_stmt, idx: c_int) -> c_int {
         return result_val;
     }
 
-    get_orig_sqlite3_column_int().map(|f| unsafe { f(p_stmt, idx) }).unwrap_or(0)
+    get_orig_sqlite3_column_int()
+        .map(|f| unsafe { f(p_stmt, idx) })
+        .unwrap_or(0)
 }
 
 pub(super) fn column_int64_impl(p_stmt: *mut sqlite3_stmt, idx: c_int) -> i64 {
@@ -174,12 +176,7 @@ pub(super) fn column_int64_impl(p_stmt: *mut sqlite3_stmt, idx: c_int) -> i64 {
                     if let Some(state) = load_cached_scalar_state(pg_stmt, idx) {
                         let mut rv = pg_text_to_int64_impl(state.value_ptr);
                         let mut masked = 0i64;
-                        if mask_collection_metadata_type(
-                            pg_stmt,
-                            state.col_name,
-                            rv,
-                            &mut masked,
-                        ) {
+                        if mask_collection_metadata_type(pg_stmt, state.col_name, rv, &mut masked) {
                             rv = masked;
                         }
                         rv
@@ -190,9 +187,12 @@ pub(super) fn column_int64_impl(p_stmt: *mut sqlite3_stmt, idx: c_int) -> i64 {
             }
 
             result_val = unsafe {
-                let Some(state) =
-                    load_live_scalar_state(pg_stmt, idx, "COL_INT64_BOUNDS", "COL_INT64_ROW_BOUNDS")
-                else {
+                let Some(state) = load_live_scalar_state(
+                    pg_stmt,
+                    idx,
+                    "COL_INT64_BOUNDS",
+                    "COL_INT64_ROW_BOUNDS",
+                ) else {
                     return 0;
                 };
 
@@ -212,7 +212,9 @@ pub(super) fn column_int64_impl(p_stmt: *mut sqlite3_stmt, idx: c_int) -> i64 {
         return result_val;
     }
 
-    get_orig_sqlite3_column_int64().map(|f| unsafe { f(p_stmt, idx) }).unwrap_or(0)
+    get_orig_sqlite3_column_int64()
+        .map(|f| unsafe { f(p_stmt, idx) })
+        .unwrap_or(0)
 }
 
 pub(super) fn column_double_impl(p_stmt: *mut sqlite3_stmt, idx: c_int) -> f64 {
@@ -236,9 +238,12 @@ pub(super) fn column_double_impl(p_stmt: *mut sqlite3_stmt, idx: c_int) -> f64 {
             }
 
             result_val = unsafe {
-                let Some(state) =
-                    load_live_scalar_state(pg_stmt, idx, "COL_DOUBLE_BOUNDS", "COL_DOUBLE_ROW_BOUNDS")
-                else {
+                let Some(state) = load_live_scalar_state(
+                    pg_stmt,
+                    idx,
+                    "COL_DOUBLE_BOUNDS",
+                    "COL_DOUBLE_ROW_BOUNDS",
+                ) else {
                     return 0.0;
                 };
 
@@ -253,5 +258,7 @@ pub(super) fn column_double_impl(p_stmt: *mut sqlite3_stmt, idx: c_int) -> f64 {
         return result_val;
     }
 
-    get_orig_sqlite3_column_double().map(|f| unsafe { f(p_stmt, idx) }).unwrap_or(0.0)
+    get_orig_sqlite3_column_double()
+        .map(|f| unsafe { f(p_stmt, idx) })
+        .unwrap_or(0.0)
 }

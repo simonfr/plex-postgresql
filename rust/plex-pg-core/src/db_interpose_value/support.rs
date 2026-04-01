@@ -48,8 +48,7 @@ pub(super) unsafe fn load_fake_value_context(
     if !fake_value_thread_ok(fake) {
         log_error(&format!(
             "{}: fake value from different thread (stmt={:p})",
-            label,
-            f.pg_stmt
+            label, f.pg_stmt
         ));
         return None;
     }

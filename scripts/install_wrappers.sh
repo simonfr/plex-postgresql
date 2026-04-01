@@ -13,6 +13,8 @@ SHIM_DIR="$(dirname "$SCRIPT_DIR")"
 PLEX_APP="/Applications/Plex Media Server.app/Contents/MacOS"
 SHIM_SRC="$SHIM_DIR/db_interpose_pg.dylib"
 SHIM_DST="$PLEX_APP/db_interpose_pg.dylib"
+SHADOW_SEED_HELPER_SRC="$SCRIPT_DIR/seed_shadow_table_from_pg.py"
+SHADOW_SEED_HELPER_DST="$PLEX_APP/seed_shadow_table_from_pg.py"
 SQLITE_DB="$HOME/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db"
 
 # Colors
@@ -82,6 +84,14 @@ echo "Installing shim dylib..."
 cp -f "$SHIM_SRC" "$SHIM_DST"
 echo -e "${GREEN}  Copied to $SHIM_DST${NC}"
 
+if [[ -f "$SHADOW_SEED_HELPER_SRC" ]]; then
+    cp -f "$SHADOW_SEED_HELPER_SRC" "$SHADOW_SEED_HELPER_DST"
+    chmod +x "$SHADOW_SEED_HELPER_DST"
+    echo -e "${GREEN}  Copied to $SHADOW_SEED_HELPER_DST${NC}"
+else
+    echo -e "${YELLOW}  WARNING: Shadow seed helper not found at $SHADOW_SEED_HELPER_SRC${NC}"
+fi
+
 # ============================================================================
 # Server: bash wrapper + .original
 # ============================================================================
@@ -114,6 +124,7 @@ if [[ -f "$PLEX_APP/Plex Media Server.original" ]]; then
 SCRIPT_DIR="$(dirname "$0")"
 SERVER_BINARY="$SCRIPT_DIR/Plex Media Server.original"
 SHIM_FILE="$SCRIPT_DIR/db_interpose_pg.dylib"
+SHADOW_SEED_HELPER="$SCRIPT_DIR/seed_shadow_table_from_pg.py"
 
 # Add PostgreSQL binaries to PATH
 export PATH="/opt/homebrew/opt/postgresql@15/bin:$PATH"
@@ -125,6 +136,7 @@ export PLEX_PG_DATABASE="${PLEX_PG_DATABASE:-plex}"
 export PLEX_PG_USER="${PLEX_PG_USER:-plex}"
 export PLEX_PG_PASSWORD="${PLEX_PG_PASSWORD:-plex}"
 export PLEX_PG_SCHEMA="${PLEX_PG_SCHEMA:-plex}"
+export PLEX_PG_SHADOW_SYNC_TABLES="${PLEX_PG_SHADOW_SYNC_TABLES:-preferences}"
 export PLEX_PG_LOG_LEVEL="${PLEX_PG_LOG_LEVEL:-ERROR}"
 export PLEX_MEDIA_SERVER_APPLICATION_SUPPORT_DIR="${PLEX_MEDIA_SERVER_APPLICATION_SUPPORT_DIR:-$HOME/Library/Application Support}"
 
@@ -250,6 +262,45 @@ init_sqlite_schema() {
         fi
     }
 
+    seed_shadow_tables_from_pg() {
+        local db_file="$1"
+        local db_name helper table_list normalized_list raw_table table
+        db_name=$(basename "$db_file")
+
+        if [[ "$db_name" != "com.plexapp.plugins.library.db" ]]; then
+            return 0
+        fi
+
+        if ! command -v psql >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
+            return 0
+        fi
+
+        helper="$SHADOW_SEED_HELPER"
+        if [[ ! -f "$helper" ]]; then
+            echo "[plex-pg] WARNING: Shadow seed helper missing: $helper"
+            return 0
+        fi
+
+        table_list="${PLEX_PG_SHADOW_SYNC_TABLES:-preferences}"
+        normalized_list=$(printf '%s' "$table_list" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+        case "$normalized_list" in
+            ""|0|none|false|off)
+                echo "[plex-pg] Shadow table seeding disabled"
+                return 0
+                ;;
+        esac
+
+        IFS=',' read -r -a shadow_tables <<< "$table_list"
+        for raw_table in "${shadow_tables[@]}"; do
+            table=$(printf '%s' "$raw_table" | tr -d '[:space:]')
+            [[ -z "$table" ]] && continue
+            echo "[plex-pg] Seeding shadow SQLite $db_name table '$table' from PostgreSQL..."
+            if ! python3 "$helper" "$db_file" "$table" "$PLEX_PG_SCHEMA"; then
+                echo "[plex-pg] WARNING: Failed to seed shadow table '$table' from PostgreSQL"
+            fi
+        done
+    }
+
     local db_files=(
         "$db_dir/com.plexapp.plugins.library.db"
         "$db_dir/com.plexapp.plugins.library.blobs.db"
@@ -270,6 +321,7 @@ init_sqlite_schema() {
         fi
 
         sync_schema_migrations_to_sqlite "$db_file"
+        seed_shadow_tables_from_pg "$db_file"
     done
 }
 

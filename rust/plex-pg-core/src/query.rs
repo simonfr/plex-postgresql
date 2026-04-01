@@ -1630,8 +1630,7 @@ mod tests {
 
     #[test]
     fn subset_fts__match_simple_col_uses_to_tsvector_wrapper() {
-        let r =
-            translate("SELECT * FROM fts4_metadata_titles WHERE title MATCH 'Plex'").unwrap();
+        let r = translate("SELECT * FROM fts4_metadata_titles WHERE title MATCH 'Plex'").unwrap();
         let sql = r.sql.to_lowercase();
         assert!(
             sql.contains("to_tsvector("),
@@ -1648,11 +1647,7 @@ mod tests {
             "Expected to_tsquery() call, got: {}",
             r.sql
         );
-        assert!(
-            sql.contains("@@"),
-            "Expected @@ operator, got: {}",
-            r.sql
-        );
+        assert!(sql.contains("@@"), "Expected @@ operator, got: {}", r.sql);
     }
 
     #[test]
@@ -1680,19 +1675,13 @@ mod tests {
             "Expected original title_sort column inside to_tsvector, got: {}",
             r.sql
         );
-        assert!(
-            sql.contains("@@"),
-            "Expected @@ operator, got: {}",
-            r.sql
-        );
+        assert!(sql.contains("@@"), "Expected @@ operator, got: {}", r.sql);
     }
 
     #[test]
     fn subset_fts__match_prefix_query_converts_star_to_colon_star() {
-        let r = translate(
-            "SELECT rowid FROM fts4_metadata_titles WHERE title MATCH 'War*'",
-        )
-        .unwrap();
+        let r =
+            translate("SELECT rowid FROM fts4_metadata_titles WHERE title MATCH 'War*'").unwrap();
         let sql = r.sql.to_lowercase();
         assert!(
             sql.contains("war:*") || sql.contains("war"),

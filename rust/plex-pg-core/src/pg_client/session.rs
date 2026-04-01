@@ -1,7 +1,7 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_void};
 
-use crate::db_interpose_conn_utils::{log_error};
+use crate::db_interpose_conn_utils::log_error;
 use crate::db_interpose_helpers::cstr_to_str_or_empty;
 use crate::ffi_types::PgConnection;
 use crate::libpq_helpers::{
@@ -56,7 +56,8 @@ pub(super) fn pg_set_socket_timeout(pg_conn: *mut PGconn) {
 
     log_debug_lazy!(
         "Socket timeout set to {} seconds for socket {}",
-        PG_SOCKET_TIMEOUT_SEC, sock
+        PG_SOCKET_TIMEOUT_SEC,
+        sock
     );
 }
 
@@ -150,7 +151,8 @@ pub(super) fn exec_simple(raw_conn: *mut c_void, sql: *const c_char) -> bool {
         if txn != PQTRANS_INTRANS && txn != PQTRANS_INERROR {
             log_debug_lazy!(
                 "exec_simple: skipped {} in non-transaction state={}",
-                trimmed, txn
+                trimmed,
+                txn
             );
             return true;
         }

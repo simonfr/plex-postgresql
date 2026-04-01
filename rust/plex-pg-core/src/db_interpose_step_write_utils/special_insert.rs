@@ -44,9 +44,7 @@ pub extern "C" fn rust_step_write_should_skip_special_insert(
                     let _conn_guard = PthreadMutexGuard::lock(&mut ec.mutex as *mut _);
                     if ec.conn.is_null() {
                         log_error("SKIP SEQ: conn became NULL after lock (TOCTOU race)");
-                    } else if crate::libpq_helpers::rust_pq_status(ec.conn)
-                        == CONNECTION_OK
-                    {
+                    } else if crate::libpq_helpers::rust_pq_status(ec.conn) == CONNECTION_OK {
                         let seq_res = crate::libpq_helpers::rust_pq_exec(
                             ec.conn,
                             b"SELECT nextval('plex.statistics_media_id_seq')\0".as_ptr()
@@ -114,11 +112,9 @@ pub extern "C" fn rust_step_write_should_skip_special_insert(
 
                     if !exec_conn.is_null() && !(&*exec_conn).conn.is_null() {
                         let ec2 = &mut *exec_conn;
-                        let _conn_guard =
-                            PthreadMutexGuard::lock(&mut ec2.mutex as *mut _);
+                        let _conn_guard = PthreadMutexGuard::lock(&mut ec2.mutex as *mut _);
                         if !ec2.conn.is_null()
-                            && crate::libpq_helpers::rust_pq_status(ec2.conn)
-                                == CONNECTION_OK
+                            && crate::libpq_helpers::rust_pq_status(ec2.conn) == CONNECTION_OK
                         {
                             let seq_res = crate::libpq_helpers::rust_pq_exec(
                                 ec2.conn,

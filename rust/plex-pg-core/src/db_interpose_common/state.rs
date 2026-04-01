@@ -87,7 +87,8 @@ pub(super) struct SendCharPtr(pub(super) *const c_char);
 unsafe impl Send for SendCharPtr {}
 unsafe impl Sync for SendCharPtr {}
 
-pub(super) static TRACE_LAST_QUERY_PATH: std::sync::OnceLock<SendCharPtr> = std::sync::OnceLock::new();
+pub(super) static TRACE_LAST_QUERY_PATH: std::sync::OnceLock<SendCharPtr> =
+    std::sync::OnceLock::new();
 
 pub(super) static SYMBOLS_VERIFIED: AtomicI32 = AtomicI32::new(0);
 
@@ -258,19 +259,13 @@ pub(super) static mut worker_running: c_int = 0;
 pub static SHIM_INITIALIZED: AtomicI32 = AtomicI32::new(0);
 pub static SHIM_PASSTHROUGH_ONLY: AtomicI32 = AtomicI32::new(0);
 
-
 pub(crate) static GLOBAL_VALUE_TYPE_CALLS: AtomicI64 = AtomicI64::new(0);
 pub(crate) static GLOBAL_COLUMN_TYPE_CALLS: AtomicI64 = AtomicI64::new(0);
 
-pub type CxaDemangleFn = unsafe extern "C" fn(
-    *const c_char,
-    *mut c_char,
-    *mut libc::size_t,
-    *mut c_int,
-) -> *mut c_char;
+pub type CxaDemangleFn =
+    unsafe extern "C" fn(*const c_char, *mut c_char, *mut libc::size_t, *mut c_int) -> *mut c_char;
 
-pub static CXA_DEMANGLE_FN: std::sync::OnceLock<Option<CxaDemangleFn>> =
-    std::sync::OnceLock::new();
+pub static CXA_DEMANGLE_FN: std::sync::OnceLock<Option<CxaDemangleFn>> = std::sync::OnceLock::new();
 
 #[no_mangle]
 pub(super) static mut shim_init_pid: libc::pid_t = 0;

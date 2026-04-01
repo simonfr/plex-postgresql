@@ -15,9 +15,22 @@ use super::STEP_RESULT_FALLBACK;
 
 pub(super) unsafe fn step_handle_cached_stmt(p_stmt: *mut sqlite3_stmt) -> c_int {
     let db = call_sqlite3_db_handle(p_stmt);
+    // Try handle-scoped lookup first. Fall back to any library connection
+    // ONLY if the db handle is a library/blobs database (not :memory: etc.).
     let mut pg_conn = crate::pg_client::rust_pg_find_connection(db);
     if pg_conn.is_null() {
-        pg_conn = crate::pg_client::rust_pg_find_any_library_connection();
+        let filename = crate::db_interpose_open::lookup_db_handle_filename(db as *const _);
+        let is_library = filename
+            .as_ref()
+            .map(|f| {
+                let bytes = f.as_bytes();
+                bytes.windows(b"com.plexapp.plugins.library".len())
+                    .any(|w| w == b"com.plexapp.plugins.library")
+            })
+            .unwrap_or(false);
+        if is_library {
+            pg_conn = crate::pg_client::rust_pg_find_any_library_connection();
+        }
     }
 
     if pg_conn.is_null() {
@@ -40,6 +53,18 @@ pub(super) unsafe fn step_handle_cached_stmt(p_stmt: *mut sqlite3_stmt) -> c_int
         call_sqlite3_sql(p_stmt)
     };
     let orig_sql = call_sqlite3_sql(p_stmt);
+
+    // SQLite passthrough (fts3_tokenizer, icu_load_collation, load_extension)
+    // must not be routed to PG via the cached path. Fall through to orig_step.
+    if !sql.is_null() {
+        let sql_str = crate::db_interpose_helpers::cstr_to_str_or_empty(sql);
+        if crate::pg_config::is_sqlite_passthrough_str(sql_str) {
+            if !expanded_sql.is_null() {
+                call_sqlite3_free(expanded_sql as *mut c_void);
+            }
+            return STEP_RESULT_FALLBACK;
+        }
+    }
 
     if !sql.is_null()
         && crate::pg_config::pg_config_is_write_operation(sql) != 0

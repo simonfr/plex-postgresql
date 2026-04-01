@@ -85,9 +85,7 @@ pub(super) unsafe fn lock_exec_connection(
             crate::pg_client::rust_pool_touch_connection(*exec_conn as *const c_void);
             let ec2 = &mut **exec_conn;
             conn_guard = PthreadMutexGuard::lock(&mut ec2.mutex as *mut _);
-            if ec2.conn.is_null()
-                || ec2.streaming_active.load(Ordering::SeqCst) != 0
-            {
+            if ec2.conn.is_null() || ec2.streaming_active.load(Ordering::SeqCst) != 0 {
                 log_error("STEP SELECT: alt conn also unavailable");
                 conn_guard.unlock();
                 *stmt_guard = None; // unlock
@@ -132,8 +130,7 @@ pub(super) unsafe fn ensure_connection_ready(
     ));
     log_error(&format!(
         "  Connection: {:p}, PGconn: {:p}",
-        exec_conn,
-        ec.conn
+        exec_conn, ec.conn
     ));
     log_error(&format!("  PG Error: {}", cstr_to_str(pg_err)));
     log_error(&format!("  SQL: {:.100}", cstr_to_str((&*pg_stmt).sql)));

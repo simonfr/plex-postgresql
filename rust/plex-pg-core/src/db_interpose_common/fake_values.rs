@@ -36,9 +36,7 @@ pub(crate) static FAKE_VALUES: Mutex<FakeValueState> = Mutex::new(FakeValueState
     next: 0,
 });
 
-pub fn rust_pg_check_fake_value(
-    p_val: *mut crate::ffi_types::sqlite3_value,
-) -> *mut PgFakeValue {
+pub fn rust_pg_check_fake_value(p_val: *mut crate::ffi_types::sqlite3_value) -> *mut PgFakeValue {
     if p_val.is_null() {
         return ptr::null_mut();
     }

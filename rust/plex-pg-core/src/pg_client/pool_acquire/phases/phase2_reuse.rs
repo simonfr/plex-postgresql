@@ -1,6 +1,8 @@
 use crate::ffi_types::PgConnection;
 
-use super::super::super::connection_helpers::{conn_is_pg_active_ptr, conn_is_streaming_active_ptr};
+use super::super::super::connection_helpers::{
+    conn_is_pg_active_ptr, conn_is_streaming_active_ptr,
+};
 use super::super::super::connection_lifecycle::{get_txn_status, reconnect_conn, reset_conn};
 use super::super::super::rust_stmt_cache_clear;
 use super::super::super::session::{exec_simple, PQTRANS_INERROR, PQTRANS_INTRANS};

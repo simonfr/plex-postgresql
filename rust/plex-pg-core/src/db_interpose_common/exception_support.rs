@@ -44,14 +44,16 @@ pub(super) fn log_exception_object_dump(thrown_exception: *mut c_void, bytes: us
     if n <= 0 {
         log_info_lazy!(
             "EXC_META_DUMP: read failed addr=0x{:x} bytes={}",
-            thrown_exception as usize, max_bytes
+            thrown_exception as usize,
+            max_bytes
         );
         return Vec::new();
     }
     let used = n as usize;
     log_info_lazy!(
         "EXC_META_DUMP: addr=0x{:x} bytes={}",
-        thrown_exception as usize, used
+        thrown_exception as usize,
+        used
     );
 
     let data = &buf[..used];
@@ -146,7 +148,8 @@ pub(super) fn log_exception_string_scan(base: *mut c_void, bytes: usize) {
     if n <= 0 {
         log_info_lazy!(
             "EXC_META_SCAN: read failed addr=0x{:x} bytes={}",
-            base as usize, max_bytes
+            base as usize,
+            max_bytes
         );
         return;
     }
@@ -164,10 +167,7 @@ pub(super) fn log_exception_string_scan(base: *mut c_void, bytes: usize) {
             let len = idx - s;
             if len >= 12 {
                 let seq = String::from_utf8_lossy(&data[s..idx]).to_string();
-                log_info_lazy!(
-                    "EXC_META_SCAN: +0x{:04x} len={} '{}'",
-                    s, len, seq
-                );
+                log_info_lazy!("EXC_META_SCAN: +0x{:04x} len={} '{}'", s, len, seq);
                 sequences += 1;
                 if sequences >= 12 {
                     log_info("EXC_META_SCAN: truncated (limit 12)");
@@ -181,10 +181,7 @@ pub(super) fn log_exception_string_scan(base: *mut c_void, bytes: usize) {
             let len = data.len().saturating_sub(s);
             if len >= 12 {
                 let seq = String::from_utf8_lossy(&data[s..]).to_string();
-                log_info_lazy!(
-                    "EXC_META_SCAN: +0x{:04x} len={} '{}'",
-                    s, len, seq
-                );
+                log_info_lazy!("EXC_META_SCAN: +0x{:04x} len={} '{}'", s, len, seq);
             }
         }
     }

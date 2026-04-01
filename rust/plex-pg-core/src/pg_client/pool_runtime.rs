@@ -61,10 +61,7 @@ pub(super) fn pool_release_for_db_inner(db_handle: usize) {
 
                     slot.owner_thread.store(0, Ordering::Release);
                     slot.state.store(SLOT_FREE, Ordering::Release);
-                    log_info_lazy!(
-                        "Pool: releasing slot {} for db {:x}",
-                        slot_idx, db_handle
-                    );
+                    log_info_lazy!("Pool: releasing slot {} for db {:x}", slot_idx, db_handle);
                 }
             }
         }

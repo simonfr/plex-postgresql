@@ -50,7 +50,30 @@ pub(crate) fn should_redirect_str(filename: &str, passthrough: bool) -> bool {
         || filename.contains("com.plexapp.plugins.library.blobs.db")
 }
 
+/// Returns true if the SQL is a SQLite engine configuration call that must
+/// execute on the real SQLite but should NOT be routed to PostgreSQL.
+/// These statements configure SQLite's internal runtime (tokenizers, collations,
+/// extensions) and are invisible to PG. The shim should not register a PgStmt
+/// for them — prepare and step go directly through the real SQLite.
+pub(crate) fn is_sqlite_passthrough_str(sql: &str) -> bool {
+    let trimmed = strip_leading_ws_and_sql_comments(sql);
+    if trimmed.is_empty() {
+        return false;
+    }
+    let lower = trimmed.to_lowercase();
+    lower.starts_with("icu_load_collation")
+        || lower.starts_with("fts3_tokenizer")
+        || lower.starts_with("select load_extension")
+        || lower.starts_with("select fts3_tokenizer")
+        || lower.starts_with("select icu_load_collation")
+        || lower.contains("sqlite_master")
+        || lower.contains("sqlite_schema")
+}
+
 /// Returns true if the SQL statement should be skipped (treated as a no-op).
+/// Step returns SQLITE_DONE without executing anything.
+/// NOTE: SQLite engine config (fts3_tokenizer, icu_load_collation, load_extension)
+/// is NOT in this list — those are sqlite-passthrough (execute on real SQLite).
 pub(crate) fn should_skip_sql_str(sql: &str) -> bool {
     let trimmed = strip_leading_ws_and_sql_comments(sql);
     if trimmed.is_empty() {
@@ -61,16 +84,14 @@ pub(crate) fn should_skip_sql_str(sql: &str) -> bool {
 
     // A) PREFIX patterns (case-insensitive, after stripping leading whitespace)
     const PREFIX_PATTERNS: &[&str] = &[
-        "icu_load_collation",
-        "fts3_tokenizer",
-        "select load_extension",
         "vacuum",
         "pragma",
         "reindex",
         "analyze sqlite_",
         "attach database",
         "detach database",
-        // Transaction control — skip PG routing, let SQLite handle (matches C shim)
+        // Transaction control — skipped entirely (is_pg=3, step returns DONE).
+        // PG runs in autocommit mode: each statement commits immediately.
         "begin",
         "end",
         "commit",
@@ -87,11 +108,7 @@ pub(crate) fn should_skip_sql_str(sql: &str) -> bool {
 
     // B) ANYWHERE patterns (case-insensitive substring match)
     const ANYWHERE_PATTERNS: &[&str] = &[
-        "sqlite_schema",
-        "sqlite_master",
-        "fts3_tokenizer",
         "spellfix",
-        "icu_load_collation",
         "set $2=$2",
         "set $1=$1",
         "set :2=:2",
@@ -123,13 +140,28 @@ pub(crate) fn should_skip_sql_str(sql: &str) -> bool {
     false
 }
 
-/// Returns true if the SQL is a write operation (INSERT, UPDATE, DELETE, REPLACE).
+/// Returns true if the SQL is a write operation (INSERT, UPDATE, DELETE, REPLACE)
+/// or a DDL operation (ALTER, CREATE, DROP) that should be routed to PostgreSQL.
+/// DDL is included here so that migrations (ALTER TABLE ADD COLUMN, CREATE INDEX, etc.)
+/// go through the PG path with a dummy shadow, instead of hitting real SQLite where
+/// the schema may be out of sync.
 pub(crate) fn is_write_operation_str(sql: &str) -> bool {
     let lower = strip_leading_ws_and_sql_comments(sql).to_lowercase();
     lower.starts_with("insert")
         || lower.starts_with("update")
         || lower.starts_with("delete")
         || lower.starts_with("replace")
+        || lower.starts_with("alter")
+        || lower.starts_with("create")
+        || lower.starts_with("drop")
+}
+
+/// Returns true if the SQL is a DDL operation (ALTER, CREATE, DROP).
+/// Used to force PG-only routing for schema changes — shadow SQLite
+/// must never see DDL since it may lack tables/columns that PG has.
+pub(crate) fn is_ddl_str(sql: &str) -> bool {
+    let lower = strip_leading_ws_and_sql_comments(sql).to_lowercase();
+    lower.starts_with("alter") || lower.starts_with("create") || lower.starts_with("drop")
 }
 
 /// Returns true if the SQL is a read operation (SELECT).
@@ -326,11 +358,7 @@ fn init_config_once() {
         let schema = unsafe { cstr_to_str_or_empty(cfg.schema.as_ptr() as *const c_char) };
         let msg = format!(
             "PostgreSQL config: {}@{}:{}/{} (schema: {})",
-            user,
-            host,
-            cfg.port,
-            db,
-            schema
+            user, host, cfg.port, db, schema
         );
         if let Ok(cs) = CString::new(msg) {
             crate::pg_logging::rust_logging_write(1, cs.as_ptr());
@@ -355,7 +383,8 @@ pub extern "C" fn pg_config_get() -> *mut PgConnConfig {
 
 #[no_mangle]
 pub extern "C" fn should_redirect(filename: *const c_char) -> c_int {
-    let passthrough = crate::db_interpose_common::SHIM_PASSTHROUGH_ONLY.load(std::sync::atomic::Ordering::Acquire);
+    let passthrough = crate::db_interpose_common::SHIM_PASSTHROUGH_ONLY
+        .load(std::sync::atomic::Ordering::Acquire);
     pg_config_should_redirect(filename, passthrough)
 }
 
@@ -534,15 +563,20 @@ mod tests {
     }
 
     #[test]
-    fn skip_icu_load_collation() {
-        assert!(should_skip_sql_str(
+    fn passthrough_icu_load_collation() {
+        assert!(!should_skip_sql_str(
+            "icu_load_collation('en_US', 'icu_root')"
+        ));
+        assert!(is_sqlite_passthrough_str(
             "icu_load_collation('en_US', 'icu_root')"
         ));
     }
 
     #[test]
-    fn skip_fts3_tokenizer() {
-        assert!(should_skip_sql_str("fts3_tokenizer('simple')"));
+    fn passthrough_fts3_tokenizer() {
+        assert!(!should_skip_sql_str("fts3_tokenizer('simple')"));
+        assert!(is_sqlite_passthrough_str("fts3_tokenizer('simple')"));
+        assert!(is_sqlite_passthrough_str("SELECT fts3_tokenizer(?, ?)"));
     }
 
     #[test]
@@ -607,20 +641,27 @@ mod tests {
     }
 
     #[test]
-    fn skip_select_load_extension() {
-        assert!(should_skip_sql_str("SELECT load_extension('foo')"));
+    fn passthrough_select_load_extension() {
+        assert!(!should_skip_sql_str("SELECT load_extension('foo')"));
+        assert!(is_sqlite_passthrough_str("SELECT load_extension('foo')"));
     }
 
     #[test]
-    fn skip_sqlite_master_anywhere() {
-        assert!(should_skip_sql_str(
+    fn passthrough_sqlite_master() {
+        assert!(!should_skip_sql_str(
+            "SELECT * FROM sqlite_master WHERE type='table'"
+        ));
+        assert!(is_sqlite_passthrough_str(
             "SELECT * FROM sqlite_master WHERE type='table'"
         ));
     }
 
     #[test]
-    fn skip_sqlite_schema_anywhere() {
-        assert!(should_skip_sql_str(
+    fn passthrough_sqlite_schema() {
+        assert!(!should_skip_sql_str(
+            "SELECT * FROM sqlite_schema WHERE type='table'"
+        ));
+        assert!(is_sqlite_passthrough_str(
             "SELECT * FROM sqlite_schema WHERE type='table'"
         ));
     }
@@ -742,8 +783,13 @@ mod tests {
     }
 
     #[test]
-    fn write_create_is_not_write() {
-        assert!(!is_write_operation_str("CREATE TABLE t (id INTEGER)"));
+    fn write_ddl_is_write() {
+        assert!(is_write_operation_str("CREATE TABLE t (id INTEGER)"));
+        assert!(is_write_operation_str("CREATE INDEX idx ON t(col)"));
+        assert!(is_write_operation_str("ALTER TABLE t ADD COLUMN c TEXT"));
+        assert!(is_write_operation_str("DROP TABLE t"));
+        assert!(is_write_operation_str("drop index idx"));
+        assert!(is_write_operation_str("  ALTER TABLE t ADD c TEXT"));
     }
 
     #[test]

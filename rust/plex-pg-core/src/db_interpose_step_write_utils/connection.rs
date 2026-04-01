@@ -13,9 +13,8 @@ pub extern "C" fn rust_step_pick_thread_connection(
         return base_conn;
     }
 
-    let thread_conn =
-        unsafe { crate::pg_client::rust_pool_get_connection(bc.db_path.as_ptr()) }
-            as *mut PgConnection;
+    let thread_conn = unsafe { crate::pg_client::rust_pool_get_connection(bc.db_path.as_ptr()) }
+        as *mut PgConnection;
     if !thread_conn.is_null() {
         let tc = unsafe { &*thread_conn };
         if tc.is_pg_active != 0 && !tc.conn.is_null() {
@@ -56,9 +55,8 @@ pub extern "C" fn rust_step_write_prepare_connection(
             if !retry_handle.is_null() {
                 let rh = &*retry_handle;
                 if rh.db_path[0] != 0 {
-                    exec_conn =
-                        crate::pg_client::rust_pool_get_connection(rh.db_path.as_ptr())
-                            as *mut PgConnection;
+                    exec_conn = crate::pg_client::rust_pool_get_connection(rh.db_path.as_ptr())
+                        as *mut PgConnection;
                 }
             }
             if exec_conn.is_null() || (&*exec_conn).conn.is_null() {
@@ -120,9 +118,7 @@ pub extern "C" fn rust_step_write_prepare_connection(
                 crate::pg_client::rust_pool_touch_connection(exec_conn as *const c_void);
                 let ec2 = &mut *exec_conn;
                 conn_guard = PthreadMutexGuard::lock(&mut ec2.mutex as *mut _);
-                if ec2.conn.is_null()
-                    || ec2.streaming_active.load(Ordering::SeqCst) != 0
-                {
+                if ec2.conn.is_null() || ec2.streaming_active.load(Ordering::SeqCst) != 0 {
                     log_error("STEP WRITE: alt conn also unavailable");
                     conn_guard.unlock();
                     stmt.write_executed = 1;
@@ -163,17 +159,13 @@ pub extern "C" fn rust_step_write_prepare_connection(
             ));
             log_error(&format!(
                 "  Connection: {:p}, PGconn: {:p}",
-                exec_conn,
-                ec.conn
+                exec_conn, ec.conn
             ));
             log_error(&format!(
                 "  PG Error: {}",
                 cstr_to_string_or(pg_err, "(null)")
             ));
-            log_error(&format!(
-                "  SQL: {}",
-                cstr_prefix(stmt.sql, 100, "(null)")
-            ));
+            log_error(&format!("  SQL: {}", cstr_prefix(stmt.sql, 100, "(null)")));
             platform_print_backtrace(
                 b"CONNECTION_BAD in STEP WRITE\0".as_ptr() as *const c_char,
                 1,

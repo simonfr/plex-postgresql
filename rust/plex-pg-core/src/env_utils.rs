@@ -1,6 +1,11 @@
 use std::ffi::CStr;
 use std::os::raw::c_char;
 
+/// Centralized check for the PLEX_PG_TRACE_LOADONE diagnostic flag.
+pub fn loadone_trace_enabled() -> bool {
+    env_truthy(b"PLEX_PG_TRACE_LOADONE\0")
+}
+
 pub fn env_truthy(name: &[u8]) -> bool {
     unsafe {
         let val = libc::getenv(name.as_ptr() as *const c_char);

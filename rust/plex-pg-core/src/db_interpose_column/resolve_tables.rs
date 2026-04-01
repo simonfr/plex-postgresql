@@ -123,10 +123,7 @@ pub(super) fn resolve_column_tables_impl(
 
         log_debug("RESOLVE_TABLES: alternate connection lookup explicitly enabled");
         let alt_conn = unsafe {
-            pg_get_thread_connection_excluding(
-                pc.db_path.as_ptr(),
-                pg_conn as *const c_void,
-            )
+            pg_get_thread_connection_excluding(pc.db_path.as_ptr(), pg_conn as *const c_void)
         };
         if alt_conn.is_null()
             || unsafe { (&*alt_conn).conn.is_null() }
@@ -166,8 +163,7 @@ pub(super) fn resolve_column_tables_impl(
 
     let rc = unsafe { &mut *resolve_conn };
     let _conn_guard = unsafe { PthreadMutexGuard::lock(&mut rc.mutex as *mut _) };
-    let res =
-        crate::libpq_helpers::rust_pq_exec(rc.conn, query_cs.as_ptr());
+    let res = crate::libpq_helpers::rust_pq_exec(rc.conn, query_cs.as_ptr());
 
     if res.is_null() || crate::libpq_helpers::rust_pq_result_status(res) != PGRES_TUPLES_OK {
         log_error(&format!(
@@ -175,10 +171,7 @@ pub(super) fn resolve_column_tables_impl(
             if res.is_null() {
                 "NULL result".to_string()
             } else {
-                cstr_to_string_or(
-                    crate::libpq_helpers::rust_pq_error_message(rc.conn),
-                    "?",
-                )
+                cstr_to_string_or(crate::libpq_helpers::rust_pq_error_message(rc.conn), "?")
             }
         ));
         if !res.is_null() {
@@ -261,7 +254,9 @@ pub(super) fn resolve_column_tables_impl(
     pg_stmt_ref.col_tables_resolved = 1;
     log_info_lazy!(
         "RESOLVE_TABLES: Resolved {} columns ({} from cache, {} from query)",
-        num_cols, cache_hits, num_unique_tables
+        num_cols,
+        cache_hits,
+        num_unique_tables
     );
     0
 }

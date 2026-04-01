@@ -93,6 +93,7 @@ RUN ARCH=$(uname -m) && \
         /usr/local/lib/plex-postgresql/libc.musl-${MUSL_ARCH}.so.1
 
 COPY --from=builder /libs/*.so* /usr/local/lib/plex-postgresql/
+COPY --from=builder /libs/subreaper /usr/local/bin/subreaper
 
 # Copy schema files
 COPY schema/plex_schema.sql /usr/local/lib/plex-postgresql/
@@ -101,12 +102,19 @@ COPY schema/sqlite_column_types.sql /usr/local/lib/plex-postgresql/
 COPY schema/pg_compat_functions.sql /usr/local/lib/plex-postgresql/
 COPY scripts/migrate_lib.sh /usr/local/lib/plex-postgresql/
 COPY scripts/migrate_table.py /usr/local/lib/plex-postgresql/
+COPY scripts/seed_shadow_table_from_pg.py /usr/local/lib/plex-postgresql/
 COPY scripts/doctor.sh /usr/local/lib/plex-postgresql/
 
 # Install cont-init.d script (runs BEFORE Plex starts, WITHOUT LD_PRELOAD)
 # Numbered 39 so it runs before 40-plex-first-run
 COPY scripts/standalone-entrypoint.sh /etc/cont-init.d/39-plex-postgresql
 RUN chmod +x /etc/cont-init.d/39-plex-postgresql
+
+# s6v2 finish script: when PMS exits after vfork/re-exec, check if a
+# re-exec'd child is still running. If so, wait instead of restarting.
+RUN printf '#!/bin/bash\nif pgrep -f "Plex Media Server" >/dev/null 2>&1 && nc -z localhost 32400 2>/dev/null; then\n  echo "[plex-pg] PMS re-exec detected, waiting for child process..."\n  while pgrep -f "Plex Media Server" >/dev/null 2>&1; do sleep 5; done\nfi\n' \
+        > /etc/services.d/plex/finish && \
+    chmod +x /etc/services.d/plex/finish
 
 # Inject shim env only for the actual Plex binary, not wrapper/helper processes.
 RUN printf '%s\n' \

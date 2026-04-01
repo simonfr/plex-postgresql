@@ -419,6 +419,86 @@ fn quote_if_not_exists_unique_index() {
 }
 
 #[test]
+fn quote_single_quoted_create_index() {
+    let t = translate("CREATE INDEX 'idx_q' ON 'devices' ('identifier')").unwrap();
+    let sql = &t.sql;
+    assert!(
+        sql.contains("\"idx_q\""),
+        "expected double-quoted index name, got: {}",
+        sql
+    );
+    assert!(
+        sql.contains("\"devices\""),
+        "expected double-quoted table name, got: {}",
+        sql
+    );
+    assert!(
+        sql.contains("(\"identifier\")"),
+        "expected double-quoted index column, got: {}",
+        sql
+    );
+}
+
+#[test]
+fn quote_single_quoted_create_index_with_collation() {
+    let t = translate(
+        "CREATE INDEX 'index_title_sort_naturalsort' ON 'metadata_items' ('title_sort' COLLATE naturalsort)",
+    )
+    .unwrap();
+    let sql = &t.sql;
+    assert!(
+        sql.contains("\"index_title_sort_naturalsort\""),
+        "expected double-quoted index name, got: {}",
+        sql
+    );
+    assert!(
+        sql.contains("\"metadata_items\""),
+        "expected double-quoted table name, got: {}",
+        sql
+    );
+    assert!(
+        sql.contains("\"title_sort\""),
+        "expected double-quoted index column, got: {}",
+        sql
+    );
+}
+
+#[test]
+fn quote_single_quoted_unique_multi_column_index() {
+    let t = translate(
+        "CREATE UNIQUE INDEX 'idx_sync' ON 'synced_metadata_items' ('sync_list_id', 'metadata_item_id')",
+    )
+    .unwrap();
+    let sql = &t.sql;
+    assert!(
+        sql.contains("\"idx_sync\""),
+        "expected double-quoted index name, got: {}",
+        sql
+    );
+    assert!(
+        sql.contains("\"synced_metadata_items\""),
+        "expected double-quoted table name, got: {}",
+        sql
+    );
+    assert!(
+        sql.contains("(\"sync_list_id\", \"metadata_item_id\")"),
+        "expected double-quoted index columns, got: {}",
+        sql
+    );
+}
+
+#[test]
+fn quote_single_quoted_drop_index() {
+    let t = translate("DROP INDEX IF EXISTS 'index_title_sort_naturalsort'").unwrap();
+    let sql = &t.sql;
+    assert!(
+        sql.contains("\"index_title_sort_naturalsort\""),
+        "expected double-quoted drop index target, got: {}",
+        sql
+    );
+}
+
+#[test]
 fn quote_if_not_exists_already() {
     let t = translate("CREATE TABLE IF NOT EXISTS foo (id INT)").unwrap();
     let up = t.sql.to_uppercase();

@@ -19,7 +19,9 @@ pub(super) fn value_int_impl(p_val: *mut sqlite3_value) -> c_int {
     }
 
     let Some(ctx) = (unsafe { load_fake_value_context(p_val, "VALUE_INT") }) else {
-        return get_orig_sqlite3_value_int().map(|f| unsafe { f(p_val) }).unwrap_or(0);
+        return get_orig_sqlite3_value_int()
+            .map(|f| unsafe { f(p_val) })
+            .unwrap_or(0);
     };
 
     let _call_num = VALUE_INT_CALLS.fetch_add(1, Ordering::Relaxed);
@@ -85,7 +87,9 @@ pub(super) fn value_int64_impl(p_val: *mut sqlite3_value) -> i64 {
     }
 
     let Some(ctx) = (unsafe { load_fake_value_context(p_val, "VALUE_INT64") }) else {
-        return get_orig_sqlite3_value_int64().map(|f| unsafe { f(p_val) }).unwrap_or(0);
+        return get_orig_sqlite3_value_int64()
+            .map(|f| unsafe { f(p_val) })
+            .unwrap_or(0);
     };
 
     let pg_stmt_ref = unsafe { &mut *ctx.pg_stmt };
@@ -107,7 +111,9 @@ pub(super) fn value_double_impl(p_val: *mut sqlite3_value) -> f64 {
     }
 
     let Some(ctx) = (unsafe { load_fake_value_context(p_val, "VALUE_DOUBLE") }) else {
-        return get_orig_sqlite3_value_double().map(|f| unsafe { f(p_val) }).unwrap_or(0.0);
+        return get_orig_sqlite3_value_double()
+            .map(|f| unsafe { f(p_val) })
+            .unwrap_or(0.0);
     };
 
     let pg_stmt_ref = unsafe { &mut *ctx.pg_stmt };
@@ -129,7 +135,9 @@ pub(super) fn value_bytes_impl(p_val: *mut sqlite3_value) -> c_int {
     }
 
     let Some(ctx) = (unsafe { load_fake_value_context(p_val, "VALUE_BYTES") }) else {
-        return get_orig_sqlite3_value_bytes().map(|f| unsafe { f(p_val) }).unwrap_or(0);
+        return get_orig_sqlite3_value_bytes()
+            .map(|f| unsafe { f(p_val) })
+            .unwrap_or(0);
     };
 
     let pg_stmt_ref = unsafe { &mut *ctx.pg_stmt };
@@ -156,7 +164,9 @@ pub(super) fn value_blob_impl(p_val: *mut sqlite3_value) -> *const c_void {
     }
 
     let Some(ctx) = (unsafe { load_fake_value_context(p_val, "VALUE_BLOB") }) else {
-        return get_orig_sqlite3_value_blob().map(|f| unsafe { f(p_val) }).unwrap_or(ptr::null());
+        return get_orig_sqlite3_value_blob()
+            .map(|f| unsafe { f(p_val) })
+            .unwrap_or(ptr::null());
     };
 
     let pg_stmt_ref = unsafe { &mut *ctx.pg_stmt };

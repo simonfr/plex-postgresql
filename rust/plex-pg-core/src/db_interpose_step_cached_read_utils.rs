@@ -245,10 +245,7 @@ pub extern "C" fn rust_step_cached_read_execute(
                 );
             } else {
                 let err = cstr_to_str(crate::libpq_helpers::rust_pq_error_message(c.conn));
-                log_debug_lazy!(
-                    "CACHED READ prepare failed, using PQexec: {}",
-                    err
-                );
+                log_debug_lazy!("CACHED READ prepare failed, using PQexec: {}", err);
                 crate::libpq_helpers::rust_pq_clear(prep_res);
                 s.result = crate::libpq_helpers::rust_pq_exec(c.conn, translated_sql);
             }
