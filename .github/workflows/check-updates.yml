@@ -42,7 +42,7 @@ jobs:
           
           VERSION_TAG="v${{ steps.check.outputs.version }}"
           
-          git add VERSION .github/upstream-digests.json
+          git add VERSION .github/upstream-digests.json CHANGELOG.md
           git commit -m "chore: bump version to ${VERSION_TAG} for upstream updates"
           
           # Pull and rebase to prevent conflicts if main updated recently
