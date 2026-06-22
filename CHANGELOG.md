@@ -6,6 +6,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [Unreleased]
+
+### Added
+- Automated check for upstream Docker base image updates (`linuxserver/plex:latest` and `plexinc/pms-docker:latest`) that triggers automatic patch releases and builds.
+
+### Fixed
+- Derive `Flags.dat` path from `$SQLITE_DB` for non-`/config` mount layouts during data migration.
+
+## [1.3.1] - 2026-04-01
+
+### Fixed
+- Prevent `BindAddrInUseException` crash loop in Docker via a `subreaper` wrapper.
+
+## [1.3.0] - 2026-04-01
+
+### Changed
+- Added German, Esperanto, Irish, and Dutch README documentations with flag emoji links.
+
+### Fixed
+- Resolved `LD_PRELOAD` deadlock, DDL routing, and SQLite passthrough.
+- Fixed `bad_cast` issues by handling `dt_integer(8)` mapping to `BIGINT` decltype.
+- Corrected column type/decltype SQLite semantics per the SOCI database connector contract.
+- Added automatic clearing of `Flags.dat` after data migration to prevent UUID-related crashes.
+- Added `pg_trgm` extension checks and stderr logging to all migration paths.
+- Allowed wildcard expansion in `GROUP BY` clause for joined tables.
+- Mapped `TIMESTAMP`/`TIMESTAMPTZ` OIDs to `SQLITE_INTEGER`.
+- Fixed SQL translator backtick parsing in `ON CONFLICT` and FTS column names.
+- Fixed various compiler and linter warnings (Clippy `let_and_return`, `dead_code`).
+
 ## [1.2.0] - 2026-03-28
 
 ### Changed

@@ -4,9 +4,11 @@ import sys
 import json
 import urllib.request
 import urllib.error
+import datetime
 
 DIGESTS_FILE = ".github/upstream-digests.json"
 VERSION_FILE = "VERSION"
+CHANGELOG_FILE = "CHANGELOG.md"
 
 IMAGES = {
     "linuxserver/plex:latest": "linuxserver/plex",
@@ -46,6 +48,55 @@ def get_remote_digest(repo, tag="latest"):
     except Exception as e:
         print(f"Error fetching digest for {repo}:{tag}: {e}", file=sys.stderr)
         return None
+
+def update_changelog(new_version):
+    if not os.path.exists(CHANGELOG_FILE):
+        print(f"Warning: {CHANGELOG_FILE} not found. Skipping changelog update.")
+        return
+
+    with open(CHANGELOG_FILE, "r") as f:
+        content = f.read()
+
+    unreleased_marker = "## [Unreleased]"
+    if unreleased_marker not in content:
+        print("Warning: '## [Unreleased]' not found in CHANGELOG.md. Skipping changelog update.")
+        return
+
+    parts = content.split(unreleased_marker, 1)
+    before = parts[0] + unreleased_marker + "\n\n"
+    after = parts[1]
+
+    next_version_index = after.find("## [")
+    if next_version_index != -1:
+        unreleased_notes = after[:next_version_index].strip()
+        rest_of_changelog = after[next_version_index:]
+    else:
+        unreleased_notes = after.strip()
+        rest_of_changelog = ""
+
+    today = datetime.date.today().isoformat()
+    new_version_header = f"## [{new_version}] - {today}"
+    image_update_note = "### Changed\n- Updated upstream base Docker images (linuxserver/plex:latest / plexinc/pms-docker:latest)."
+
+    if unreleased_notes:
+        if "### Changed" in unreleased_notes:
+            changed_parts = unreleased_notes.split("### Changed", 1)
+            new_notes = (
+                changed_parts[0] + 
+                "### Changed\n- Updated upstream base Docker images (linuxserver/plex:latest / plexinc/pms-docker:latest).\n" + 
+                changed_parts[1].lstrip()
+            )
+        else:
+            new_notes = image_update_note + "\n\n" + unreleased_notes
+    else:
+        new_notes = image_update_note
+
+    new_content = before + new_version_header + "\n\n" + new_notes.strip() + "\n\n" + rest_of_changelog
+
+    with open(CHANGELOG_FILE, "w") as f:
+        f.write(new_content)
+
+    print("CHANGELOG.md updated successfully.")
 
 def bump_patch_version(version_str):
     parts = version_str.strip().split(".")
@@ -113,6 +164,10 @@ def main():
             f.write("\n")
 
         print("Updates saved.")
+        try:
+            update_changelog(new_version)
+        except Exception as e:
+            print(f"Error updating changelog: {e}", file=sys.stderr)
         
         # Set GitHub Action outputs
         if "GITHUB_OUTPUT" in os.environ:

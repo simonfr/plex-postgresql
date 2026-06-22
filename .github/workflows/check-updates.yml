@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 jobs:
   check-updates:
@@ -41,7 +42,7 @@ jobs:
           
           VERSION_TAG="v${{ steps.check.outputs.version }}"
           
-          git add VERSION .github/upstream-digests.json
+          git add VERSION .github/upstream-digests.json CHANGELOG.md
           git commit -m "chore: bump version to ${VERSION_TAG} for upstream updates"
           
           # Pull and rebase to prevent conflicts if main updated recently
@@ -57,4 +58,4 @@ jobs:
     if: needs.check-updates.outputs.updated == 'true'
     uses: ./.github/workflows/docker-publish.yml
     with:
-      version: v${{ needs.check-updates.outputs.version }}
+      version: ${{ format('v{0}', needs.check-updates.outputs.version) }}
