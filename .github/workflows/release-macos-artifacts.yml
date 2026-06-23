@@ -10,6 +10,12 @@ on:
         description: "Existing release tag (for example: v0.9.16)"
         required: true
         type: string
+  workflow_call:
+    inputs:
+      tag:
+        description: "Existing release tag (for example: v0.9.16)"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -23,7 +29,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Install PostgreSQL headers/libs
         run: |
@@ -72,17 +78,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Determine tag
         id: tag
         run: |
           set -eu
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "value=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "value=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
-          fi
+          echo "value=${{ inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
 
       - name: Download build artifacts
         uses: actions/download-artifact@v4

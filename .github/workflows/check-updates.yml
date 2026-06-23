@@ -59,3 +59,19 @@ jobs:
     uses: ./.github/workflows/docker-publish.yml
     with:
       version: ${{ format('v{0}', needs.check-updates.outputs.version) }}
+
+  release-linux:
+    name: Release Linux Artifacts
+    needs: check-updates
+    if: needs.check-updates.outputs.updated == 'true'
+    uses: ./.github/workflows/release-linux-artifacts.yml
+    with:
+      tag: ${{ format('v{0}', needs.check-updates.outputs.version) }}
+
+  release-macos:
+    name: Release macOS Artifacts
+    needs: check-updates
+    if: needs.check-updates.outputs.updated == 'true'
+    uses: ./.github/workflows/release-macos-artifacts.yml
+    with:
+      tag: ${{ format('v{0}', needs.check-updates.outputs.version) }}
